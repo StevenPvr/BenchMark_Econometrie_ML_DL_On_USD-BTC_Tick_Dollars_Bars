@@ -1,0 +1,110 @@
+# Méthodologie du Module GARCH Numerical Test
+
+## Objectif
+
+Le module `garch_numerical_test` effectue des tests statistiques préliminaires sur les résidus ARIMA pour détecter la présence d'effets ARCH/GARCH avant l'estimation des modèles de volatilité conditionnelle. Il constitue une étape de diagnostic quantitative essentielle dans le pipeline GARCH.
+
+## Sous-modules actifs
+
+- `main.py` : Orchestration CLI des tests numériques
+- `garch_numerical.py` : Implémentation des tests statistiques principaux
+- `helpers.py` : Fonctions utilitaires pour les calculs
+- `utils.py` : Utilitaires divers et formatage des résultats
+
+## Déroulé du pipeline (`run_numerical_tests`)
+
+1. **Chargement des résidus**
+   - Récupération des résidus du modèle ARIMA
+   - Validation de la série temporelle (pas de NaN, stationnarité)
+   - Préparation des données pour les tests
+
+2. **Tests sur les résidus bruts**
+   - **Ljung-Box test** : Détection d'autocorrélation dans les résidus
+   - **ARCH-LM test** : Test de Lagrange Multiplier pour effets ARCH
+   - **Portmanteau tests** : Tests généralisés d'autocorrélation
+
+3. **Tests sur les carrés des résidus**
+   - **Ljung-Box sur ε²** : Détection d'effets ARCH/GARCH
+   - **McLeod-Li test** : Test généralisé d'hétéroscédasticité
+   - **ARCH-LM sur ε²** : Confirmation d'hétéroscédasticité conditionnelle
+
+4. **Analyse des résultats**
+   - Agrégation des p-values de tous les tests
+   - Calcul d'un score composite de présence GARCH
+   - Génération de recommandations
+
+## Tests statistiques implémentés
+
+### Tests de Ljung-Box
+```
+Q = n(n+2) × Σ[(ρ_k²)/(n-k)] pour k=1 à m
+```
+
+- **H₀** : Pas d'autocorrélation aux lags testés
+- **H₁** : Présence d'autocorrélation
+- **Rejet H₀** : p-value < α (typiquement 0.05)
+
+### Tests ARCH-LM (Engle)
+```
+LM = n × R² du modèle auxiliaire : ε_t² = α₀ + Σ α_i ε_{t-i}²
+```
+
+- **H₀** : Pas d'effets ARCH (homoscédasticité)
+- **H₁** : Présence d'effets ARCH (hétéroscédasticité)
+- **Rejet H₀** : Indique la nécessité d'un modèle GARCH
+
+### Tests McLeod-Li
+- Extension du Ljung-Box aux carrés des résidus
+- Détection d'hétéroscédasticité d'ordre supérieur
+- Plus puissant pour détecter les effets ARCH/GARCH complexes
+
+## Paramétrage des tests
+
+### Choix des lags
+- **Lags pour Ljung-Box** : min(20, n/4) où n=taille d'échantillon
+- **Lags pour ARCH-LM** : 1 à 12 (mensuels) ou 1 à 5 (journaliers)
+- **Optimisation automatique** : Sélection basée sur la taille d'échantillon
+
+### Seuils de décision
+- **α = 0.05** : Seuil standard pour rejet d'hypothèse nulle
+- **Correction Bonferroni** : Pour tests multiples
+- **Score composite** : Moyenne des p-values normalisées
+
+## Principes méthodologiques clés
+
+### Approche conservative
+- **Tests multiples** : Validation croisée par différentes méthodes
+- **Seuils stricts** : Préférence pour éviter faux positifs
+- **Interprétation conjointe** : Résultats cohérents requis
+
+### Robustesse statistique
+- **Taille d'échantillon** : Validation de la puissance des tests
+- **Stationnarité** : Vérification des assumptions des tests
+- **Outliers** : Robustesse aux valeurs extrêmes
+
+### Complémentarité
+- **Avec structure_garch** : Confirmation quantitative des diagnostics visuels
+- **Avant optimisation** : Validation préliminaire avant estimation GARCH
+- **Guide méthodologique** : Orientation vers modèles appropriés
+
+## Tests automatisés
+
+- Tests unitaires pour chaque fonction de test statistique
+- Tests d'intégration pour le pipeline complet
+- Validation des calculs statistiques vs implémentations de référence
+- Tests de robustesse aux paramètres et données pathologiques
+
+## Points de vigilance
+
+- **Taille d'échantillon** : Tests peu puissants sur petits échantillons
+- **Fréquence des données** : Paramétrage adapté (journalier vs mensuel)
+- **Saisonnalité résiduelle** : Peut masquer ou simuler des effets ARCH
+- **Interprétation** : Tests nécessaires mais pas suffisants
+
+## Sortie
+
+Le module produit un rapport de tests numériques :
+- **p-values individuelles** : Pour chaque test et chaque lag
+- **Conclusions consolidées** : Présence/absence d'effets ARCH détectés
+- **Recommandations** : Orientation vers modélisation GARCH appropriée
+- **Métriques de confiance** : Fiabilité des conclusions statistiques

@@ -1,0 +1,143 @@
+# Méthodologie du Module GARCH Parameters
+
+## Objectif
+
+Le module `garch_params` constitue l'étape d'optimisation des hyperparamètres EGARCH dans le pipeline GARCH. Il utilise une approche bayésienne (Optuna) avec validation croisée temporelle walk-forward pour trouver la meilleure configuration de modèle de volatilité conditionnelle, maximisant la performance prédictive sur données hors-échantillon.
+
+## Sous-modules actifs
+
+- `main.py` : Orchestration CLI de l'optimisation complète
+- `optimization/optuna.py` : Interface principale avec Optuna
+- `optimization/cross_validation.py` : Implémentation de la validation croisée
+- `optimization/composite_objective.py` : Fonction objectif composite
+- `optimization/three_phase_validation.py` : Validation en trois phases
+- `optimization/diagnostics.py` : Diagnostics d'optimisation
+- `estimation/mle.py` : Maximum Likelihood Estimation
+- `estimation/convergence.py` : Gestion de la convergence
+- `estimation/cache.py` : Cache intelligent des estimations
+- `refit/` : Gestion du refit périodique
+- `core/` : Architecture de base des modèles
+
+## Déroulé du pipeline (`optimize_egarch_hyperparameters`)
+
+1. **Configuration de l'espace de recherche**
+   - Définition des hyperparamètres à optimiser
+   - Configuration des distributions de probabilité
+   - Paramétrage des contraintes de faisabilité
+
+2. **Validation croisée temporelle**
+   - Découpage walk-forward de l'ensemble d'entraînement
+   - Estimation sur chaque fenêtre d'expansion
+   - Évaluation sur fenêtre de test suivante
+
+3. **Optimisation bayésienne**
+   - Algorithme TPE (Tree-structured Parzen Estimator)
+   - Fonction objectif composite (QLIKE + régularisation)
+   - Gestion des échecs d'estimation
+
+4. **Sélection et validation finale**
+   - Sélection des meilleurs hyperparamètres
+   - Validation sur ensemble de validation séparé
+   - Tests de robustesse statistique
+
+## Hyperparamètres optimisés
+
+### Paramètres du modèle EGARCH(p,o,q)
+- **p (ARCH order)** : ∈ {1, 2} - Ordre des termes ARCH
+- **o (Asymmetry order)** : ∈ {1, 2} - Ordre des termes de levier
+- **q (GARCH order)** : ∈ {1, 2} - Ordre des termes GARCH
+
+### Paramètres de distribution d'erreur
+- **Distribution** : {Normal, Student-t, Skewed-t}
+- **Degrees of freedom** : ∈ [4, 30] pour Student-t (si applicable)
+- **Skewness parameter** : ∈ [-0.5, 0.5] pour Skewed-t (si applicable)
+
+### Paramètres opérationnels
+- **Refit frequency** : ∈ {5, 10, 20} jours
+- **Window type** : {expanding, rolling}
+- **Rolling window size** : ∈ {500, 1000} observations (si rolling)
+
+## Fonction objectif composite
+
+### Métrique principale : QLIKE
+```
+QLIKE = Σ[ε_t²/σ_t² + log(σ_t²)]
+```
+- Minimisation de la fonction de quasi-vraisemblance
+- Métrique standard pour l'évaluation de volatilité
+- Robustesse aux spécifications de distribution
+
+### Régularisation
+- **Pénalité de complexité** : Favorise modèles parcimonieux
+- **Pénalité d'instabilité** : Évite paramètres aux limites
+- **Bonus de convergence** : Privilégie modèles qui convergent bien
+
+### Score composite final
+```
+Score = QLIKE + λ₁ × Complexité + λ₂ × Instabilité - λ₃ × Convergence
+```
+
+## Validation croisée temporelle
+
+### Configuration walk-forward
+- **Nombre de splits** : 5 fenêtres temporelles
+- **Taille test** : 21 jours par split (1 mois ouvré)
+- **Expansion** : Ensemble d'entraînement croissant
+- **Refit** : Réestimation périodique selon fréquence optimisée
+
+### Métriques par fold
+- **QLIKE moyen** : Performance moyenne sur tous les folds
+- **Écart-type** : Stabilité temporelle des performances
+- **Worst-case** : Performance dans le pire scénario
+
+## Gestion de la convergence
+
+### Critères de convergence MLE
+- **Gradient tolerance** : |∇ℓ| < 1e-6
+- **Parameter tolerance** : |Δθ| < 1e-8
+- **Maximum iterations** : 1000 itérations
+- **Fallback** : Paramètres initiaux si échec
+
+### Diagnostics de convergence
+- **Information matrix** : Vérification positivité
+- **Standard errors** : Qualité de l'estimation
+- **Likelihood profile** : Vérification optimum local
+
+## Principes méthodologiques clés
+
+### Optimisation hors-échantillon
+- **Validation croisée temporelle** : Respect de l'ordre chronologique
+- **Pas de fuite de données** : Test set jamais vu pendant optimisation
+- **Robustesse temporelle** : Performance stable sur différentes périodes
+
+### Approche bayésienne
+- **Efficacité** : Moins d'évaluations que grid search
+- **Adaptativité** : Apprentissage des régions prometteuses
+- **Robustesse** : Gestion des fonctions objectif bruitées
+
+### Contraintes de faisabilité
+- **Stationnarité** : Racines du polynôme GARCH dans le cercle unité
+- **Invertibilité** : Conditions sur les paramètres de moyenne mobile
+- **Convergence** : Paramètres permettant l'estimation numérique
+
+## Tests automatisés
+
+- Tests unitaires pour chaque composant d'optimisation
+- Tests d'intégration pour le pipeline complet
+- Validation des calculs de métriques et contraintes
+- Tests de robustesse aux échecs d'estimation
+
+## Points de vigilance
+
+- **Temps de calcul** : Optimisation coûteuse (estimation MLE répétée)
+- **Convergence locale** : Risque de minimum local pour modèles complexes
+- **Saisonnalité** : Paramétrage adapté aux patterns temporels
+- **Robustesse** : Validation sur périodes de stress de marché
+
+## Sortie
+
+Le module produit les hyperparamètres optimaux :
+- **Configuration complète** : Tous les paramètres du modèle EGARCH
+- **Métriques de performance** : Scores de validation croisée
+- **Rapport de convergence** : Qualité de l'optimisation
+- **Recommandations** : Configuration prête pour l'entraînement final

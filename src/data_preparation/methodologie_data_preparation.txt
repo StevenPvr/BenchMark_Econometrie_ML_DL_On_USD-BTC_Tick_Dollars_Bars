@@ -1,0 +1,85 @@
+# Préparation des Données S&P 500
+
+**Objectif** : Transformer les données brutes en datasets prêts pour l'entraînement ML.
+
+## 🏗️ Deux Pipelines Distincts
+
+### 📈 Pipeline Séries Temporelles (ARIMA/GARCH)
+**Input** : `weighted_log_returns.parquet` (rendements pondérés du marché)  
+**Output** : Train/test splits chronologiques simples
+
+**Étapes** :
+1. **Split temporel** : Division train/test respectant l'ordre chronologique
+2. **Validation** : Cohérence temporelle et complétude des données
+
+### 🤖 Pipeline ML Supervisé (LightGBM/Random Forest)
+**Input** : `dataset_filtered.parquet` (données OHLCV par ticker)  
+**Output** : Features + targets par ticker avec splits temporels
+
+**Étapes** :
+1. **Features techniques** : Log returns, volatilité réalisée, volume
+2. **Split par ticker** : Chaque ticker divisé temporellement (train ≤ date_split, test > date_split)
+3. **Validation** : Absence de fuite de données, robustesse statistique
+
+## 🔧 Architecture Modulaire
+
+- `main.py` : CLI orchestrant les deux pipelines
+- `timeseriessplit.py` : Gestion splits séries temporelles
+- `ticker_preparation.py` : Préparation données individuelles tickers
+- `computations.py` : Calculs features techniques
+- `data_preparation.py` : Wrappers et constantes par défaut
+
+## ✅ Garanties Clés
+
+- **🛡️ Anti-fuite** : Aucune donnée future utilisée (voir section ci-dessous)
+- **📊 Robustesse** : Gestion NaN, valeurs extrêmes, validation types
+- **⚡ Performance** : Calculs vectorisés pandas, groupby/rolling optimisés
+- **🧪 Tests** : Couverture complète calculs + intégration
+
+## 🔒 Stratégie Anti-Leakage Critique
+
+### Problème des Fenêtres Roulantes
+
+Les features basées sur des fenêtres roulantes (ex: volatilité sur 5 jours) peuvent créer une **fuite de données** si calculées après le split train/test :
+
+```
+Split date: 2022-07-26
+
+Test observation 2022-07-27: fenêtre [2022-07-23 à 2022-07-27] ❌ CONTAMINATION
+  → Utilise des données du train set (2022-07-23, 24, 25, 26)
+
+Test observation 2022-08-02: fenêtre [2022-07-27 à 2022-08-02] ✅ PROPRE
+  → Utilise uniquement des données du test set
+```
+
+### Solution Implémentée
+
+1. **Calcul des features AVANT le split** : Toutes les features (log_return, log_volatility) sont calculées sur l'ensemble complet des données
+2. **Split temporel** : Application de la date de split globale à tous les tickers
+3. **Suppression des observations contaminées** : Les premières `(window_size - 1)` observations du test set sont supprimées pour chaque ticker
+   - Avec `window_size = 5` : suppression des 4 premières observations test
+   - Garantit que toutes les observations test restantes ont des features calculées uniquement à partir de données du test set
+
+### Trade-offs Documentés
+
+**Split Global vs. Split par Ticker** :
+- ✅ **Split global** (implémenté) : Garantit séparation temporelle stricte entre tous les tickers, simplifie la validation
+- ⚠️ **Inconvénient** : Tickers avec différentes dates d'introduction peuvent avoir des ratios train/test inégaux
+- ⚠️ **Biais de survie potentiel** : Tickers retirés du S&P 500 avant la période test n'ont pas de données test
+
+**Approches alternatives considérées** :
+- Split par ticker (ratios égaux mais possibilité de chevauchement temporel)
+- Filtrage minimum d'observations par split (implémenté en aval)
+
+### Validation
+
+Des tests automatisés (`tests/data_preparation/test_data_leakage_validation.py`) vérifient :
+- Absence de chevauchement temporel train/test
+- Suppression correcte des observations contaminées
+- Intégrité des features après split
+- Transparence de la perte de données (logging détaillé)
+
+## 📁 Outputs
+
+- **Séries** : `weighted_log_returns_split.parquet`
+- **ML** : Données tickers enrichies (features calculées in-place)

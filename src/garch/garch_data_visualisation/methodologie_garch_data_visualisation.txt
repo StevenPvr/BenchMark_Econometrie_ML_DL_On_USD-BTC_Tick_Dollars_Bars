@@ -1,0 +1,92 @@
+# Méthodologie du Module GARCH Data Visualisation
+
+## Objectif
+
+Le module `garch_data_visualisation` fournit les outils de visualisation exploratoire spécifiques aux données de volatilité conditionnelle. Il génère des graphiques diagnostiques permettant de vérifier visuellement les propriétés stochastiques des résidus ARIMA avant modélisation GARCH, incluant la détection d'effets ARCH.
+
+## Sous-modules actifs
+
+- `plots.py` : Fonctions de génération de graphiques spécialisés
+- `utils.py` : Utilitaires de préparation des données pour visualisation
+- `main.py` : Orchestration CLI pour génération de rapports visuels
+
+## Déroulé du pipeline
+
+Note: La fonctionnalité de clustering de volatilité (`save_returns_and_squared_plots`) a été supprimée du projet.
+
+1. **Chargement des données**
+   - Récupération des résidus ARIMA depuis le pipeline ARIMA
+   - Validation de la complétude temporelle
+
+2. **Analyse d'autocorrélation**
+   - **ACF/PACF des résidus** : Détection d'autocorrélation résiduelle
+   - **ACF des carrés des résidus** : Détection d'effets ARCH/GARCH
+   - **Lags significatifs** : Identification des dépendances temporelles
+   - 4) Calculer l'autocorrélation des rendements et des rendements au carré. Souvent les rendements eux-mêmes sont peu autocorrélés, mais les carrés présentent une autocorrélation significative, ce qui motive l'usage d'un modèle de type GARCH.
+
+3. **Tests statistiques automatisés**
+   - **Test ARCH-LM** : Détection formelle d'effets ARCH
+   - **Seuils de signification** : p-values et niveaux de confiance
+
+4. **Analyse de distribution**
+   - **Histogrammes** : Forme de la distribution des résidus
+   - **Q-Q plots** : Comparaison avec distribution normale
+   - **Tests graphiques** : Évaluation de l'asymétrie et des queues lourdes
+
+## Graphiques générés
+
+### Autocorrélations
+- **ACF Residuals** : Fonction d'autocorrélation des résidus (distribution)
+- **ACF Squared Residuals** : Fonction d'autocorrélation des carrés des résidus (effets ARCH)
+
+### Tests statistiques
+- **ARCH-LM Test** : Test de Lagrange Multiplier pour effets ARCH
+- **p-values** : Niveau de signification statistique
+- **Seuils de confiance** : Bandes sur les graphiques ACF
+
+### Distributions
+- **Residuals Histogram** : Distribution empirique vs théorique
+- **Squared Residuals Histogram** : Distribution des carrés
+- **Q-Q Normal Plot** : Évaluation de normalité
+
+## Principes méthodologiques
+
+### Diagnostic visuel pré-GARCH
+- **Absence d'autocorrélation** : Condition nécessaire pour bruit blanc
+- **Effets ARCH détectés** : Via ACF des carrés et test ARCH-LM
+- **Justificatif GARCH** : Combinaison analyse visuelle + tests statistiques
+
+### Standards de qualité
+- **Échelles adaptées** : Double échelle pour returns vs squared returns
+- **Seuils de signification** : Bandes de confiance sur ACF/PACF
+- **Annotations** : Valeurs numériques importantes affichées
+- **Formats multiples** : PNG haute résolution + SVG vectoriel
+
+### Performance
+- **Calculs optimisés** : Utilisation de pandas/statsmodels pour ACF/PACF
+- **Sauvegarde intelligente** : Cache des calculs répétitifs
+- **Batch processing** : Génération de multiples graphiques efficacement
+
+## Tests automatisés
+
+- Tests de génération de chaque type de graphique
+- Validation des propriétés statistiques affichées
+- Tests des fonctions ACF et tests ARCH-LM
+- Tests de robustesse aux données manquantes
+- Contrôle qualité des exports visuels
+
+## Points de vigilance
+
+- **Interprétation des ACF** : Seuils appropriés pour lags significatifs
+- **Échelles graphiques** : Comparaisons équitables des magnitudes
+- **Formats d'export** : Cohérence avec le reste du pipeline
+- **Performance** : Optimisation pour séries longues
+
+## Sortie
+
+Le module produit un rapport visuel complet pour diagnostic pré-GARCH :
+- **Autocorrélations des résidus** : Détection d'autocorrélation résiduelle
+- **ACF des carrés des résidus** : Détection visuelle d'effets ARCH
+- **Test ARCH-LM** : Détection statistique formelle d'effets ARCH
+- **Distributions** : Adéquation aux assumptions du modèle
+- **Décisions** : Justificatif complet (visuel + statistique) pour modélisation GARCH

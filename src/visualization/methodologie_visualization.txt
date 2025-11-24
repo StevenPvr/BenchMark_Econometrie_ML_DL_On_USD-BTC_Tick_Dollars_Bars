@@ -1,0 +1,95 @@
+# Méthodologie du Module Visualization S&P 500
+
+## Objectif
+
+Le module `visualization` fournit des utilitaires de visualisation haut-niveau et réutilisables pour créer des graphiques de qualité professionnelle dans tout le projet. Il standardise l'apparence, les couleurs et les layouts pour une communication cohérente des résultats.
+
+## Sous-modules actifs
+
+- `plotting_utils.py` : Fonctions de plotting génériques et spécialisées
+
+## Fonctionnalités principales
+
+### Utilitaires graphiques de base
+- `setup_plot_style()` : Configuration globale matplotlib/seaborn
+- `save_plot()` : Sauvegarde standardisée avec métadonnées
+- `create_figure()` : Création de figures avec dimensions optimisées
+
+### Graphiques spécialisés finance
+- `plot_time_series()` : Séries temporelles avec options avancées
+- `plot_returns_distribution()` : Histogrammes de rendements avec fits
+- `plot_correlation_matrix()` : Heatmaps de corrélation élégantes
+- `plot_volatility_surface()` : Surfaces 3D de volatilité
+
+### Graphiques de diagnostic modèle
+- `plot_residuals_analysis()` : Analyse complète des résidus
+- `plot_feature_importance()` : Importances de features (barres/triées)
+- `plot_learning_curves()` : Courbes d'apprentissage
+- `plot_prediction_intervals()` : Intervalles de prédiction
+
+## Standards de qualité
+
+### Design system
+- **Palette de couleurs** : Bleu professionnel (#1f77b4) avec variantes
+- **Typographie** : Police sans-serif, tailles hiérarchisées
+- **Layouts** : Marges optimisées, légendes positionnées
+- **Formats** : PNG 300 DPI, PDF vectoriel, SVG web
+
+### Accessibilité
+- Contraste suffisant pour daltoniens
+- Tailles de texte lisibles (> 10pt)
+- Descriptions alternatives pour exports
+
+### Performance
+- Rendu optimisé pour gros datasets
+- Cache intelligent des calculs répétitifs
+- Export asynchrone pour workflows batch
+
+## Principes méthodologiques
+
+### Cohérence
+- Styles uniformes dans tout le projet
+- Paramètres par défaut sensés
+- API cohérente entre fonctions
+
+### Flexibilité
+- Paramétrage complet via arguments
+- Extensions possibles (nouveaux types de graphiques)
+- Intégration facile dans notebooks/reports
+
+### Robustesse
+- Gestion automatique des NaN/valeurs extrêmes
+- Validation des données d'entrée
+- Messages d'erreur informatifs
+
+## Intégration projet
+
+### Avec data_visualisation
+- `visualization` fournit les briques de base
+- `data_visualisation` orchestre les rapports complets
+
+### Avec les modules de modélisation
+- Graphiques de diagnostic standardisés
+- Comparaisons inter-modèles cohérentes
+- Exports automatiques des métriques visuelles
+
+## Tests automatisés
+
+- Tests de génération de graphiques
+- Validation des propriétés visuelles
+- Tests de performance de rendu
+- Contrôle qualité des exports
+
+## Points de vigilance
+
+- **Dépendances** : Gestion propre de matplotlib/seaborn
+- **Threading** : Sûreté pour usage parallèle
+- **Memory** : Gestion efficace pour gros plots
+- **Évolutivité** : Architecture extensible
+
+## Sortie
+
+Le module produit des visualisations de qualité professionnelle :
+- Format : PNG/PDF/SVG avec métadonnées
+- Qualité : Design cohérent et professionnel
+- Performance : Optimisé pour tous les cas d'usage

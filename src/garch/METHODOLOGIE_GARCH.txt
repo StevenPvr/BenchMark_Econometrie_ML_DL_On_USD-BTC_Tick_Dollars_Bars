@@ -1,0 +1,143 @@
+# MÉTHODOLOGIE - PIPELINE GARCH
+
+## Objectif
+Modélisation de la volatilité conditionnelle via EGARCH avec innovations Student-t/Skew-t pour générer forecasts σ² pour LightGBM.
+
+## Modèle: EGARCH (Exponential GARCH)
+**Formule**: log(σ²_{t+1}) = ω + β·log(σ²_t) + α·|z_t| + γ·z_t
+**Avantages**:
+- Garantit σ² > 0 (transformation log)
+- Capture effet levier (chocs négatifs ↑ volatilité)
+- Flexible: Student-t (ν) ou Skew-t (ν, λ)
+
+## Pipeline (7 modules)
+
+### 1. garch_data_visualisation/
+**Objectif**: Visualisation résidus ARIMA + détection effets ARCH
+**Plots**: ACF résidus², Ljung-Box, séries temporelles
+**Output**: `plots/garch/data_visualization/*.png`
+
+### 2. garch_numerical_test/
+**Objectif**: Tests statistiques hétéroscédasticité
+**Tests**: Ljung-Box (résidus/résidus²), Engle ARCH-LM, McLeod-Li, Breusch-Pagan, White
+**Output**: `results/garch/structure/numerical_tests.json`
+
+### 3. structure_garch/
+**Objectif**: Détection formelle effets ARCH (justifie GARCH)
+**Output**: `results/garch/structure/diagnostics.json`
+
+### 4. garch_params/
+**Objectif**: Estimation MLE + optimisation hyperparamètres (Optuna)
+
+**Sous-modules**:
+- `core/`: Récursion variance, distributions (Student-t/Skew-t), validation
+- `estimation/`: MLE via SLSQP (max 1000 iter, tol 1e-7)
+- `optimization/`: Bayesian search Optuna (RandomSampler)
+- `refit/`: Gestion refit périodique
+
+**Grille optimisation (180 combinaisons)**:
+- Ordres: o∈{1,2}, p∈{1,2}
+- Distributions: {student, skewt}
+- Refit freq: {1, 5, 15, 21, 63} jours
+- Windows: {expanding, rolling}
+- Rolling sizes: {500, 1000, 1500, 2000}
+
+**Validation**: Walk-forward CV (60% train, 30% val, 10% test interne)
+**Objectif**: QLIKE (70%) + AIC (20%) + diagnostics (10%)
+
+**Outputs**:
+- `results/garch/estimation/estimation.json`: MLE par distribution
+- `results/garch/optimization/hyperparameters.json`: Meilleurs hyperparamètres
+
+### 5. training_garch/
+**Objectif**: Entraînement EGARCH final avec hyperparamètres optimisés
+
+**Workflow**:
+1. Load hyperparamètres optimisés
+2. Train sur TRAIN split (expanding window + refit périodique)
+3. Générer forecasts h=1 (one-step-ahead)
+4. Sauvegarder modèle + métadonnées
+
+**EGARCHForecaster**: fit(), forecast_variance(), rolling_forecast()
+
+**Outputs**:
+- `results/garch/training/model.joblib`: Modèle entraîné
+- `results/garch/training/model_metadata.json`: Hyperparamètres
+- `results/garch/training/residuals_outputs.json`: Résidus + variance
+
+### 6. garch_diagnostic/
+**Objectif**: Validation EGARCH (capture complète volatility clustering)
+
+**Tests**:
+- Ljung-Box sur résidus standardisés (white noise?)
+- Ljung-Box sur résidus² standardisés (ARCH restant?)
+- ARCH-LM (hétéroscédasticité conditionnelle?)
+- Tests distribution (Q-Q, Jarque-Bera)
+
+**Plots**: ACF/PACF résidus, ACF/PACF résidus², Q-Q, histogramme
+
+**Outputs**:
+- `results/garch/diagnostic/ljungbox.json`
+- `results/garch/diagnostic/distribution_diagnostics.json`
+- `plots/garch/diagnostics/*.png`
+
+**Interprétation**: Bon modèle = pas autocorrélation résidus standardisés
+
+### 7. garch_eval/
+**Objectif**: Génération full-sample forecasts + évaluation TEST
+
+**Modes de forecast (CLI: --forecast-mode)**:
+- **`no_refit`** (DEFAULT): Paramètres trained frozen (zéro leakage)
+- **`hybrid`**: Réactive refit schedule (use with caution)
+
+**Workflow**:
+1. Sélectionner mode forecast (logged pour audit)
+2. Générer full-sample σ²_{t+1|t}:
+   - TRAIN: Expanding + refit périodique
+   - TEST: Forecasts sans refit (mode no_refit)
+3. Extraire TEST forecasts pour évaluation
+4. Métriques: QLIKE, MSE, MAE, VaR backtests (1%, 5%), Mincer-Zarnowitz
+5. Export features LightGBM: `data_tickers_full_insights.parquet`
+
+**Métriques VaR**:
+- Kupiec test (unconditional coverage)
+- Christoffersen test (independence)
+- MZ regression (calibration: intercept=0, slope=1)
+
+**Outputs**:
+- `results/garch/evaluation/garch_forecasts.parquet`: Full-sample
+- `results/garch/evaluation/metrics.json`: Métriques complètes
+- `results/garch/evaluation/test_metrics.json`: TEST only
+- `results/garch/evaluation/var_summary.json`: VaR backtests
+- `data/data_tickers_full_insights.parquet`: Input LightGBM
+- `plots/garch/evaluation/*.png`: Diagnostics
+
+## Safeguards Anti-Leakage
+
+**Train/Test séparation**:
+- Optimisation: TRAIN only (60% train, 30% val, 10% test interne)
+- Évaluation finale: TEST holdout (20% full data)
+
+**Forecast modes**:
+- `no_refit` (officiel): Paramètres trained frozen → zéro leakage
+- `hybrid`: Refit logged pour transparence
+
+**Refit management**:
+- Expanding window (toutes données passées)
+- Refit à t utilise données ≤ t uniquement
+- Jamais look-ahead
+
+**Feature export**:
+- Mode forecast logged dans metadata (audit trail)
+- LightGBM reçoit features temporellement consistantes
+
+## Exécution
+```bash
+python src/garch/garch_data_visualisation/main.py
+python src/garch/garch_numerical_test/main.py
+python src/garch/structure_garch/main.py
+python src/garch/garch_params/main.py
+python src/garch/training_garch/main.py
+python src/garch/garch_diagnostic/main.py
+python src/garch/garch_eval/main.py --forecast-mode no_refit
+```

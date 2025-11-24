@@ -1,0 +1,114 @@
+# Méthodologie du Module GARCH Evaluation
+
+## Objectif
+
+Le module `garch_eval` réalise l'évaluation post-entraînement des modèles GARCH sur l'ensemble de test. Il génère des prédictions de volatilité à un pas en avant et calcule des métriques d'évaluation spécialisées pour la prévision de volatilité conditionnelle, incluant les mesures de Value-at-Risk (VaR).
+
+## Sous-modules actifs
+
+- `main.py` : Orchestration CLI de l'évaluation complète
+- `eval.py` : Fonctions d'évaluation principales (volatilité + VaR)
+- `metrics.py` : Métriques spécialisées pour évaluation de volatilité
+- `models.py` : Classes et utilitaires pour les prédictions
+- `mz_calibration.py` : Tests de calibration Mincer-Zarnowitz
+- `plotting.py` : Graphiques d'évaluation et diagnostics
+- `variance_path.py` : Analyse des chemins de variance prédite
+- `helpers.py` : Fonctions utilitaires d'évaluation
+- `data_loading.py` : Chargement des données pour évaluation
+- `utils.py` : Utilitaires divers
+
+## Déroulé du pipeline (`run_evaluation`)
+
+1. **Chargement et préparation**
+   - Récupération du modèle EGARCH entraîné
+   - Chargement des données de test (résidus ARIMA)
+   - Configuration des paramètres d'évaluation
+
+2. **Génération des prédictions de volatilité**
+   - Prédictions rolling (un pas en avant) sur l'ensemble de test
+   - Calcul des variances conditionnelles prédites
+   - Gestion du refit périodique selon les hyperparamètres
+
+3. **Évaluation des prédictions de volatilité**
+   - **QLIKE loss** : Métrique principale pour évaluation de volatilité
+   - **MSE/MAE** : Erreurs absolues et quadratiques
+   - **R² de Mincer-Zarnowitz** : Calibration des prédictions
+
+4. **Évaluation Value-at-Risk (VaR)**
+   - Calcul des VaR à différents niveaux (95%, 99%, 99.5%)
+   - Tests de backtest : Violation rates, Kupiec, Christoffersen
+   - Analyse de calibration et discrimination
+
+## Métriques d'évaluation
+
+### Métriques de volatilité
+- **QLIKE (Quasi-Likelihood)** : -Σ[ε²/σ² + log(σ²)] (métrique principale)
+- **MSE (Mean Squared Error)** : Erreur quadratique moyenne des variances
+- **MAE (Mean Absolute Error)** : Erreur absolue moyenne des variances
+- **MAPE (Mean Absolute Percentage Error)** : Erreur relative des variances
+
+### Métriques de calibration
+- **Mincer-Zarnowitz R²** : Régression des prédictions sur réalisations
+- **Slope coefficient** : Test de calibration (coefficient = 1 idéalement)
+- **Intercept test** : Test de biais (intercept = 0 idéalement)
+
+### Métriques VaR
+- **Violation rate** : Taux d'exceptions observé vs théorique
+- **Kupiec test** : Test de proportion inconditionnel des violations
+- **Christoffersen test** : Test de proportion conditionnel (clustering)
+- **Dynamic Quantile test** : Test de quantile avec dépendance temporelle
+
+## Analyse de calibration
+
+### Mincer-Zarnowitz Regression
+```
+σ²_réalisé = α + β × σ²_prédit + ε
+```
+
+- **α = 0** : Pas de biais constant
+- **β = 1** : Calibration parfaite
+- **R² proche de 1** : Excellente calibration
+
+### Tests de spécification
+- **Encompassing test** : Supériorité relative des modèles
+- **Independence test** : Absence de clustering des violations VaR
+- **Conditional coverage** : Calibration + indépendance combinées
+
+## Principes méthodologiques clés
+
+### Évaluation hors-échantillon
+- **Test set uniquement** : Pas de fuite de données depuis l'entraînement
+- **Rolling forecast** : Prédictions un pas en avant réalistes
+- **Refit périodique** : Adaptation aux changements de régime
+
+### Métriques spécialisées
+- **QLIKE comme métrique principale** : Spécifique à l'évaluation de volatilité
+- **VaR backtesting** : Validation économique des prédictions
+- **Calibration analysis** : Diagnostic de la qualité des prédictions
+
+### Robustesse statistique
+- **Tests multiples** : Approche conservatrice avec plusieurs métriques
+- **Seuils appropriés** : Niveaux de confiance adaptés au contexte risque
+- **Analyse temporelle** : Stabilité des performances dans le temps
+
+## Tests automatisés
+
+- Tests unitaires sur les calculs de chaque métrique
+- Tests d'intégration pour l'évaluation complète
+- Validation des calculs VaR et tests de backtest
+- Tests de robustesse aux paramètres du modèle
+
+## Points de vigilance
+
+- **Horizon de prédiction** : Un pas en avant vs prédictions multi-step
+- **Fréquence de refit** : Impact sur la stabilité des prédictions
+- **Distribution VaR** : Normal vs Student-t vs Skewed-t
+- **Taille d'échantillon** : Puissance statistique des tests de backtest
+
+## Sortie
+
+Le module produit un rapport d'évaluation complet :
+- **Métriques quantitatives** : Scores QLIKE, MSE, MAE, R²
+- **Tests VaR** : Résultats des backtests avec p-values
+- **Graphiques de calibration** : Mincer-Zarnowitz et diagnostics
+- **Rapport de performance** : Évaluation globale de la qualité prédictive

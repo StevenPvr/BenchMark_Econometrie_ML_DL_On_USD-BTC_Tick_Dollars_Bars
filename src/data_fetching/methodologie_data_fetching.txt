@@ -1,0 +1,31 @@
+# Collecte des Données S&P 500
+
+## 🎯 Objectif
+Récupération automatique de la composition actuelle du S&P 500 et téléchargement des prix OHLCV pour tous les tickers.
+
+## ⚡ Pipeline en 4 étapes
+
+1. **📋 Liste des tickers** : Scraping Wikipedia → `sp500_tickers.csv`
+2. **📥 Téléchargement parallèle** : Yahoo Finance (10 ans par défaut, retry automatique)
+3. **🧹 Nettoyage** : Standardisation, validation, suppression des données invalides
+4. **💾 Consolidation** : Dataset multi-ticker → `dataset.csv/parquet`
+
+## 🏗️ Architecture
+- **Parallélisation** : ThreadPoolExecutor pour rapidité
+- **Robustesse** : Gestion d'erreurs, continuation malgré les échecs
+- **Qualité** : Validation automatique, logs détaillés
+
+## 📁 Modules clés
+- `wikipedia.py` : Parsing tickers
+- `download.py` : Téléchargement parallèle
+- `processing.py` : Nettoyage données
+- `reporting.py` : Consolidation finale
+
+## ⚠️ Points critiques
+- Composition S&P 500 évolue régulièrement
+- Gestion des tickers delistés
+- Respect des limites API Yahoo Finance
+- Alignement temporel entre tickers
+
+## ✅ Résultat
+Dataset prêt pour analyse : 500+ tickers, prix quotidiens, données validées.

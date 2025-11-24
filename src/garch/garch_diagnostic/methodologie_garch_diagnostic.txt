@@ -1,0 +1,114 @@
+# Méthodologie du Module GARCH Diagnostic
+
+## Objectif
+
+Le module `garch_diagnostic` constitue l'étape de validation post-estimation des modèles GARCH. Il implémente une méthodologie complète pour vérifier l'adéquation des modèles de volatilité conditionnelle, assurant que les résidus standardisés se comportent comme un bruit blanc et que les carrés des résidus ne montrent pas d'autocorrélation résiduelle.
+
+## Sous-modules actifs
+
+- `main.py` : Orchestration CLI des diagnostics complets
+- `diagnostics.py` : Fonctions de diagnostic principales
+- `advanced_diagnostics.py` : Diagnostics avancés et spécialisés
+- `autocorrelation.py` : Analyse d'autocorrélation des résidus
+- `statistical_tests.py` : Tests statistiques formels
+- `standardization.py` : Standardisation des résidus
+- `param_extraction.py` : Extraction des paramètres du modèle
+- `plotting.py` : Génération de graphiques diagnostiques
+- `io_utils.py` : Utilitaires d'entrée/sortie
+- `data_loading.py` : Chargement des données de modèle
+
+## Déroulé du pipeline (`run_diagnostics`)
+
+1. **Chargement du modèle et données**
+   - Récupération du modèle EGARCH entraîné
+   - Chargement des données de test
+   - Extraction des résidus et volatilité conditionnelle
+
+2. **Standardisation des résidus**
+   - Calcul des résidus standardisés : ε_t / σ_t
+   - Validation de l'estimation de la volatilité conditionnelle
+   - Préparation pour les tests statistiques
+
+3. **Tests sur les résidus standardisés**
+   - **Ljung-Box test** : Absence d'autocorrélation des résidus
+   - **Histogramme + Q-Q plot** : Adéquation à la distribution choisie
+   - **Tests de normalité** : Jarque-Bera, Shapiro-Wilk, Kolmogorov-Smirnov
+
+4. **Tests sur les carrés des résidus**
+   - **Ljung-Box sur ε²** : Absence d'effets ARCH/GARCH restants
+   - **ACF/PACF des carrés** : Visualisation des autocorrélations
+   - **ARCH-LM test** : Test formel d'hétéroscédasticité restante
+
+## Tests de diagnostic implémentés
+
+### Tests sur les résidus (ε_t / σ_t)
+- **Ljung-Box Q-test** : H₀: pas d'autocorrélation vs H₁: autocorrélation
+- **Box-Pierce test** : Alternative au Ljung-Box pour petits échantillons
+- **Turning point test** : Test de randomité (excess de points d'inflexion)
+- **Difference-sign test** : Test de randomité (changements de signe)
+
+### Tests de distribution
+- **Kolmogorov-Smirnov test** : Comparaison avec distribution théorique
+- **Anderson-Darling test** : Test plus puissant pour queues de distribution
+- **Jarque-Bera test** : Normalité via skewness et kurtosis
+- **Shapiro-Wilk test** : Test spécifique de normalité
+
+### Tests sur les carrés (ε_t²)
+- **ARCH-LM test (Engle)** : Détection d'effets ARCH restants
+- **McLeod-Li test** : Test généralisé d'hétéroscédasticité
+- **Ljung-Box sur ε²** : Autocorrélation des carrés
+
+## Graphiques diagnostiques
+
+### Analyse des résidus
+- **Time series plot** : Évolution temporelle des résidus standardisés
+- **ACF/PACF** : Fonctions d'autocorrélation des résidus
+- **Histogramme + Q-Q plot** : Comparaison avec distribution théorique
+
+### Analyse des carrés
+- **ACF des carrés** : Détection d'autocorrélation restante
+- **Volatility clustering** : Périodes de forte volatilité résiduelle
+
+### Diagnostics avancés
+- **News Impact Curve** : Réponse de la volatilité aux chocs
+- **Persistence analysis** : Décroissance de l'impact des chocs
+- **Half-life computation** : Temps de retour à l'équilibre
+
+## Principes méthodologiques clés
+
+### Validation complète du modèle
+- **Résidus comme bruit blanc** : Propriété fondamentale des modèles bien spécifiés
+- **Absence d'ARCH effects** : Condition nécessaire pour modèles GARCH adéquats
+- **Adéquation distributionnelle** : Importance pour l'estimation et les tests
+
+### Tests multiples et complémentaires
+- **Approche conservatrice** : Plusieurs tests pour éviter conclusions erronées
+- **Correction pour multiples tests** : Contrôle du taux d'erreur global
+- **Interprétation conjointe** : Graphiques + tests statistiques
+
+### Robustesse statistique
+- **Paramétrage adapté** : Lags optimaux selon la fréquence des données
+- **Seuils appropriés** : Niveaux de signification adaptés au contexte
+- **Tests alternatifs** : Différentes méthodes pour valider les conclusions
+
+## Tests automatisés
+
+- Tests unitaires pour chaque fonction de diagnostic
+- Tests d'intégration pour le pipeline complet
+- Validation des calculs statistiques
+- Tests de robustesse aux paramètres du modèle
+
+## Points de vigilance
+
+- **Choix des lags** : Impact sur la puissance des tests
+- **Taille d'échantillon** : Influence sur la fiabilité des tests
+- **Distribution choisie** : Normal vs Student-t vs Skewed-t
+- **Interprétation conjointe** : Graphiques + tests statistiques requis
+
+## Sortie
+
+Le module produit un rapport de diagnostic complet :
+- **Tests statistiques** : p-values et conclusions pour chaque test
+- **Graphiques diagnostiques** : Visualisations des propriétés des résidus
+- **Rapport d'adéquation** : Validation globale du modèle GARCH
+- **Recommandations** : Suggestions d'amélioration si nécessaire

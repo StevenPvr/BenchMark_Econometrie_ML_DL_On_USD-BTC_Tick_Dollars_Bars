@@ -1,0 +1,122 @@
+# Méthodologie du Module GARCH Structure
+
+## Objectif
+
+Le module `structure_garch` constitue la première étape de diagnostic du pipeline GARCH. Il détecte formellement la présence d'hétéroscédasticité conditionnelle dans les résidus du modèle ARIMA, confirmant la nécessité d'un modèle de volatilité conditionnelle et orientant vers les spécifications EGARCH appropriées.
+
+## Sous-modules actifs
+
+- `main.py` : Orchestration CLI des analyses de structure
+- `detection.py` : Algorithmes de détection d'hétéroscédasticité
+- `utils.py` : Utilitaires de chargement et préparation des données
+
+## Note importante
+Les analyses visuelles (ACF des carrés des résidus, plots de diagnostic) ont été déplacées vers le module `garch_data_visualisation` pour une meilleure séparation des responsabilités.
+
+## Déroulé du pipeline (`run_structure_analysis`)
+
+1. **Extraction des résidus**
+   - Récupération des résidus du modèle ARIMA entraîné
+   - Validation de la qualité des résidus (absence d'autocorrélation)
+   - Préparation pour les tests d'hétéroscédasticité
+
+2. **Tests d'hétéroscédasticité conditionnelle**
+   - **ARCH-LM test (Engle)** : Test de Lagrange Multiplier principal
+   - **Tests auxiliaires** : Confirmation par méthodes alternatives
+   - **Analyse visuelle** : ACF des carrés des résidus (module `garch_data_visualisation`)
+
+3. **Estimation des ordres ARCH/GARCH**
+   - **PACF des carrés** : Identification des ordres potentiels
+   - **Tests séquentiels** : Détermination des ordres optimaux
+   - **Recommandations** : Orientation vers spécifications appropriées
+
+4. **Validation des résultats**
+   - **Tests de robustesse** : Confirmation sur sous-échantillons
+   - **Analyse de puissance** : Fiabilité des conclusions
+   - **Rapport diagnostique** : Résumé exécutif des conclusions
+
+## Tests ARCH-LM (Engle)
+
+### Principe
+Le test ARCH-LM détecte la présence d'effets ARCH en testant si les carrés des résidus peuvent être expliqués par leurs propres valeurs passées :
+
+```
+ε_t² = α₀ + α₁ε_{t-1}² + α₂ε_{t-2}² + ... + α_pε_{t-p}² + ν_t
+```
+
+### Statistique du test
+```
+LM = n × R²
+```
+où n est la taille d'échantillon et R² le coefficient de détermination de la régression auxiliaire.
+
+### Distribution
+Sous H₀ (pas d'effets ARCH), LM ~ χ²(p) avec p degrés de liberté.
+
+### Rejet de H₀
+- **p-value < 0.05** : Présence d'hétéroscédasticité conditionnelle détectée
+- **p-value < 0.01** : Forte évidence d'effets ARCH/GARCH
+
+## Analyse des autocorrélations
+
+### ACF des carrés des résidus
+- **Lags significatifs** : Indiquent ordres ARCH potentiels
+- **Décroissance lente** : Suggère persistance de la volatilité
+- **Patterns saisonniers** : Effets périodiques dans la volatilité
+
+### PACF des carrés des résidus
+- **Ordres p et q** : Détermination des paramètres GARCH(p,q)
+- **Significance thresholds** : Seuils de Bartlett pour grand n
+- **Robustesse** : Validation sur différentes fenêtres
+
+## Ordres ARCH/GARCH suggérés
+
+### Basé sur ACF/PACF
+- **ARCH(p)** : Ordre p où ACF devient non-significatif
+- **GARCH(p,q)** : Extension avec terme de persistance
+- **EGARCH(p,o,q)** : Inclusion d'effets de levier asymétriques
+
+### Tests séquentiels
+- **Augmentation progressive** : Test de p=1, puis p=2, etc.
+- **Critère AIC/BIC** : Sélection d'ordre parcimonieux
+- **Validation croisée** : Robustesse temporelle des conclusions
+
+## Principes méthodologiques clés
+
+### Approche diagnostique rigoureuse
+- **Tests multiples** : Confirmation par différentes méthodes statistiques
+- **Seuils conservateurs** : Préférence pour éviter faux diagnostics
+- **Interprétation conjointe** : Graphiques + tests statistiques
+
+### Orientation méthodologique
+- **Confirmation de nécessité** : Valide l'utilité de modèles GARCH
+- **Guide de spécification** : Ormente vers modèles appropriés
+- **Évite sur-modélisation** : N'applique GARCH que si nécessaire
+
+### Robustesse temporelle
+- **Stabilité des conclusions** : Validation sur différentes périodes
+- **Sensibilité aux paramètres** : Tests avec différents nombres de lags
+- **Puissance statistique** : Considération de la taille d'échantillon
+
+## Tests automatisés
+
+- Tests unitaires pour chaque fonction de détection
+- Tests d'intégration pour l'analyse complète de structure
+- Validation des calculs statistiques vs références
+- Tests de robustesse aux données non-stationnaires
+
+## Points de vigilance
+
+- **Taille d'échantillon** : Tests peu puissants sur petits échantillons
+- **Stationnarité des résidus** : Assumption critique pour les tests
+- **Effets saisonniers** : Peuvent masquer ou simuler des effets ARCH
+- **Fréquence des données** : Impact sur les ordres détectés
+
+## Sortie
+
+Le module produit un diagnostic de structure complet :
+- **Tests ARCH-LM** : p-values et conclusions statistiques
+- **Rapport de structure** : Présence/absence d'hétéroscédasticité confirmée
+- **Recommandations** : Orientation vers spécifications GARCH appropriées
+
+**Note** : Les graphiques ACF/PACF des carrés des résidus sont maintenant générés par le module `garch_data_visualisation`.

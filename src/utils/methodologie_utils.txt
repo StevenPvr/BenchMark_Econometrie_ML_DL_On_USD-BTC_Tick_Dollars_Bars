@@ -1,0 +1,83 @@
+# Méthodologie du Module Utilities S&P 500
+
+## Objectif
+
+Le module `utils` fournit des fonctions utilitaires transversales utilisées par tous les autres modules du projet. Il centralise les opérations communes comme le logging, les calculs financiers, la validation des données et les transformations temporelles.
+
+## Sous-modules actifs
+
+- `logging_utils.py` : Configuration centralisée du logging
+- `financial.py` : Fonctions financières spécialisées (rendements, volatilité)
+- `io.py` : Opérations d'entrée/sortie (chargement/sauvegarde)
+- `metrics.py` : Métriques d'évaluation standardisées
+- `statsmodels_utils.py` : Utilitaires pour statsmodels
+- `temporal.py` : Fonctions de manipulation temporelle
+- `transforms.py` : Transformations de données
+- `validation.py` : Fonctions de validation génériques
+
+## Fonctions principales
+
+### Calculs financiers (`financial.py`)
+- `compute_log_returns()` : Rendements logarithmiques sûrs (gestion des zéros)
+- `compute_volatility()` : Volatilité historique avec différentes méthodes
+- `compute_liquidity_weights()` : Poids basés sur la liquidité
+
+### Métriques d'évaluation (`metrics.py`)
+- `mean_absolute_error()`, `mean_squared_error()` : Métriques classiques
+- `directional_accuracy()` : Précision directionnelle pour finance
+- `sharpe_ratio()`, `sortino_ratio()` : Ratios de performance
+
+### Gestion temporelle (`temporal.py`)
+- `extract_date_range()` : Extraction d'intervalles temporels
+- `resample_to_business_days()` : Rééchantillonnage jours ouvrés
+- `create_time_features()` : Features temporelles (jour de semaine, etc.)
+
+### Validation (`validation.py`)
+- `validate_dataframe_not_empty()` : Contrôle de DataFrames vides
+- `validate_required_columns()` : Vérification des colonnes requises
+- `validate_date_range()` : Validation des périodes temporelles
+
+## Principes méthodologiques clés
+
+### Fiabilité
+- Gestion d'erreurs explicite (pas de valeurs silencieuses)
+- Validation stricte des entrées
+- Logs détaillés pour le debugging
+
+### Performance
+- Opérations vectorisées avec pandas/numpy
+- Cache intelligent pour calculs coûteux
+- Lazy evaluation où approprié
+
+### Réutilisabilité
+- Fonctions pures sans effets de bord
+- Paramétrage flexible via arguments
+- Interface cohérente entre modules
+
+### Maintenabilité
+- Documentation complète (docstrings Google-style)
+- Tests unitaires exhaustifs
+- Séparation claire des responsabilités
+
+## Tests automatisés
+
+- Tests unitaires pour chaque fonction
+- Tests de robustesse (valeurs extrêmes, edge cases)
+- Tests de performance
+- Tests d'intégration avec les modules consommateurs
+
+## Points de vigilance
+
+- **Dépendances** : Gestion des imports conditionnels
+- **Types** : Annotations complètes pour l'IDE et mypy
+- **Logging** : Niveaux appropriés et messages informatifs
+- **Thread-safety** : Fonctions sûres pour usage concurrent
+
+## Utilisation transversale
+
+Le module `utils` est utilisé par tous les autres modules :
+- `data_*` : validation, calculs financiers, I/O
+- `arima/garch/lightgbm` : métriques, transformations, logging
+- `main.py` : orchestration et reporting
+
+Cette centralisation garantit la cohérence et facilite la maintenance.

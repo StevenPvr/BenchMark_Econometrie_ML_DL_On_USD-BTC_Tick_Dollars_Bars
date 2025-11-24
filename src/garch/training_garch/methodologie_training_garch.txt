@@ -1,0 +1,128 @@
+# Méthodologie du Module GARCH Training
+
+## Objectif
+
+Le module `training_garch` constitue l'étape finale d'estimation du modèle EGARCH dans le pipeline GARCH. Il entraîne le modèle avec les hyperparamètres optimaux trouvés lors de l'optimisation, en appliquant un refit périodique pour s'adapter à l'évolution temporelle des propriétés de volatilité du marché.
+
+## Sous-modules actifs
+
+- `main.py` : Orchestration CLI de l'entraînement final
+- `training.py` : Logique principale d'entraînement avec refit
+- `orchestration.py` : Coordination des composants d'entraînement
+- `forecaster.py` : Génération de prédictions de volatilité
+- `predictions_io.py` : Sauvegarde et chargement des prédictions
+- `variance_filter.py` : Filtrage de la variance conditionnelle
+- `utils.py` : Utilitaires divers d'entraînement
+
+## Déroulé du pipeline (`train_egarch_from_dataset`)
+
+1. **Chargement des hyperparamètres optimaux**
+   - Récupération des paramètres optimisés (garch_params)
+   - Validation de la configuration (faisabilité, convergence)
+   - Préparation des métadonnées d'entraînement
+
+2. **Configuration du refit périodique**
+   - Définition de la fréquence de réestimation
+   - Configuration des fenêtres d'entraînement
+   - Paramétrage de la stratégie de refit (expanding/rolling)
+
+3. **Entraînement itératif**
+   - Estimation sur première fenêtre d'entraînement
+   - Génération de prédictions pour période suivante
+   - Réestimation périodique selon fréquence définie
+   - Accumulation des prédictions rolling
+
+4. **Validation et sauvegarde**
+   - Validation de la qualité des prédictions
+   - Sauvegarde du modèle final et des prédictions
+   - Génération de métriques de performance
+
+## Stratégies de refit
+
+### Refit périodique (Expanding Window)
+- **Fenêtre d'entraînement** : Croissante avec le temps
+- **Fréquence** : Tous les k jours (k ∈ {5, 10, 20})
+- **Avantage** : Utilise toute l'information historique disponible
+- **Inconvénient** : Sensible aux changements structurels anciens
+
+### Refit périodique (Rolling Window)
+- **Fenêtre d'entraînement** : Taille fixe glissante
+- **Taille** : n ∈ {500, 1000} observations
+- **Avantage** : Adapte rapidement aux changements récents
+- **Inconvénient** : Perd information historique ancienne
+
+## Gestion de la convergence
+
+### Critères d'arrêt MLE
+- **Tolérance gradient** : |∇ℓ| < 1e-6
+- **Tolérance paramètres** : |Δθ| < 1e-8
+- **Itérations maximales** : 1000 par défaut
+- **Fallback** : Modèle précédent si convergence échoue
+
+### Diagnostics de convergence
+- **Matrice d'information** : Définitivité des estimations
+- **Erreurs standard** : Précision des paramètres
+- **Profil de vraisemblance** : Validation d'optimum global
+
+## Prédictions de volatilité
+
+### Prédictions à un pas
+- **Variance conditionnelle** : σ_t² = E[ε_t²|F_{t-1}]
+- **Volatilité prédite** : √σ_t²
+- **Intervalle de confiance** : Basé sur distribution d'erreur
+
+### Prédictions multi-step
+- **Prévision récursive** : Utilise prédictions précédentes
+- **Dégénérescence** : Convergence vers volatilité inconditionnelle
+- **Horizon limité** : Fiabilité décroissante avec l'horizon
+
+## Principes méthodologiques clés
+
+### Refit adaptatif
+- **Fréquence optimale** : Balance entre stabilité et adaptabilité
+- **Détection de ruptures** : Réestimation accélérée si nécessaire
+- **Robustesse temporelle** : Performance stable malgré changements de régime
+
+### Qualité d'estimation
+- **Convergence assurée** : Paramètres dans domaine de stationnarité
+- **Diagnostics complets** : Validation post-estimation systématique
+- **Robustesse numérique** : Gestion des cas limites et singulariétés
+
+### Production-ready
+- **Sauvegarde complète** : Modèle + prédictions + métadonnées
+- **Reproductibilité** : Seeds et paramètres tracés
+- **Monitoring** : Métriques de qualité des prédictions
+
+## Gestion des échecs
+
+### Échecs de convergence
+- **Tentatives multiples** : Différentes initialisations
+- **Paramètres alternatifs** : Fallback vers spécifications plus simples
+- **Logging détaillé** : Diagnostic des problèmes de convergence
+
+### Anomalies de prédiction
+- **Clamping** : Limitation des valeurs extrêmes
+- **Smoothing** : Lissage des prédictions aberrantes
+- **Validation** : Contrôle de qualité automatique
+
+## Tests automatisés
+
+- Tests unitaires pour chaque composant d'entraînement
+- Tests d'intégration pour le pipeline complet avec refit
+- Validation des prédictions vs données historiques
+- Tests de robustesse aux changements de paramètres
+
+## Points de vigilance
+
+- **Temps de calcul** : Refit périodique coûteux pour grands datasets
+- **Mémoire** : Accumulation de modèles pour rolling windows
+- **Convergence** : Risque d'échec sur périodes de faible volatilité
+- **Évolutivité** : Architecture adaptée aux gros volumes de données
+
+## Sortie
+
+Le module produit le modèle GARCH entraîné complet :
+- **Modèle final** : EGARCH avec paramètres optimaux
+- **Prédictions rolling** : Séries complètes de volatilité prédite
+- **Métriques de qualité** : Performance sur données d'entraînement
+- **Rapport d'entraînement** : Détails du processus et diagnostics
