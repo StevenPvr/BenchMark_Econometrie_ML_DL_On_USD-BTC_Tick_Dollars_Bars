@@ -1,17 +1,24 @@
-"""Data preparation module for ARIMA models."""
+"""Data preparation module for financial data pipelines.
+
+This module provides:
+- Dollar Bars generation (De Prado methodology)
+- Log returns computation
+- Data validation utilities
+"""
 
 from __future__ import annotations
 
-from src.data_preparation.data_preparation import (
-    add_log_returns_to_ticker_parquet,
-    load_train_test_data,
-    split_tickers_train_test,
-    split_train_test,
+from src.data_preparation.preparation import (
+    compute_dollar_bars,
+    generate_dollar_bars,
+    prepare_dollar_bars,
+    run_dollar_bars_pipeline,
 )
 
 __all__ = [
-    "split_train_test",
-    "load_train_test_data",
-    "split_tickers_train_test",
-    "add_log_returns_to_ticker_parquet",
+    # Dollar Bars (De Prado methodology)
+    "compute_dollar_bars",
+    "generate_dollar_bars",
+    "prepare_dollar_bars",
+    "run_dollar_bars_pipeline",
 ]

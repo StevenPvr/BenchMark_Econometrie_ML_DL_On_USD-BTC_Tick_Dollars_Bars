@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Sequence
+from typing import Any, Dict, List, Tuple, Optional, Sequence, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,10 +13,12 @@ import seaborn as sns  # type: ignore
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from statsmodels.tsa.stattools import adfuller, kpss  # type: ignore
+from statsmodels.tsa.seasonal import seasonal_decompose  # type: ignore
 from scipy import stats  # type: ignore
+from scipy.stats import linregress  # type: ignore
 
-from ..constants import CLOSE_COLUMN, LOG_RETURN_COLUMN
-from ..path import DOLLAR_IMBALANCE_BARS_PARQUET, LOG_RETURNS_PARQUET, LOG_RETURNS_CSV
+from ..constants import CLOSE_COLUMN, LOG_RETURN_COLUMN # type: ignore
+from ..path import DOLLAR_IMBALANCE_BARS_PARQUET, LOG_RETURNS_PARQUET, LOG_RETURNS_CSV # type: ignore
 
 
 def load_dollar_bars(parquet_path: Path = DOLLAR_IMBALANCE_BARS_PARQUET) -> pd.DataFrame:
@@ -420,6 +422,414 @@ def compute_autocorrelation(
     return fig
 
 
+def mann_kendall_test(series: np.ndarray) -> Dict[str, Any]:
+    """
+    Test de Mann-Kendall pour detecter une tendance monotone.
+
+    H0: Pas de tendance monotone
+    H1: Tendance monotone presente
+
+    Parameters
+    ----------
+    series : np.ndarray
+        Serie temporelle.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Resultats du test (statistic, p_value, trend).
+    """
+    n = len(series)
+    s = 0
+
+    # Calcul de la statistique S
+    for i in range(n - 1):
+        for j in range(i + 1, n):
+            diff = series[j] - series[i]
+            if diff > 0:
+                s += 1
+            elif diff < 0:
+                s -= 1
+
+    # Variance de S
+    var_s = n * (n - 1) * (2 * n + 5) / 18
+
+    # Statistique Z normalisee
+    if s > 0:
+        z = (s - 1) / np.sqrt(var_s)
+    elif s < 0:
+        z = (s + 1) / np.sqrt(var_s)
+    else:
+        z = 0
+
+    # P-value (test bilat?ral)
+    p_value = 2 * (1 - stats.norm.cdf(abs(z)))
+
+    # Interpretation de la tendance
+    if p_value < 0.05:
+        if z > 0:
+            trend = "Tendance croissante significative"
+        else:
+            trend = "Tendance decroissante significative"
+    else:
+        trend = "Pas de tendance significative"
+
+    return {
+        "statistic_S": s,
+        "statistic_Z": z,
+        "p_value": p_value,
+        "trend": trend,
+        "hypothesis": "H0: Pas de tendance monotone (p < 0.05 => rejeter H0)",
+    }
+
+
+def compute_trend_statistics(
+    series: pd.Series,
+    output_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Calcule les statistiques de tendance pour une serie temporelle.
+
+    Inclut:
+    - Test de Mann-Kendall (tendance monotone)
+    - Regression lineaire (pente, R²)
+    - Statistiques descriptives de la tendance
+
+    Parameters
+    ----------
+    series : pd.Series
+        Serie temporelle (ex: prix ou log-returns cumules).
+    output_dir : Path, optional
+        Repertoire ou sauvegarder les resultats.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionnaire avec les resultats des tests de tendance.
+    """
+    import json
+
+    data = np.asarray(series.dropna().values)
+    n = len(data)
+    x = np.arange(n)
+
+    results: Dict[str, Any] = {}
+
+    # 1. Test de Mann-Kendall
+    mk_result = mann_kendall_test(data)
+    results["Mann_Kendall"] = mk_result
+
+    # 2. Regression lineaire
+    lr_result = cast(Any, linregress(x, data))
+    slope = lr_result.slope
+    intercept = lr_result.intercept
+    r_value = lr_result.rvalue
+    p_value = lr_result.pvalue
+    std_err = lr_result.stderr
+    r_squared = r_value ** 2
+
+    # Tendance annualisee (en supposant des barres quotidiennes)
+    trend_direction = "Haussiere" if slope > 0 else "Baissiere" if slope < 0 else "Neutre"
+
+    results["Linear_Regression"] = {
+        "slope": slope,
+        "intercept": intercept,
+        "r_squared": r_squared,
+        "p_value": p_value,
+        "std_error": std_err,
+        "trend_direction": trend_direction,
+        "slope_significance": "Significatif" if p_value < 0.05 else "Non significatif",
+    }
+
+    # 3. Statistiques de changement
+    first_half = np.asarray(data[:n // 2])
+    second_half = np.asarray(data[n // 2:])
+
+    results["Change_Statistics"] = {
+        "mean_first_half": float(first_half.mean()),
+        "mean_second_half": float(second_half.mean()),
+        "mean_change": float(second_half.mean() - first_half.mean()),
+        "std_first_half": float(first_half.std()),
+        "std_second_half": float(second_half.std()),
+        "std_change": float(second_half.std() - first_half.std()),
+    }
+
+    # Affichage
+    print("\n" + "=" * 80)
+    print("ANALYSE DE TENDANCE")
+    print("=" * 80)
+
+    print("\n[Mann-Kendall Test]")
+    print(f"  Statistique S: {mk_result['statistic_S']}")
+    print(f"  Statistique Z: {mk_result['statistic_Z']:.4f}")
+    print(f"  P-value: {mk_result['p_value']:.6f}")
+    print(f"  Conclusion: {mk_result['trend']}")
+
+    print("\n[Regression Lineaire]")
+    print(f"  Pente: {slope:.8f}")
+    print(f"  R²: {r_squared:.6f}")
+    print(f"  P-value: {p_value:.6f}")
+    print(f"  Direction: {trend_direction}")
+    print(f"  Significativite: {results['Linear_Regression']['slope_significance']}")
+
+    print("\n[Changement entre les deux moities]")
+    print(f"  Moyenne 1ere moitie: {results['Change_Statistics']['mean_first_half']:.6f}")
+    print(f"  Moyenne 2eme moitie: {results['Change_Statistics']['mean_second_half']:.6f}")
+    print(f"  Changement de moyenne: {results['Change_Statistics']['mean_change']:.6f}")
+
+    print("=" * 80 + "\n")
+
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Convertir pour JSON
+        json_results = {
+            "Mann_Kendall": mk_result,
+            "Linear_Regression": {
+                k: float(v) if isinstance(v, (np.floating, float)) else v
+                for k, v in results["Linear_Regression"].items()
+            },
+            "Change_Statistics": results["Change_Statistics"],
+        }
+        with open(output_dir / "trend_analysis.json", "w") as f:
+            json.dump(json_results, f, indent=2)
+        print(f"Trend analysis saved: {output_dir / 'trend_analysis.json'}")
+
+    return results
+
+
+def plot_trend_extraction(
+    series: pd.Series,
+    windows: List[int] = [20, 50, 100, 200],
+    output_dir: Optional[Path] = None,
+    figsize: Tuple[int, int] = (14, 12),
+) -> Figure:
+    """
+    Extrait et visualise la tendance des dollar bars via moyennes mobiles.
+
+    Pour les dollar bars (echantillonnage par volume), la decomposition
+    saisonniere classique n'est pas appropriee. On utilise plutot
+    des moyennes mobiles pour extraire la tendance.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Serie de prix des dollar bars.
+    windows : List[int]
+        Fenetres pour les moyennes mobiles.
+    output_dir : Path, optional
+        Repertoire ou sauvegarder le plot.
+    figsize : Tuple[int, int]
+        Taille de la figure.
+
+    Returns
+    -------
+    Figure
+        Figure matplotlib.
+    """
+    data = series.dropna()
+    data_arr = np.asarray(data.values)
+    n = len(data_arr)
+
+    fig, axes = plt.subplots(4, 1, figsize=figsize)
+
+    # Plot 1: Serie originale avec tendance longue (MA la plus longue)
+    ax1 = axes[0]
+    ax1.plot(data_arr, linewidth=0.5, color="steelblue", alpha=0.7, label="Prix")
+    long_window = max(w for w in windows if w < n) if any(w < n for w in windows) else 50
+    ma_long = cast(pd.Series, pd.Series(data_arr).rolling(window=long_window).mean())
+    ax1.plot(ma_long.values, linewidth=2, color="red", label=f"Tendance (MA{long_window})")
+    ax1.set_title("Dollar Bars - Prix et Tendance", fontsize=12, fontweight="bold")
+    ax1.set_ylabel("Prix")
+    ax1.legend(loc="upper left", fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    # Plot 2: Composante de tendance extraite (difference entre MAs)
+    ax2 = axes[1]
+    short_window = min(windows)
+    ma_short = cast(pd.Series, pd.Series(data_arr).rolling(window=short_window).mean())
+    trend_component = ma_long - ma_long.iloc[long_window - 1]  # Tendance relative
+    ax2.plot(trend_component.values, linewidth=1.5, color="red")
+    ax2.axhline(0, color="black", linestyle="--", linewidth=1)
+    ax2.set_title(f"Composante de Tendance (MA{long_window} - depart)", fontsize=12, fontweight="bold")
+    ax2.set_ylabel("Tendance relative")
+    ax2.grid(True, alpha=0.3)
+
+    # Plot 3: Residus (prix - tendance)
+    ax3 = axes[2]
+    residuals = data_arr - ma_long.values
+    ax3.plot(residuals, linewidth=0.8, color="orange")
+    ax3.axhline(0, color="black", linestyle="--", linewidth=1)
+    ax3.fill_between(range(n), 0, residuals, alpha=0.3, color="orange",
+                     where=~np.isnan(residuals))
+    ax3.set_title("Residus (Prix - Tendance)", fontsize=12, fontweight="bold")
+    ax3.set_ylabel("Residu")
+    ax3.grid(True, alpha=0.3)
+
+    # Stats des residus
+    valid_res = residuals[~np.isnan(residuals)]
+    res_std = np.std(valid_res)
+    res_mean = np.mean(valid_res)
+    ax3.text(0.02, 0.95, f"Mean={res_mean:.4f}, Std={res_std:.4f}",
+             transform=ax3.transAxes, fontsize=10,
+             verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Plot 4: Momentum (difference entre MA courte et MA longue)
+    ax4 = axes[3]
+    momentum = cast(pd.Series, ma_short - ma_long)
+    ax4.plot(momentum.values, linewidth=1.2, color="purple")
+    ax4.axhline(0, color="black", linestyle="--", linewidth=1)
+    momentum_values = cast(np.ndarray, momentum.values)
+    ax4.fill_between(range(n), 0, momentum_values, alpha=0.3,
+                     where=(momentum_values > 0) & ~np.isnan(momentum_values), color="green")
+    ax4.fill_between(range(n), 0, momentum_values, alpha=0.3,
+                     where=(momentum_values < 0) & ~np.isnan(momentum_values), color="red")
+    ax4.set_title(f"Momentum (MA{short_window} - MA{long_window})", fontsize=12, fontweight="bold")
+    ax4.set_xlabel("Index (Dollar Bars)")
+    ax4.set_ylabel("Momentum")
+    ax4.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_dir / "trend_extraction.png", dpi=150, bbox_inches="tight")
+        print(f"Trend extraction plot saved: {output_dir / 'trend_extraction.png'}")
+
+    return fig
+
+
+def plot_trend_analysis(
+    series: pd.Series,
+    trend_results: Dict[str, Any],
+    series_name: str = "Dollar Bars",
+    output_dir: Optional[Path] = None,
+    figsize: Tuple[int, int] = (14, 10),
+) -> Figure:
+    """
+    Plot complet de l'analyse de tendance avec regression lineaire et moyennes mobiles.
+
+    Adapte pour les dollar bars (echantillonnage par volume en dollars).
+
+    Parameters
+    ----------
+    series : pd.Series
+        Serie de prix des dollar bars.
+    trend_results : Dict[str, Any]
+        Resultats de compute_trend_statistics.
+    series_name : str
+        Nom de la serie pour le titre.
+    output_dir : Path, optional
+        Repertoire ou sauvegarder le plot.
+    figsize : Tuple[int, int]
+        Taille de la figure.
+
+    Returns
+    -------
+    Figure
+        Figure matplotlib.
+    """
+    data = series.dropna()
+    n = len(data)
+    x = np.arange(n)
+
+    # Extraire les parametres de regression
+    lr = trend_results.get("Linear_Regression", {})
+    slope = lr.get("slope", 0)
+    intercept = lr.get("intercept", 0)
+    r_squared = lr.get("r_squared", 0)
+
+    mk = trend_results.get("Mann_Kendall", {})
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+
+    # Plot 1: Serie avec regression lineaire
+    ax1 = axes[0, 0]
+    ax1.plot(data.values, linewidth=0.8, color="steelblue", alpha=0.7, label=series_name)
+    ax1.plot(x, slope * x + intercept, color="red", linewidth=2,
+             linestyle="--", label=f"Tendance (pente={slope:.2e})")
+    ax1.set_title(f"{series_name} avec Regression Lineaire", fontsize=12, fontweight="bold")
+    ax1.set_xlabel("Index (Dollar Bars)")
+    ax1.set_ylabel("Prix")
+    ax1.legend(loc="upper left", fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    # Annotation R²
+    ax1.text(0.95, 0.95, f"R² = {r_squared:.4f}",
+             transform=ax1.transAxes, fontsize=10,
+             verticalalignment='top', horizontalalignment='right',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Plot 2: Moyennes mobiles multiples
+    ax2 = axes[0, 1]
+    data_arr = np.asarray(data.values)
+    ax2.plot(data_arr, linewidth=0.5, color="steelblue", alpha=0.5, label="Original")
+
+    windows = [20, 50, 100]
+    colors = ["orange", "red", "purple"]
+    for window, color in zip(windows, colors):
+        if window < n:
+            ma = cast(pd.Series, pd.Series(data_arr).rolling(window=window).mean())
+            ax2.plot(ma.values, linewidth=1.5, color=color, label=f"MA({window})")
+
+    ax2.set_title("Moyennes Mobiles", fontsize=12, fontweight="bold")
+    ax2.set_xlabel("Index")
+    ax2.set_ylabel("Valeur")
+    ax2.legend(loc="upper left", fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    # Plot 3: Distribution premiere vs deuxieme moitie
+    ax3 = axes[1, 0]
+    first_half = data_arr[:n // 2]
+    second_half = data_arr[n // 2:]
+
+    ax3.hist(first_half, bins=40, alpha=0.6, color="blue", label="1ere moitie", density=True)
+    ax3.hist(second_half, bins=40, alpha=0.6, color="red", label="2eme moitie", density=True)
+    ax3.axvline(first_half.mean(), color="blue", linestyle="--", linewidth=2)
+    ax3.axvline(second_half.mean(), color="red", linestyle="--", linewidth=2)
+    ax3.set_title("Distribution: 1ere vs 2eme moitie", fontsize=12, fontweight="bold")
+    ax3.set_xlabel("Valeur")
+    ax3.set_ylabel("Densite")
+    ax3.legend(loc="upper right", fontsize=9)
+    ax3.grid(True, alpha=0.3)
+
+    # Plot 4: Residus de la tendance
+    ax4 = axes[1, 1]
+    trend_line = slope * x + intercept
+    residuals = data.values - trend_line
+    ax4.plot(residuals, linewidth=0.8, color="orange")
+    ax4.axhline(0, color="black", linestyle="--", linewidth=1)
+    ax4.fill_between(x, 0, residuals, alpha=0.3, color="orange")
+    ax4.set_title("Residus apres suppression de la tendance", fontsize=12, fontweight="bold")
+    ax4.set_xlabel("Index")
+    ax4.set_ylabel("Residu")
+    ax4.grid(True, alpha=0.3)
+
+    # Stats residus
+    res_std = np.std(residuals)
+    ax4.text(0.95, 0.95, f"Std residus = {res_std:.4f}",
+             transform=ax4.transAxes, fontsize=10,
+             verticalalignment='top', horizontalalignment='right',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Titre global avec resultats Mann-Kendall
+    mk_trend = mk.get("trend", "N/A")
+    mk_pvalue = mk.get("p_value", 0)
+    fig.suptitle(
+        f"Analyse de Tendance - Mann-Kendall: {mk_trend} (p={mk_pvalue:.4f})",
+        fontsize=13, fontweight="bold", y=1.02
+    )
+
+    plt.tight_layout()
+
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_dir / "trend_analysis.png", dpi=150, bbox_inches="tight")
+        print(f"Trend analysis plot saved: {output_dir / 'trend_analysis.png'}")
+
+    return fig
+
+
 def run_full_analysis(
     parquet_path: Path = DOLLAR_IMBALANCE_BARS_PARQUET,
     output_dir: Optional[Path] = None,
@@ -452,7 +862,7 @@ def run_full_analysis(
     print(f"Periode: {df['datetime_close'].min()} a {df['datetime_close'].max()}")
 
     # Calculer les log-returns
-    print("\n[0/4] Calcul des log-returns...")
+    print("\n[0/8] Calcul des log-returns...")
     log_returns = compute_log_returns(df, price_col=CLOSE_COLUMN)
     df[LOG_RETURN_COLUMN] = log_returns
 
@@ -470,29 +880,47 @@ def run_full_analysis(
     }
 
     # 1. Distribution
-    print("\n[1/5] Generation du plot de distribution...")
+    print("\n[1/8] Generation du plot de distribution...")
     fig_dist = plot_log_returns_distribution(log_returns, output_dir=output_dir)
     results["fig_distribution"] = fig_dist
 
     # 2. Tests de stationnarite
-    print("\n[2/5] Execution des tests de stationnarite...")
+    print("\n[2/8] Execution des tests de stationnarite...")
     stationarity_results = run_stationarity_tests(log_returns, output_dir=output_dir)
     results["stationarity_tests"] = stationarity_results
 
     # 3. Plot de stationnarite
-    print("\n[3/5] Generation du plot de stationnarite...")
+    print("\n[3/8] Generation du plot de stationnarite...")
     fig_stationarity = plot_stationarity(log_returns, stationarity_results, output_dir=output_dir)
     results["fig_stationarity"] = fig_stationarity
 
     # 4. Serie temporelle
-    print("\n[4/5] Generation du plot de serie temporelle...")
+    print("\n[4/8] Generation du plot de serie temporelle...")
     fig_ts = plot_log_returns_time_series(df, log_returns, output_dir=output_dir)
     results["fig_time_series"] = fig_ts
 
     # 5. Autocorrelation
-    print("\n[5/5] Calcul de l'autocorrelation...")
+    print("\n[5/8] Calcul de l'autocorrelation...")
     fig_acf = compute_autocorrelation(log_returns, output_dir=output_dir)
     results["fig_acf"] = fig_acf
+
+    # 6. Analyse de tendance sur les prix (Close)
+    print("\n[6/8] Analyse de tendance sur les prix...")
+    prices = cast(pd.Series, df[CLOSE_COLUMN])
+    trend_results_prices = compute_trend_statistics(prices, output_dir=output_dir)
+    results["trend_analysis_prices"] = trend_results_prices
+
+    # 7. Plot de l'analyse de tendance
+    print("\n[7/8] Generation du plot d'analyse de tendance...")
+    fig_trend = plot_trend_analysis(
+        prices, trend_results_prices, series_name="Prix (Close)", output_dir=output_dir
+    )
+    results["fig_trend_analysis"] = fig_trend
+
+    # 8. Extraction de tendance (adapte aux dollar bars)
+    print("\n[8/8] Extraction de tendance (dollar bars)...")
+    fig_decomp = plot_trend_extraction(prices, windows=[20, 50, 100, 200], output_dir=output_dir)
+    results["fig_trend_extraction"] = fig_decomp
 
     # Sauvegarder le dataset avec log-returns dans data/prepared/
     log_returns_df = df.copy()

@@ -1,4 +1,4 @@
-"""File and directory paths for the S&P 500 Forecasting project."""
+"""File and directory paths for the BTC/USD Tick Data Forecasting project."""
 
 from __future__ import annotations
 
@@ -16,54 +16,60 @@ DATA_DIR = PROJECT_ROOT / "data"
 RESULTS_DIR = PROJECT_ROOT / "outputs" / "results"
 PLOTS_DIR = PROJECT_ROOT / "outputs" / "plots"
 
+# Legacy artifacts directory (backward compatibility)
+ARTIFACTS_DIR = RESULTS_DIR
+
 # ============================================================================
 # DATA PIPELINE - File paths
 # ============================================================================
 
-# Repo uses raw/cleaned/prepared subfolders; keep legacy aliases for S&P modules
+# BTC/USD tick data pipeline directories
 RAW_DATA_DIR = DATA_DIR / "raw"
 CLEANED_DATA_DIR = DATA_DIR / "cleaned"
 PREPARED_DATA_DIR = DATA_DIR / "prepared"
 
-# Raw data files
-SP500_TICKERS_FILE = DATA_DIR / "sp500_tickers.csv"
+# Raw BTC/USD tick data files
 DATASET_RAW_CSV = RAW_DATA_DIR / "dataset_raw.csv"
 DATASET_RAW_PARQUET = RAW_DATA_DIR / "dataset_raw.parquet"
-DATASET_FILE = DATASET_RAW_CSV  # alias expected by S&P modules
-DATASET_FILTERED_FILE = CLEANED_DATA_DIR / "dataset_clean.csv"
-DATASET_FILTERED_PARQUET_FILE = CLEANED_DATA_DIR / "dataset_clean.parquet"
 
-DATA_TICKERS_FULL_FILE = PREPARED_DATA_DIR / "data_tickers_full.parquet"
-DATA_TICKERS_FULL_INSIGHTS_FILE = PREPARED_DATA_DIR / "data_tickers_full_insights.parquet"
-DATA_TICKERS_FULL_INDICATORS_FILE = PREPARED_DATA_DIR / "data_tickers_full_indicators.parquet"
-DATA_TICKERS_FULL_INSIGHTS_INDICATORS_FILE = (
-    PREPARED_DATA_DIR / "data_tickers_full_insights_indicators.parquet"
-)
+# Cleaned BTC/USD tick data files
+DATASET_CLEAN_CSV = CLEANED_DATA_DIR / "dataset_clean.csv"
+DATASET_CLEAN_PARQUET = CLEANED_DATA_DIR / "dataset_clean.parquet"
 
 # Prepared log-returns (map weighted aliases to existing files)
 WEIGHTED_LOG_RETURNS_FILE = PREPARED_DATA_DIR / "log_returns.csv"
 WEIGHTED_LOG_RETURNS_SPLIT_FILE = PREPARED_DATA_DIR / "log_returns_split.csv"
+LOG_RETURNS_PARQUET = PREPARED_DATA_DIR / "log_returns.parquet"
+LOG_RETURNS_CSV = PREPARED_DATA_DIR / "log_returns.csv"
+DOLLAR_BARS_PARQUET = PREPARED_DATA_DIR / "dollar_bars.parquet"
+DOLLAR_BARS_CSV = PREPARED_DATA_DIR / "dollar_bars.csv"
 DOLLAR_IMBALANCE_BARS_PARQUET = PREPARED_DATA_DIR / "dollar_imbalance_bars.parquet"
 DOLLAR_IMBALANCE_BARS_CSV = PREPARED_DATA_DIR / "dollar_imbalance_bars.csv"
 
-# LightGBM datasets
-LIGHTGBM_DATASET_COMPLETE_FILE = DATA_DIR / "lightgbm_dataset_complete.csv"
-LIGHTGBM_DATASET_WITHOUT_INSIGHTS_FILE = DATA_DIR / "lightgbm_dataset_without_insights.csv"
-LIGHTGBM_DATASET_WITHOUT_SIGMA2_FILE = DATA_DIR / "lightgbm_dataset_without_sigma2.csv"
-LIGHTGBM_DATASET_SIGMA_PLUS_BASE_FILE = DATA_DIR / "lightgbm_dataset_sigma_plus_base.csv"
-LIGHTGBM_DATASET_LOG_VOLATILITY_ONLY_FILE = DATA_DIR / "lightgbm_dataset_log_volatility_only.csv"
-LIGHTGBM_DATASET_TECHNICAL_INDICATORS_FILE = DATA_DIR / "lightgbm_dataset_technical_indicators.csv"
-LIGHTGBM_DATASET_INSIGHTS_ONLY_FILE = DATA_DIR / "lightgbm_dataset_insights_only.csv"
+# Features dataset files
+FEATURES_DIR = DATA_DIR / "features"
+SCALERS_DIR = FEATURES_DIR / "scalers"
+LOG_RETURNS_SPLIT_PARQUET = PREPARED_DATA_DIR / "log_returns_split.parquet"
+DATASET_FEATURES_PARQUET = FEATURES_DIR / "dataset_features.parquet"
+DATASET_FEATURES_CSV = FEATURES_DIR / "dataset_features.csv"
+DATASET_FEATURES_LINEAR_PARQUET = FEATURES_DIR / "dataset_features_linear.parquet"
+DATASET_FEATURES_LINEAR_CSV = FEATURES_DIR / "dataset_features_linear.csv"
+DATASET_FEATURES_LSTM_PARQUET = FEATURES_DIR / "dataset_features_lstm.parquet"
+DATASET_FEATURES_LSTM_CSV = FEATURES_DIR / "dataset_features_lstm.csv"
+# Scalers (fit on train only)
+ZSCORE_SCALER_FILE = SCALERS_DIR / "zscore_scaler.joblib"
+MINMAX_SCALER_FILE = SCALERS_DIR / "minmax_scaler.joblib"
 
-# Additional technical-variant datasets (used for dedicated model variants)
-# - technical_only: technical indicators without ARIMA/GARCH insights and without target lags
-# - technical_plus_insights: technical indicators with ARIMA/GARCH insights and without target lags
-LIGHTGBM_DATASET_TECHNICAL_ONLY_NO_TARGET_LAGS_FILE = (
-    DATA_DIR / "lightgbm_dataset_technical_only_no_target_lags.csv"
-)
-LIGHTGBM_DATASET_TECHNICAL_PLUS_INSIGHTS_NO_TARGET_LAGS_FILE = (
-    DATA_DIR / "lightgbm_dataset_technical_plus_insights_no_target_lags.csv"
-)
+# Prepared BTC/USD data files
+DATA_TICKERS_FULL_FILE = PREPARED_DATA_DIR / "data_btc_full.csv"
+DATA_TICKERS_FULL_INDICATORS_FILE = PREPARED_DATA_DIR / "data_btc_full_indicators.csv"
+DATA_TICKERS_FULL_INSIGHTS_FILE = PREPARED_DATA_DIR / "data_btc_full_insights.parquet"
+DATA_TICKERS_FULL_INSIGHTS_INDICATORS_FILE = PREPARED_DATA_DIR / "data_btc_full_insights_indicators.csv"
+
+# Dataset files (general)
+DATASET_FILE = PREPARED_DATA_DIR / "dataset.csv"
+DATASET_FILTERED_FILE = PREPARED_DATA_DIR / "dataset_filtered.csv"
+DATASET_FILTERED_PARQUET_FILE = PREPARED_DATA_DIR / "dataset_filtered.parquet"
 
 # ============================================================================
 # RESULTS DIRECTORIES - Organized by pipeline step/model
@@ -74,30 +80,9 @@ DATA_RESULTS_DIR = RESULTS_DIR / "data"
 STATIONARITY_REPORT_FILE = DATA_RESULTS_DIR / "stationarity_report.json"
 FETCH_REPORT_FILE = DATA_RESULTS_DIR / "fetch_report.json"
 
-# ARIMA results
-ARIMA_RESULTS_DIR = RESULTS_DIR / "arima"
-ARIMA_OPTIMIZATION_DIR = ARIMA_RESULTS_DIR / "optimization"
-ARIMA_TRAINING_DIR = ARIMA_RESULTS_DIR / "training"
-ARIMA_EVALUATION_DIR = ARIMA_RESULTS_DIR / "evaluation"
-ARIMA_OUTPUTS_DIR = ARIMA_RESULTS_DIR / "outputs"
-ARIMA_STATS_DIR = ARIMA_RESULTS_DIR / "stats"
-
-# ARIMA optimization files
-ARIMA_BEST_MODELS_FILE = ARIMA_OPTIMIZATION_DIR / "arima_best_models.json"
-ARIMA_OPTIMIZATION_RESULTS_FILE = ARIMA_OPTIMIZATION_DIR / "optimization_results.csv"
-
-# ARIMA training files
-ARIMA_TRAINED_MODEL_FILE = ARIMA_TRAINING_DIR / "model.pkl"
-ARIMA_TRAINED_MODEL_METADATA_FILE = ARIMA_TRAINING_DIR / "metadata.json"
-
-# ARIMA evaluation files
-ROLLING_PREDICTIONS_ARIMA_FILE = ARIMA_EVALUATION_DIR / "rolling_predictions.csv"
-ROLLING_VALIDATION_METRICS_ARIMA_FILE = ARIMA_EVALUATION_DIR / "rolling_metrics.json"
-LJUNGBOX_RESIDUALS_ARIMA_FILE = ARIMA_EVALUATION_DIR / "ljungbox_residuals.json"
-PREDICTIONS_VS_ACTUAL_ARIMA_PLOT = ARIMA_EVALUATION_DIR / "predictions_vs_actual.png"
-
-# ARIMA outputs (for next pipeline step)
-GARCH_DATASET_FILE = ARIMA_OUTPUTS_DIR / "dataset_garch.csv"
+# GARCH dataset (log returns with train/test split)
+# GARCH now works directly on log returns (no ARIMA preprocessing)
+GARCH_DATASET_FILE = PREPARED_DATA_DIR / "dataset_garch.csv"
 
 # GARCH results
 GARCH_RESULTS_DIR = RESULTS_DIR / "garch"
@@ -144,28 +129,6 @@ GARCH_ROLLING_EVAL_FILE = GARCH_ROLLING_DIR / "metrics.json"
 GARCH_ROLLING_VARIANCE_FILE = GARCH_ROLLING_DIR / "variance.parquet"
 GARCH_ML_DATASET_FILE = GARCH_ROLLING_DIR / "ml_dataset.parquet"
 
-# LightGBM results
-LIGHTGBM_RESULTS_DIR = RESULTS_DIR / "lightgbm"
-LIGHTGBM_OPTIMIZATION_DIR = LIGHTGBM_RESULTS_DIR / "optimization"
-LIGHTGBM_TRAINING_DIR = LIGHTGBM_RESULTS_DIR / "training"
-LIGHTGBM_MODELS_DIR = LIGHTGBM_RESULTS_DIR / "models"
-LIGHTGBM_EVALUATION_DIR = LIGHTGBM_RESULTS_DIR / "evaluation"
-LIGHTGBM_ABLATION_DIR = LIGHTGBM_RESULTS_DIR / "ablation"
-
-# LightGBM optimization files
-LIGHTGBM_OPTIMIZATION_RESULTS_FILE = LIGHTGBM_OPTIMIZATION_DIR / "results.json"
-
-# LightGBM training files
-LIGHTGBM_TRAINING_RESULTS_FILE = LIGHTGBM_TRAINING_DIR / "results.json"
-
-# LightGBM evaluation files
-LIGHTGBM_EVAL_RESULTS_FILE = LIGHTGBM_EVALUATION_DIR / "results.json"
-LIGHTGBM_PERMUTATION_RESULTS_FILE = LIGHTGBM_EVALUATION_DIR / "permutation_importance.json"
-LIGHTGBM_LEAKAGE_TEST_RESULTS_FILE = LIGHTGBM_EVALUATION_DIR / "leakage_test_results.json"
-
-# LightGBM ablation files
-LIGHTGBM_ABLATION_SIGMA2_RESULTS_FILE = LIGHTGBM_ABLATION_DIR / "sigma2_results.json"
-
 
 # ============================================================================
 # PLOTS DIRECTORIES - Organized by pipeline step/model
@@ -173,17 +136,6 @@ LIGHTGBM_ABLATION_SIGMA2_RESULTS_FILE = LIGHTGBM_ABLATION_DIR / "sigma2_results.
 
 # Data pipeline plots
 DATA_PLOTS_DIR = PLOTS_DIR / "data"
-
-# ARIMA plots
-ARIMA_PLOTS_DIR = PLOTS_DIR / "arima"
-ARIMA_DATA_VISU_PLOTS_DIR = ARIMA_PLOTS_DIR / "data_visualization"
-ARIMA_EVALUATION_PLOTS_DIR = ARIMA_PLOTS_DIR / "evaluation"
-ARIMA_SEASONALITY_PLOTS_DIR = ARIMA_PLOTS_DIR / "saisonnalite"
-
-# ARIMA data visualization plots
-ARIMA_DATA_VISU_PLOTS_DIR = ARIMA_DATA_VISU_PLOTS_DIR
-ARIMA_EVALUATION_PLOTS_DIR = ARIMA_EVALUATION_PLOTS_DIR
-ARIMA_RESIDUALS_LJUNGBOX_PLOT = ARIMA_EVALUATION_PLOTS_DIR / "ljungbox_residuals.png"
 
 # GARCH plots
 GARCH_PLOTS_DIR = PLOTS_DIR / "garch"
@@ -217,13 +169,51 @@ GARCH_EVAL_VAR_VIOLATIONS_TEMPLATE = str(
     GARCH_EVALUATION_PLOTS_DIR / "var_violations_alpha_{alpha}.png"
 )
 
-# LightGBM plots
-LIGHTGBM_PLOTS_DIR = PLOTS_DIR / "lightgbm"
-LIGHTGBM_CORRELATION_PLOTS_DIR = LIGHTGBM_PLOTS_DIR / "correlation"
-LIGHTGBM_SHAP_PLOTS_DIR = LIGHTGBM_PLOTS_DIR / "shap"
-LIGHTGBM_PERMUTATION_PLOTS_DIR = LIGHTGBM_PLOTS_DIR / "permutation"
+# ============================================================================
+# MACHINE LEARNING MODEL DIRECTORIES
+# ============================================================================
 
+ML_RESULTS_DIR = RESULTS_DIR / "ml"
 
-# ARIMA artifacts directory (legacy, use ARIMA_OPTIMIZATION_DIR instead)
-ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
-ARIMA_ARTIFACTS_DIR = ARTIFACTS_DIR / "arima"
+# LightGBM
+LIGHTGBM_DIR = ML_RESULTS_DIR / "lightgbm"
+LIGHTGBM_ARTIFACTS_DIR = LIGHTGBM_DIR / "artifacts"
+LIGHTGBM_MODEL_FILE = LIGHTGBM_ARTIFACTS_DIR / "lightgbm_model.joblib"
+LIGHTGBM_BEST_PARAMS_FILE = LIGHTGBM_ARTIFACTS_DIR / "best_params.json"
+LIGHTGBM_TRAINING_RESULTS_FILE = LIGHTGBM_ARTIFACTS_DIR / "training_results.json"
+LIGHTGBM_TEST_EVAL_FILE = LIGHTGBM_ARTIFACTS_DIR / "test_evaluation.json"
+
+# XGBoost
+XGBOOST_DIR = ML_RESULTS_DIR / "xgboost"
+
+# CatBoost
+CATBOOST_DIR = ML_RESULTS_DIR / "catboost"
+
+# Random Forest
+RANDOM_FOREST_DIR = ML_RESULTS_DIR / "random_forest"
+RANDOM_FOREST_ARTIFACTS_DIR = RANDOM_FOREST_DIR / "artifacts"
+RANDOM_FOREST_MODEL_FILE = RANDOM_FOREST_ARTIFACTS_DIR / "random_forest_model.joblib"
+RANDOM_FOREST_BEST_PARAMS_FILE = RANDOM_FOREST_ARTIFACTS_DIR / "best_params.json"
+RANDOM_FOREST_TRAINING_RESULTS_FILE = RANDOM_FOREST_ARTIFACTS_DIR / "training_results.json"
+RANDOM_FOREST_TEST_EVAL_FILE = RANDOM_FOREST_ARTIFACTS_DIR / "test_evaluation.json"
+
+# ============================================================================
+# ECONOMETRIC MODEL DIRECTORIES
+# ============================================================================
+
+ECONOMETRIC_DIR = RESULTS_DIR / "econometric"
+
+# Ridge
+RIDGE_DIR = ECONOMETRIC_DIR / "ridge"
+
+# Lasso
+LASSO_DIR = ECONOMETRIC_DIR / "lasso"
+
+# ============================================================================
+# DEEP LEARNING MODEL DIRECTORIES
+# ============================================================================
+
+DL_RESULTS_DIR = RESULTS_DIR / "deep_learning"
+
+# LSTM
+LSTM_DIR = DL_RESULTS_DIR / "lstm"

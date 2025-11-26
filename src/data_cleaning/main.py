@@ -12,7 +12,8 @@ _project_root = _script_dir.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from src.data_cleaning.data_cleaning import filter_by_membership
+from src.config_logging import setup_logging
+from src.data_cleaning.cleaning import clean_ticks_data
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -23,15 +24,16 @@ def main() -> None:
 
     The sequence is:
 
-    1. Run :func:`filter_by_membership` to apply integrity fixes and persist
+    1. Run :func:`clean_ticks_data` to apply integrity fixes and persist
        a cleaned dataset.
 
     Any handled error leads to a non-zero exit code to ease automation.
     """
+    setup_logging()
     logger.info("Launching data_cleaning CLI")
 
     try:
-        filter_by_membership()
+        clean_ticks_data()
         logger.info("Data cleaning completed successfully")
     except (FileNotFoundError, KeyError, ValueError, OSError) as e:
         logger.error("Data cleaning failed: %s", e)

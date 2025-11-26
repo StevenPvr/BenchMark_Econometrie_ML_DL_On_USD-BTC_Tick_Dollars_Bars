@@ -1,9 +1,9 @@
-"""Data cleaning module for S&P 500 dataset."""
+"""Data cleaning module for BTC/USD tick data."""
 
 from __future__ import annotations
 
-from src.data_cleaning.data_cleaning import filter_by_membership
+from src.data_cleaning.cleaning import clean_ticks_data
 
 __all__ = [
-    "filter_by_membership",
+    "clean_ticks_data",
 ]

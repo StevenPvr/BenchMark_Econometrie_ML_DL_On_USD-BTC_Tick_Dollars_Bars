@@ -1,7 +1,10 @@
-"""Data fetching module for S&P 500 tickers and historical data."""
+"""Data fetching module for BTC/USD tick data."""
 
-from __future__ import annotations
+from __future__ import annotations # type: ignore[import-untyped]
 
-from src.data_fetching.data_fetching import download_sp500_data, fetch_sp500_tickers
+def download_ticks_in_date_range() -> None:
+    from src.data_fetching.fetching import download_ticks_in_date_range as _impl
+    _impl()
 
-__all__ = ["fetch_sp500_tickers", "download_sp500_data"]
+
+__all__ = ["download_ticks_in_date_range"]

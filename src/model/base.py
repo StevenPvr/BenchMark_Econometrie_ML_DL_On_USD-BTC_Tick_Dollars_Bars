@@ -40,6 +40,7 @@ class BaseModel(ABC):
         self,
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
+        **kwargs: Any,
     ) -> "BaseModel":
         """
         Entraine le modele sur les donnees.

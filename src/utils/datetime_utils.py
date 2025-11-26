@@ -366,7 +366,8 @@ def _normalize_dates_to_index(dates: pd.Series | pd.DatetimeIndex | list) -> pd.
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="Could not infer format", category=UserWarning)
-        return pd.DatetimeIndex(pd.to_datetime(dates, errors="raise"))
+        # Use 'mixed' format to handle timestamps with/without microseconds consistently
+        return pd.DatetimeIndex(pd.to_datetime(dates, errors="raise", format="mixed"))
 
 
 def _apply_date_formatting(datetime_index: pd.DatetimeIndex, date_format: str) -> pd.Series:

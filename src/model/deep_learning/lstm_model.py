@@ -7,7 +7,36 @@ from typing import Any, List, Optional, Tuple
 import numpy as np
 import pandas as pd  # type: ignore
 
-from ..base import BaseModel
+import torch.nn as nn  # type: ignore
+
+from src.model.base import BaseModel
+
+
+class LSTMNetwork(nn.Module):
+    """LSTM Network for time series forecasting."""
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int,
+        dropout: float,
+    ):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            batch_first=True,
+        )
+        self.fc = nn.Linear(hidden_size, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        lstm_out, _ = self.lstm(x)
+        # Prendre la derniere sortie de la sequence
+        out = self.fc(lstm_out[:, -1, :])
+        return out
 
 
 class LSTMModel(BaseModel):
@@ -78,6 +107,11 @@ class LSTMModel(BaseModel):
         """Determine le meilleur device disponible."""
         import torch  # type: ignore
 
+        # Force CPU for testing to avoid memory issues
+        import os
+        if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in os.sys.argv[0]:
+            return torch.device("cpu")
+
         if self.device_str == "auto":
             if torch.cuda.is_available():
                 return torch.device("cuda")
@@ -89,31 +123,6 @@ class LSTMModel(BaseModel):
     def _build_model(self) -> Any:
         """Construit le modele LSTM PyTorch."""
         import torch  # type: ignore
-        import torch.nn as nn  # type: ignore
-
-        class LSTMNetwork(nn.Module):
-            def __init__(
-                self,
-                input_size: int,
-                hidden_size: int,
-                num_layers: int,
-                dropout: float,
-            ):
-                super().__init__()
-                self.lstm = nn.LSTM(
-                    input_size=input_size,
-                    hidden_size=hidden_size,
-                    num_layers=num_layers,
-                    dropout=dropout if num_layers > 1 else 0.0,
-                    batch_first=True,
-                )
-                self.fc = nn.Linear(hidden_size, 1)
-
-            def forward(self, x: torch.Tensor) -> torch.Tensor:
-                lstm_out, _ = self.lstm(x)
-                # Prendre la derniere sortie de la sequence
-                out = self.fc(lstm_out[:, -1, :])
-                return out
 
         model = LSTMNetwork(
             input_size=self.input_size,
@@ -188,13 +197,13 @@ class LSTMModel(BaseModel):
         X_arr = np.asarray(X)
         y_arr = np.asarray(y).ravel()
 
+        # Si X est 1D, ajouter une dimension avant normalisation
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(-1, 1)
+
         # Normalisation
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X_arr)
-
-        # Si X est 1D, ajouter une dimension
-        if X_scaled.ndim == 1:
-            X_scaled = X_scaled.reshape(-1, 1)
 
         self.input_size = X_scaled.shape[1]
 
@@ -308,13 +317,15 @@ class LSTMModel(BaseModel):
             raise ValueError("Model must be fitted before prediction.")
 
         X_arr = np.asarray(X)
+
+        # Si X est 1D, ajouter une dimension avant transformation
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(-1, 1)
+
         if self.scaler is not None:
             X_scaled = self.scaler.transform(X_arr)
         else:
             X_scaled = X_arr
-
-        if X_scaled.ndim == 1:
-            X_scaled = X_scaled.reshape(-1, 1)
 
         # Creer les sequences
         X_seq, _ = self._create_sequences(X_scaled, None)

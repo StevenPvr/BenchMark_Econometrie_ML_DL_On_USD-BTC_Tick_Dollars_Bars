@@ -42,7 +42,7 @@ from src.utils.datetime_utils import (
 )
 
 # Financial utilities
-from src.utils.financial import compute_rolling_liquidity_weights
+from src.utils.financial import compute_rolling_volume_scaling
 
 # I/O utilities
 from src.utils.io import (
@@ -147,5 +147,5 @@ __all__ = [
     # Statsmodels
     "suppress_statsmodels_warnings",
     # Financial
-    "compute_rolling_liquidity_weights",
+    "compute_rolling_volume_scaling",
 ]
