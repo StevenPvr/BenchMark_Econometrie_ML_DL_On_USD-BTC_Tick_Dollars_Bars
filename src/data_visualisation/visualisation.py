@@ -6,22 +6,22 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional, Sequence, cast
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt # type: ignore
 import numpy as np
 import pandas as pd  # type: ignore
 import seaborn as sns  # type: ignore
 from matplotlib.axes import Axes
-from matplotlib.figure import Figure
+from matplotlib.figure import Figure # type: ignore
 from statsmodels.tsa.stattools import adfuller, kpss  # type: ignore
 from statsmodels.tsa.seasonal import seasonal_decompose  # type: ignore
 from scipy import stats  # type: ignore
 from scipy.stats import linregress  # type: ignore
 
 from ..constants import CLOSE_COLUMN, LOG_RETURN_COLUMN # type: ignore
-from ..path import DOLLAR_IMBALANCE_BARS_PARQUET, LOG_RETURNS_PARQUET, LOG_RETURNS_CSV # type: ignore
+from ..path import DOLLAR_BARS_PARQUET, LOG_RETURNS_PARQUET, LOG_RETURNS_CSV # type: ignore
 
 
-def load_dollar_bars(parquet_path: Path = DOLLAR_IMBALANCE_BARS_PARQUET) -> pd.DataFrame:
+def load_dollar_bars(parquet_path: Path = DOLLAR_BARS_PARQUET) -> pd.DataFrame:
     """
     Charge les dollar bars depuis le fichier parquet.
 
@@ -831,9 +831,10 @@ def plot_trend_analysis(
 
 
 def run_full_analysis(
-    parquet_path: Path = DOLLAR_IMBALANCE_BARS_PARQUET,
+    parquet_path: Path = DOLLAR_BARS_PARQUET,
     output_dir: Optional[Path] = None,
     show_plots: bool = True,
+    sample_fraction: float = 1.0,  # New parameter for sampling
 ) -> Dict[str, Any]:
     """
     Execute l'analyse complete des log-returns des dollar bars.
@@ -846,6 +847,8 @@ def run_full_analysis(
         Repertoire ou sauvegarder les resultats.
     show_plots : bool
         Si True, affiche les plots.
+    sample_fraction : float
+        Fraction du dataset a utiliser pour l'analyse (0.0 a 1.0).
 
     Returns
     -------
@@ -860,6 +863,14 @@ def run_full_analysis(
     df = load_dollar_bars(parquet_path)
     print(f"\nDonnees chargees: {len(df)} barres")
     print(f"Periode: {df['datetime_close'].min()} a {df['datetime_close'].max()}")
+
+    # Appliquer l'echantillonnage si necessaire
+    if sample_fraction < 1.0 and not df.empty:
+        original_len = len(df)
+        df = df.sample(frac=sample_fraction, random_state=42).sort_values("datetime_close").reset_index(drop=True)
+        print(f"Echantillonnage applique: {len(df)} barres ({sample_fraction:.0%} de l'original)")
+        if df.empty:
+            raise ValueError("Dataset vide apres echantillonnage. Essayez d'augmenter sample_fraction.")
 
     # Calculer les log-returns
     print("\n[0/8] Calcul des log-returns...")

@@ -19,13 +19,30 @@ from src.data_preparation.preparation import (
     run_dollar_bars_pipeline_batch,
 )
 from src.path import (
-    DATASET_RAW_PARQUET,
+    DATASET_CLEAN_PARQUET,
     DOLLAR_BARS_PARQUET,
     DOLLAR_BARS_CSV,
 )
 from src.utils import get_logger
+import pandas as pd
 
 logger = get_logger(__name__)
+
+
+def _calculate_optimal_threshold(parquet_path: Path, target_ticks: int = 50) -> float:
+    """Calculate optimal fixed threshold based on mean dollar value per tick."""
+    logger.info("Loading columns 'price' and 'amount' to calculate mean dollar value...")
+    # Load only necessary columns for speed
+    df = pd.read_parquet(parquet_path, columns=["price", "amount"])
+    
+    mean_dollar_value = (df["price"] * df["amount"]).mean()
+    threshold = mean_dollar_value * target_ticks
+    
+    logger.info("  • Mean Dollar Value/Tick: %.2f", mean_dollar_value)
+    logger.info("  • Target Ticks/Bar:       %d", target_ticks)
+    logger.info("  • Calculated Threshold:   %.2f", threshold)
+    
+    return float(threshold)
 
 
 def main() -> None:
@@ -39,29 +56,44 @@ def main() -> None:
 
     try:
         # Check if input data exists
-        if not DATASET_RAW_PARQUET.exists():
-            logger.error("Input data not found: %s", DATASET_RAW_PARQUET)
+        if not DATASET_CLEAN_PARQUET.exists():
+            logger.error("Input data not found: %s", DATASET_CLEAN_PARQUET)
             logger.error("Please run data_fetching and data_cleaning first")
             sys.exit(1)
 
         # Determine processing approach based on input type
-        if DATASET_RAW_PARQUET.is_dir():
+        if DATASET_CLEAN_PARQUET.is_dir():
             # Directory with partitioned files - use batch processing
             logger.info("📁 Detected partitioned dataset - using memory-efficient batch processing")
-            logger.info("Generating dollar bars from partitioned files with adaptive threshold...")
+            
+            # For partitioned data, we need an estimate. We'll load the first partition to estimate the mean.
+            # This is an approximation but sufficient for setting a fixed threshold.
+            first_partition = next(DATASET_CLEAN_PARQUET.glob("*.parquet"))
+            logger.info("Estimating threshold from first partition: %s", first_partition.name)
+            threshold = _calculate_optimal_threshold(first_partition, target_ticks=50)
+            
+            logger.info("Generating dollar bars from partitioned files with FIXED threshold: %.2f", threshold)
             df_bars = run_dollar_bars_pipeline_batch(
-                input_dir=DATASET_RAW_PARQUET,
+                input_dir=DATASET_CLEAN_PARQUET,
                 output_parquet=DOLLAR_BARS_PARQUET,
-                output_csv=DOLLAR_BARS_CSV
+                output_csv=DOLLAR_BARS_CSV,
+                threshold=threshold,
+                adaptive=False
             )
         else:
             # Single file - use traditional processing
             logger.info("📄 Detected single file - using traditional processing")
-            logger.info("Generating dollar bars with adaptive threshold...")
+            
+            logger.info("Calculating optimal fixed threshold from dataset...")
+            threshold = _calculate_optimal_threshold(DATASET_CLEAN_PARQUET, target_ticks=50)
+            
+            logger.info("Generating dollar bars with FIXED threshold: %.2f", threshold)
             df_bars = run_dollar_bars_pipeline(
-                input_parquet=DATASET_RAW_PARQUET,
+                input_parquet=DATASET_CLEAN_PARQUET,
                 output_parquet=DOLLAR_BARS_PARQUET,
-                output_csv=DOLLAR_BARS_CSV
+                output_csv=DOLLAR_BARS_CSV,
+                threshold=threshold,
+                adaptive=False
             )
 
         logger.info("✓ Dollar bars generation completed")

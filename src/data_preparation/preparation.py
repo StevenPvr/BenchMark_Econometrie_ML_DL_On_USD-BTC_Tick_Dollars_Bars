@@ -32,7 +32,7 @@ import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
+import numpy as np # type: ignore[import-untyped]
 import pandas as pd # type: ignore[import-untyped]
 from numba import njit # type: ignore[import-untyped]
 
@@ -724,8 +724,8 @@ def run_dollar_bars_pipeline_batch(
     """
     from pathlib import Path
     import pandas as pd
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+    import pyarrow as pa # type: ignore[import-untyped]
+    import pyarrow.parquet as pq # type: ignore[import-untyped]
 
     input_path = Path(input_dir)
     if not input_path.exists():
