@@ -298,6 +298,13 @@ LABEL_META_BENCHMARKS_DIR = LABEL_META_DIR / "benchmarks"
 LABEL_META_MODELS_DIR = LABEL_META_DIR / "models"
 LABEL_META_PARAMS_DIR = LABEL_META_DIR / "params"
 
+# Refactored Label Meta
+LABEL_META_TRAIN_DIR = RESULTS_DIR / "label_meta_train"
+LABEL_META_TRAIN_MODELS_DIR = LABEL_META_TRAIN_DIR / "models"
+
+LABEL_META_EVAL_DIR = RESULTS_DIR / "label_meta_eval"
+LABEL_META_EVAL_RESULTS_DIR = LABEL_META_EVAL_DIR / "results"
+
 # ============================================================================
 # LABELING (LEGACY - DEPRECATED, use LABEL_PRIMAIRE_DIR and LABEL_META_DIR)
 # ============================================================================
