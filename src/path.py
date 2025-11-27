@@ -285,6 +285,8 @@ LABEL_PRIMAIRE_OPTIMIZATION_FILE = LABEL_PRIMAIRE_DIR / "joint_optimization.json
 LABEL_PRIMAIRE_LABELING_PARAMS_FILE = LABEL_PRIMAIRE_DIR / "labeling_params.json"
 LABEL_PRIMAIRE_EVENTS_TRAIN_FILE = LABEL_PRIMAIRE_DIR / "events_train.parquet"
 LABEL_PRIMAIRE_EVENTS_TEST_FILE = LABEL_PRIMAIRE_DIR / "events_test.parquet"
+LABEL_PRIMAIRE_EVALUATION_FILE = LABEL_PRIMAIRE_DIR / "primary_evaluation.json"
+LABEL_PRIMAIRE_MODELS_DIR = LABEL_PRIMAIRE_DIR / "models"
 
 # ============================================================================
 # LABEL META - Meta-Model & Benchmarking
@@ -293,6 +295,8 @@ LABEL_PRIMAIRE_EVENTS_TEST_FILE = LABEL_PRIMAIRE_DIR / "events_test.parquet"
 LABEL_META_DIR = RESULTS_DIR / "label_meta"
 LABEL_META_MODEL_FILE = LABEL_META_DIR / "meta_model.joblib"
 LABEL_META_BENCHMARKS_DIR = LABEL_META_DIR / "benchmarks"
+LABEL_META_MODELS_DIR = LABEL_META_DIR / "models"
+LABEL_META_PARAMS_DIR = LABEL_META_DIR / "params"
 
 # ============================================================================
 # LABELING (LEGACY - DEPRECATED, use LABEL_PRIMAIRE_DIR and LABEL_META_DIR)

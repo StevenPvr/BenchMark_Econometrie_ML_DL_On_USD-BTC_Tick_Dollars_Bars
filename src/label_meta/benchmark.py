@@ -14,6 +14,14 @@ The workflow:
 
 from __future__ import annotations
 
+
+import os
+import sys
+
+# Allow running as a script from the repo root
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
 from typing import Any
 
 import numpy as np

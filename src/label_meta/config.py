@@ -33,7 +33,6 @@ class BenchmarkConfig:
         n_splits: Number of CV splits.
         purge_gap: Gap between train/test in CV.
         skip_primary_optim: Skip primary model optimization.
-        primary_params: Pre-optimized primary model parameters (optional).
         random_state: Random seed.
         verbose: Enable logging.
     """
@@ -43,7 +42,6 @@ class BenchmarkConfig:
     n_splits: int = 5
     purge_gap: int = 5
     skip_primary_optim: bool = False
-    primary_params: dict[str, Any] | None = None
     random_state: int = DEFAULT_RANDOM_STATE
     verbose: bool = True
 

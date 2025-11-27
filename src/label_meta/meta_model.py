@@ -214,3 +214,4 @@ def _get_model_class(model_name: str) -> type:
 
     else:
         raise ValueError(f"Unknown model: {model_name}")
+
