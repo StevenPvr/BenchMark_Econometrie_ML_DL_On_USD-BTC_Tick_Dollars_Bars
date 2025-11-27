@@ -277,16 +277,28 @@ DL_RESULTS_DIR = RESULTS_DIR / "deep_learning"
 LSTM_DIR = DL_RESULTS_DIR / "lstm"
 
 # ============================================================================
-# LABEL PRIMAIRE - Triple-Barrier Labeling
+# LABEL PRIMAIRE - Triple-Barrier Labeling (Refactored)
 # ============================================================================
 
+# Step 1: Optimization
+LABEL_PRIMAIRE_OPTI_DIR = RESULTS_DIR / "label_primaire_opti"
+# Default optimization file (legacy/default), new scripts may ask for user-defined names
+LABEL_PRIMAIRE_OPTIMIZATION_FILE = LABEL_PRIMAIRE_OPTI_DIR / "joint_optimization.json"
+LABEL_PRIMAIRE_LABELING_PARAMS_FILE = LABEL_PRIMAIRE_OPTI_DIR / "labeling_params.json"
+
+# Step 2: Training
+LABEL_PRIMAIRE_TRAIN_DIR = RESULTS_DIR / "label_primaire_train"
+# Legacy/Default model dir (if needed)
+LABEL_PRIMAIRE_MODELS_DIR = LABEL_PRIMAIRE_TRAIN_DIR
+
+# Step 3: Evaluation
+LABEL_PRIMAIRE_EVAL_DIR = RESULTS_DIR / "label_primaire_eval"
+LABEL_PRIMAIRE_EVENTS_TRAIN_FILE = LABEL_PRIMAIRE_EVAL_DIR / "events_train.parquet"
+LABEL_PRIMAIRE_EVENTS_TEST_FILE = LABEL_PRIMAIRE_EVAL_DIR / "events_test.parquet"
+LABEL_PRIMAIRE_EVALUATION_FILE = LABEL_PRIMAIRE_EVAL_DIR / "primary_evaluation.json"
+
+# Legacy directory (kept for backward compatibility reference)
 LABEL_PRIMAIRE_DIR = RESULTS_DIR / "label_primaire"
-LABEL_PRIMAIRE_OPTIMIZATION_FILE = LABEL_PRIMAIRE_DIR / "joint_optimization.json"
-LABEL_PRIMAIRE_LABELING_PARAMS_FILE = LABEL_PRIMAIRE_DIR / "labeling_params.json"
-LABEL_PRIMAIRE_EVENTS_TRAIN_FILE = LABEL_PRIMAIRE_DIR / "events_train.parquet"
-LABEL_PRIMAIRE_EVENTS_TEST_FILE = LABEL_PRIMAIRE_DIR / "events_test.parquet"
-LABEL_PRIMAIRE_EVALUATION_FILE = LABEL_PRIMAIRE_DIR / "primary_evaluation.json"
-LABEL_PRIMAIRE_MODELS_DIR = LABEL_PRIMAIRE_DIR / "models"
 
 # ============================================================================
 # LABEL META - Meta-Model & Benchmarking
