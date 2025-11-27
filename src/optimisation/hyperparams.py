@@ -41,13 +41,13 @@ class HyperparamSpace(Protocol):
 
 
 # ============================================================================
-# ECONOMETRIC MODELS
+# ECONOMETRIC CLASSIFIERS
 # ============================================================================
 
 
 @dataclass
-class RidgeHyperparams:
-    """Hyperparameter space for Ridge regression.
+class RidgeClassifierHyperparams:
+    """Hyperparameter space for Ridge Classifier.
 
     Attributes:
         alpha_log_range: Log range for alpha (regularization).
@@ -55,12 +55,12 @@ class RidgeHyperparams:
         normalize: Whether to include normalization option.
     """
 
-    alpha_log_range: tuple[float, float] = (-5.0, 5.0)
+    alpha_log_range: tuple[float, float] = (-3.0, 3.0)
     fit_intercept: bool = True
     normalize: bool = True
 
     def suggest(self, trial: optuna.Trial) -> dict[str, Any]:
-        """Suggest Ridge hyperparameters."""
+        """Suggest Ridge Classifier hyperparameters."""
         params: dict[str, Any] = {
             "alpha": trial.suggest_float("alpha", 10 ** self.alpha_log_range[0], 10 ** self.alpha_log_range[1], log=True),
         }
@@ -72,23 +72,56 @@ class RidgeHyperparams:
 
 
 @dataclass
-class LassoHyperparams:
-    """Hyperparameter space for Lasso regression.
+class LassoClassifierHyperparams:
+    """Hyperparameter space for Lasso Classifier (L1 Logistic Regression).
+
+    Note: Uses C (inverse of alpha) for sklearn LogisticRegression.
 
     Attributes:
-        alpha_log_range: Log range for alpha (regularization).
+        C_log_range: Log range for C (inverse regularization strength).
         fit_intercept: Whether to include intercept option.
         normalize: Whether to include normalization option.
+        max_iter: Max iterations for convergence.
     """
 
-    alpha_log_range: tuple[float, float] = (-5.0, 5.0)
+    C_log_range: tuple[float, float] = (-3.0, 3.0)
     fit_intercept: bool = True
     normalize: bool = True
+    max_iter: int = 10000
 
     def suggest(self, trial: optuna.Trial) -> dict[str, Any]:
-        """Suggest Lasso hyperparameters."""
+        """Suggest Lasso Classifier hyperparameters."""
         params: dict[str, Any] = {
-            "alpha": trial.suggest_float("alpha", 10 ** self.alpha_log_range[0], 10 ** self.alpha_log_range[1], log=True),
+            "C": trial.suggest_float("C", 10 ** self.C_log_range[0], 10 ** self.C_log_range[1], log=True),
+            "max_iter": self.max_iter,
+        }
+        if self.fit_intercept:
+            params["fit_intercept"] = trial.suggest_categorical("fit_intercept", [True, False])
+        if self.normalize:
+            params["normalize"] = trial.suggest_categorical("normalize", [True, False])
+        return params
+
+
+@dataclass
+class LogisticHyperparams:
+    """Hyperparameter space for Logistic Regression (no penalty).
+
+    Similar to OLS for regression - no regularization parameter.
+
+    Attributes:
+        fit_intercept: Whether to include intercept option.
+        normalize: Whether to include normalization option.
+        max_iter: Max iterations for convergence.
+    """
+
+    fit_intercept: bool = True
+    normalize: bool = True
+    max_iter: int = 10000
+
+    def suggest(self, trial: optuna.Trial) -> dict[str, Any]:
+        """Suggest Logistic hyperparameters."""
+        params: dict[str, Any] = {
+            "max_iter": self.max_iter,
         }
         if self.fit_intercept:
             params["fit_intercept"] = trial.suggest_categorical("fit_intercept", [True, False])
@@ -294,17 +327,18 @@ class LSTMHyperparams:
 # ============================================================================
 
 
-# Default hyperparameter spaces for each model type
+# Default hyperparameter spaces for each model type (classification only)
 DEFAULT_HYPERPARAMS: dict[str, HyperparamSpace] = {
-    # Econometric
-    "ridge": RidgeHyperparams(),
-    "lasso": LassoHyperparams(),
-    # ML
+    # Econometric Classifiers
+    "ridge_classifier": RidgeClassifierHyperparams(),
+    "lasso_classifier": LassoClassifierHyperparams(),
+    "logistic": LogisticHyperparams(),
+    # ML Classifiers
     "xgboost": XGBoostHyperparams(),
     "lightgbm": LightGBMHyperparams(),
     "catboost": CatBoostHyperparams(),
     "randomforest": RandomForestHyperparams(),
-    # DL
+    # DL Classifiers
     "lstm": LSTMHyperparams(),
 }
 
@@ -323,12 +357,16 @@ def get_hyperparam_space(model_name: str) -> HyperparamSpace:
     """
     name_lower = model_name.lower().replace(" ", "").replace("_", "")
 
-    # Handle aliases
+    # Handle aliases (all models are classifiers now)
     aliases = {
-        "ridge": "ridge",
-        "ridgeregression": "ridge",
-        "lasso": "lasso",
-        "lassoregression": "lasso",
+        # Econometric Classifiers
+        "ridge": "ridge_classifier",
+        "ridgeclassifier": "ridge_classifier",
+        "lasso": "lasso_classifier",
+        "lassoclassifier": "lasso_classifier",
+        "logistic": "logistic",
+        "logisticregression": "logistic",
+        # ML Classifiers
         "xgboost": "xgboost",
         "xgb": "xgboost",
         "lightgbm": "lightgbm",
@@ -339,6 +377,7 @@ def get_hyperparam_space(model_name: str) -> HyperparamSpace:
         "cb": "catboost",
         "randomforest": "randomforest",
         "rf": "randomforest",
+        # DL Classifiers
         "lstm": "lstm",
     }
 

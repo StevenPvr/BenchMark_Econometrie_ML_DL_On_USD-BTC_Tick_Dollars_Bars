@@ -1,9 +1,11 @@
-"""Complete pipeline for Ridge model: optimization, training, and evaluation.
+"""Complete pipeline for Ridge Classifier: optimization, training, and evaluation.
 
 This module provides a unified pipeline for:
 1. Hyperparameter optimization with Optuna + walk-forward CV
 2. Model training with the best parameters
 3. Model evaluation with comprehensive metrics
+
+Supports De Prado's triple-barrier labeling (-1, 0, 1).
 """
 
 from __future__ import annotations
@@ -19,14 +21,15 @@ from src.evaluation import (
     EvaluationResult,
     evaluate_model,
 )
-from src.model.econometrie.ridge.ridge import RidgeModel
+from src.model.econometrie.ridge_classifier.ridge_classifier import RidgeClassifierModel
 from src.optimisation import (
-    RidgeHyperparams,
+    RidgeClassifierHyperparams,
     OptimizationConfig,
     OptimizationResult,
     OptunaOptimizer,
     create_cv_config,
 )
+from src.optimisation.walk_forward_cv import DEFAULT_METRIC
 from src.training import (
     CrossValidationTrainingResult,
     TrainingResult,
@@ -45,7 +48,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class RidgePipelineConfig:
-    """Configuration for the Ridge pipeline.
+    """Configuration for the Ridge Classifier pipeline.
 
     Attributes:
         n_trials: Number of optimization trials.
@@ -53,7 +56,7 @@ class RidgePipelineConfig:
         purge_gap: Samples to purge between train and test.
         min_train_size: Minimum training set size.
         validation_split: Validation split for final training.
-        metric: Metric to optimize/evaluate.
+        metric: Metric to optimize/evaluate (default: f1_macro).
         output_dir: Directory for saving outputs.
         random_state: Random seed.
         verbose: Verbosity level.
@@ -64,7 +67,7 @@ class RidgePipelineConfig:
     purge_gap: int = 5
     min_train_size: int = 100
     validation_split: float = 0.2
-    metric: str = "mse"
+    metric: str = DEFAULT_METRIC
     output_dir: Path | None = None
     random_state: int = 42
     verbose: bool = True
@@ -77,7 +80,7 @@ class RidgePipelineConfig:
 
 @dataclass
 class RidgePipelineResult:
-    """Complete result from the Ridge pipeline.
+    """Complete result from the Ridge Classifier pipeline.
 
     Attributes:
         optimization_result: Hyperparameter optimization results.
@@ -91,13 +94,13 @@ class RidgePipelineResult:
     training_result: TrainingResult | CrossValidationTrainingResult
     evaluation_result: EvaluationResult
     best_params: dict[str, Any]
-    model: RidgeModel
+    model: RidgeClassifierModel
 
     def summary(self) -> str:
         """Generate a summary of the pipeline results."""
         lines = [
             "=" * 60,
-            "Ridge Pipeline Results",
+            "Ridge Classifier Pipeline Results",
             "=" * 60,
             "",
         ]
@@ -106,7 +109,7 @@ class RidgePipelineResult:
             lines.extend([
                 "OPTIMIZATION:",
                 f"  Trials: {self.optimization_result.n_completed}/{self.optimization_result.n_trials}",
-                f"  Best CV score: {self.optimization_result.best_score:.6f}",
+                f"  Best CV score: {self.optimization_result.best_score:.4f}",
                 "",
             ])
 
@@ -122,25 +125,30 @@ class RidgePipelineResult:
         ])
         if isinstance(self.training_result, CrossValidationTrainingResult):
             lines.extend([
-                f"  CV score: {self.training_result.cv_result.mean_score:.6f} "
-                f"(+/- {self.training_result.cv_result.std_score:.6f})",
-                f"  Final train score: {self.training_result.final_train_score:.6f}",
+                f"  CV score: {self.training_result.cv_result.mean_score:.4f} "
+                f"(+/- {self.training_result.cv_result.std_score:.4f})",
+                f"  Final train score: {self.training_result.final_train_score:.4f}",
             ])
         else:
             lines.extend([
-                f"  Train score: {self.training_result.train_score:.6f}",
+                f"  Train score: {self.training_result.train_score:.4f}",
             ])
             if self.training_result.val_score is not None:
-                lines.append(f"  Val score: {self.training_result.val_score:.6f}")
+                lines.append(f"  Val score: {self.training_result.val_score:.4f}")
 
-        # Model coefficients summary
+        # Model coefficients summary (multi-class: shape is (n_classes, n_features))
         if self.model.is_fitted:
             coefs = self.model.coef_
+            if coefs.ndim == 1:
+                n_features = len(coefs)
+                non_zero = np.sum(coefs != 0)
+            else:
+                n_features = coefs.shape[1]
+                non_zero = np.sum(np.any(coefs != 0, axis=0))
             lines.extend([
                 "",
                 "MODEL COEFFICIENTS:",
-                f"  Non-zero coefficients: {np.sum(coefs != 0)}/{len(coefs)}",
-                f"  Coefficient range: [{coefs.min():.4f}, {coefs.max():.4f}]",
+                f"  Non-zero features: {non_zero}/{n_features}",
             ])
 
         lines.extend([
@@ -148,7 +156,7 @@ class RidgePipelineResult:
             "EVALUATION (Test Set):",
         ])
         for metric, value in self.evaluation_result.metrics.items():
-            lines.append(f"  {metric}: {value:.6f}")
+            lines.append(f"  {metric}: {value:.4f}")
 
         lines.append("=" * 60)
         return "\n".join(lines)
@@ -160,7 +168,7 @@ class RidgePipelineResult:
 
 
 class RidgePipeline:
-    """Complete pipeline for Ridge: optimize, train, evaluate.
+    """Complete pipeline for Ridge Classifier: optimize, train, evaluate.
 
     Example:
         >>> pipeline = RidgePipeline(config=RidgePipelineConfig(
@@ -184,20 +192,20 @@ class RidgePipeline:
         self,
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
-        hyperparam_space: RidgeHyperparams | None = None,
+        hyperparam_space: RidgeClassifierHyperparams | None = None,
     ) -> OptimizationResult:
         """Optimize hyperparameters using Optuna with walk-forward CV.
 
         Args:
             X: Training features.
-            y: Training target.
+            y: Training target (class labels: -1, 0, 1).
             hyperparam_space: Custom hyperparameter space.
 
         Returns:
             OptimizationResult with best parameters.
         """
         if self.config.verbose:
-            logger.info("Starting Ridge hyperparameter optimization...")
+            logger.info("Starting Ridge Classifier hyperparameter optimization...")
 
         # Create configurations
         cv_config = create_cv_config(
@@ -211,11 +219,11 @@ class RidgePipeline:
             random_state=self.config.random_state,
         )
 
-        space = hyperparam_space or RidgeHyperparams()
+        space = hyperparam_space or RidgeClassifierHyperparams()
 
         # Run optimization
         optimizer = OptunaOptimizer(
-            model_class=RidgeModel,
+            model_class=RidgeClassifierModel,
             hyperparam_space=space,
             cv_config=cv_config,
             optimization_config=opt_config,
@@ -228,7 +236,7 @@ class RidgePipeline:
         )
 
         if self.config.verbose:
-            logger.info("Optimization complete. Best %s: %.6f", self.config.metric, result.best_score)
+            logger.info("Optimization complete. Best %s: %.4f", self.config.metric, result.best_score)
 
         return result
 
@@ -238,12 +246,12 @@ class RidgePipeline:
         y: np.ndarray | pd.Series,
         params: dict[str, Any],
         use_cv: bool = True,
-    ) -> tuple[RidgeModel, TrainingResult | CrossValidationTrainingResult]:
+    ) -> tuple[RidgeClassifierModel, TrainingResult | CrossValidationTrainingResult]:
         """Train the model with given parameters.
 
         Args:
             X: Training features.
-            y: Training target.
+            y: Training target (class labels: -1, 0, 1).
             params: Model hyperparameters.
             use_cv: If True, use walk-forward CV for training.
 
@@ -251,11 +259,12 @@ class RidgePipeline:
             Tuple of (trained model, training result).
         """
         if self.config.verbose:
-            logger.info("Training Ridge with optimized parameters...")
+            logger.info("Training Ridge Classifier with optimized parameters...")
 
         # Create model with best params
-        model = RidgeModel(**params)
+        model = RidgeClassifierModel(**params)
 
+        result: TrainingResult | CrossValidationTrainingResult
         if use_cv:
             result = train_with_cv(
                 model, X, y,
@@ -277,7 +286,7 @@ class RidgePipeline:
 
     def evaluate(
         self,
-        model: RidgeModel,
+        model: RidgeClassifierModel,
         X_test: np.ndarray | pd.DataFrame,
         y_test: np.ndarray | pd.Series,
     ) -> EvaluationResult:
@@ -286,17 +295,16 @@ class RidgePipeline:
         Args:
             model: Trained model.
             X_test: Test features.
-            y_test: Test target.
+            y_test: Test target (class labels: -1, 0, 1).
 
         Returns:
             EvaluationResult with metrics.
         """
         if self.config.verbose:
-            logger.info("Evaluating Ridge on test set...")
+            logger.info("Evaluating Ridge Classifier on test set...")
 
         result = evaluate_model(
             model, X_test, y_test,
-            metrics=["mse", "rmse", "mae", "r2", "mape"],
             verbose=self.config.verbose,
         )
 
@@ -315,9 +323,9 @@ class RidgePipeline:
 
         Args:
             X_train: Training features.
-            y_train: Training target.
+            y_train: Training target (class labels: -1, 0, 1).
             X_test: Test features.
-            y_test: Test target.
+            y_test: Test target (class labels: -1, 0, 1).
             skip_optimization: If True, skip optimization and use default_params.
             default_params: Parameters to use if skipping optimization.
 
@@ -326,7 +334,7 @@ class RidgePipeline:
         """
         if self.config.verbose:
             logger.info("=" * 60)
-            logger.info("Starting Ridge Pipeline")
+            logger.info("Starting Ridge Classifier Pipeline")
             logger.info("=" * 60)
 
         # Step 1: Optimization
@@ -370,7 +378,7 @@ class RidgePipeline:
         train_result: TrainingResult | CrossValidationTrainingResult,
         eval_result: EvaluationResult,
         best_params: dict[str, Any],
-        model: RidgeModel,
+        model: RidgeClassifierModel,
     ) -> None:
         """Save pipeline results to output directory."""
         if self.config.output_dir is None:
@@ -400,7 +408,7 @@ class RidgePipeline:
         if model.is_fitted:
             coef_data = {
                 "coefficients": model.coef_.tolist(),
-                "intercept": float(model.intercept_),
+                "intercept": model.intercept_.tolist() if hasattr(model.intercept_, "tolist") else float(model.intercept_),
             }
             save_json_pretty(coef_data, output_dir / "model_coefficients.json")
 
@@ -457,20 +465,20 @@ def quick_ridge(
     X_test: np.ndarray | pd.DataFrame,
     y_test: np.ndarray | pd.Series,
     alpha: float = 1.0,
-) -> tuple[RidgeModel, dict[str, float]]:
+) -> tuple[RidgeClassifierModel, dict[str, float]]:
     """Quick training and evaluation without optimization.
 
     Args:
         X_train: Training features.
-        y_train: Training target.
+        y_train: Training target (class labels: -1, 0, 1).
         X_test: Test features.
-        y_test: Test target.
+        y_test: Test target (class labels: -1, 0, 1).
         alpha: Regularization parameter.
 
     Returns:
         Tuple of (trained model, test metrics dict).
     """
-    model = RidgeModel(alpha=alpha)
+    model = RidgeClassifierModel(alpha=alpha)
     model.fit(X_train, y_train)
 
     result = evaluate_model(model, X_test, y_test, verbose=False)

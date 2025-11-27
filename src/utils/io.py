@@ -106,11 +106,12 @@ def save_parquet_and_csv(df: pd.DataFrame, parquet_path: Path | str, csv_path: P
     ensure_output_dir(parquet_path)
     df.to_parquet(parquet_path, index=False)
 
-    if csv_path is None:
-        csv_path = get_parquet_path(parquet_path).with_suffix('.csv')
-
-    ensure_output_dir(csv_path)
-    df.to_csv(csv_path, index=False, lineterminator='\n')
+    # CSV saving commented out - using Parquet format only
+    # if csv_path is None:
+    #     csv_path = get_parquet_path(parquet_path).with_suffix('.csv')
+    #
+    # ensure_output_dir(csv_path)
+    # df.to_csv(csv_path, index=False, lineterminator='\n')
 
 
 def write_placeholder_file(path: Path | str, content: str = "Placeholder file") -> None:

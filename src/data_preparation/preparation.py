@@ -28,6 +28,7 @@ Reference:
 
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -53,8 +54,8 @@ __all__ = [
     "prepare_dollar_bars",
     "generate_dollar_bars",
     "run_dollar_bars_pipeline",
+    "add_log_returns_to_bars_file",
     "load_train_test_data",
-    "save_log_returns_split",
 ]
 
 
@@ -697,6 +698,140 @@ def prepare_dollar_bars(
     return df_bars
 
 
+def run_dollar_bars_pipeline_batch(
+    input_dir: Path | str,
+    output_parquet: Path | str | None = None,
+    output_csv: Path | str | None = None,
+    threshold: float | None = None,
+    target_ticks_per_bar: int = 50,
+    adaptive: bool = True,
+) -> pd.DataFrame:
+    """Run dollar bars pipeline on a directory of partitioned parquet files (memory efficient).
+
+    Processes each file individually to avoid loading all data in memory at once.
+    This is much more memory-efficient for large datasets.
+
+    Args:
+        input_dir: Directory containing partitioned parquet files
+        output_parquet: Path to save consolidated bars parquet. If None, uses default.
+        output_csv: Path to save consolidated bars CSV. If None, uses default.
+        threshold: Fixed dollar threshold. If None, uses adaptive.
+        target_ticks_per_bar: Target ticks per bar.
+        adaptive: Use adaptive EWMA threshold (De Prado recommended).
+
+    Returns:
+        DataFrame with consolidated dollar bars from all input files.
+    """
+    from pathlib import Path
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    input_path = Path(input_dir)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input directory not found: {input_path}")
+
+    # Find all parquet files
+    parquet_files = list(input_path.glob("*.parquet"))
+    if not parquet_files:
+        raise ValueError(f"No parquet files found in {input_path}")
+
+    logger.info(f"🔄 Processing {len(parquet_files)} partitioned files from {input_path}")
+
+    # Resolve output paths up front
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if output_parquet is None:
+        from src.path import DOLLAR_BARS_PARQUET
+        output_parquet = DOLLAR_BARS_PARQUET.parent / f"dollar_bars_{timestamp}.parquet"
+
+    if output_csv is None:
+        from src.path import DOLLAR_BARS_CSV
+        output_csv = DOLLAR_BARS_CSV.parent / f"dollar_bars_{timestamp}.csv"
+
+    Path(output_parquet).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+
+    # Stream-write to Parquet/CSV to avoid holding everything in memory
+    parquet_writer: pq.ParquetWriter | None = None
+    csv_written = False
+    total_bars = 0
+
+    for i, file_path in enumerate(sorted(parquet_files), 1):
+        logger.info(f"📊 Processing file {i}/{len(parquet_files)}: {file_path.name}")
+
+        try:
+            # Process this file individually
+            bars_df = prepare_dollar_bars(
+                parquet_path=file_path,
+                output_parquet=None,  # Avoid per-file saves
+                output_csv=None,
+                threshold=threshold,
+                target_ticks_per_bar=target_ticks_per_bar,
+                adaptive=adaptive,
+            )
+
+            if not bars_df.empty:
+                # Sort chunk locally for better ordering
+                if "datetime_close" in bars_df.columns:
+                    bars_df = bars_df.sort_values("datetime_close").reset_index(drop=True)
+
+                table = pa.Table.from_pandas(bars_df, preserve_index=False)
+
+                if parquet_writer is None:
+                    parquet_writer = pq.ParquetWriter(output_parquet, table.schema)
+
+                parquet_writer.write_table(table)
+
+                # Append to CSV incrementally
+                bars_df.to_csv(
+                    output_csv,
+                    mode="a",
+                    index=False,
+                    header=not csv_written,
+                )
+                csv_written = True
+
+                total_bars += len(bars_df)
+                logger.info(
+                    "  ✅ Generated %d bars from %d ticks (running total: %d)",
+                    len(bars_df),
+                    len(pd.read_parquet(file_path)),
+                    total_bars,
+                )
+            else:
+                logger.warning(f"  ⚠️  No bars generated from {file_path.name}")
+
+        except Exception as e:
+            logger.error(f"  ❌ Failed to process {file_path.name}: {e}")
+            continue
+
+    if parquet_writer is None or total_bars == 0:
+        raise ValueError("No bars were generated from any input file")
+
+    parquet_writer.close()
+
+    logger.info(f"✅ Streamed {total_bars} bars from {len(parquet_files)} files into {output_parquet}")
+
+    # Load once to enforce global sort/unique (bar dataset is much smaller than ticks)
+    consolidated_bars = pd.read_parquet(output_parquet)
+    if "datetime_close" in consolidated_bars.columns:
+        consolidated_bars = (
+            consolidated_bars
+            .sort_values("datetime_close")
+            .drop_duplicates(subset=["datetime_close"])
+            .reset_index(drop=True)
+        )
+        consolidated_bars.to_parquet(output_parquet, index=False)
+        consolidated_bars.to_csv(output_csv, index=False)
+        logger.info("🔗 Consolidated, sorted, and deduplicated bars saved to disk")
+
+    logger.info(f"💾 Saved consolidated dollar bars to:")
+    logger.info(f"   Parquet: {output_parquet}")
+    logger.info(f"   CSV: {output_csv}")
+
+    return consolidated_bars
+
+
 def run_dollar_bars_pipeline(
     input_parquet: Path | str | None = None,
     output_parquet: Path | str | None = None,
@@ -728,10 +863,12 @@ def run_dollar_bars_pipeline(
             raise FileNotFoundError(f"No cleaned tick data found at {input_parquet}. Ensure data_cleaning has been run first.")
 
     if output_parquet is None:
-        output_parquet = DOLLAR_IMBALANCE_BARS_PARQUET
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_parquet = DOLLAR_IMBALANCE_BARS_PARQUET.parent / f"dollar_imbalance_bars_{timestamp}.parquet"
 
     if output_csv is None:
-        output_csv = DOLLAR_IMBALANCE_BARS_CSV
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_csv = DOLLAR_IMBALANCE_BARS_CSV.parent / f"dollar_imbalance_bars_{timestamp}.csv"
 
     logger.info("=" * 70)
     logger.info("DOLLAR BARS PIPELINE (De Prado Methodology)")
@@ -790,13 +927,55 @@ def save_log_returns_split(
     logger.info(f"Log-returns original - Mean: {log_returns.mean():.6f}, Std: {log_returns.std():.6f}")
     logger.info(f"Log-returns x100 - Mean: {log_returns_split_df['log_return'].mean():.6f}, Std: {log_returns_split_df['log_return'].std():.6f}")
 
-    # Save to CSV and Parquet
+    # Save to both Parquet and CSV
     WEIGHTED_LOG_RETURNS_SPLIT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    log_returns_split_df.to_csv(WEIGHTED_LOG_RETURNS_SPLIT_FILE, index=False)
-    log_returns_split_df.to_parquet(WEIGHTED_LOG_RETURNS_SPLIT_FILE.with_suffix(".parquet"), index=False)
-    logger.info(f"Log-returns (x100) saved: {WEIGHTED_LOG_RETURNS_SPLIT_FILE} and .parquet")
+
+    # Save as Parquet (keeping original behavior)
+    log_returns_split_df.to_parquet(WEIGHTED_LOG_RETURNS_SPLIT_FILE, index=False)
+
+    # Save as CSV with same base name but .csv extension
+    csv_file = WEIGHTED_LOG_RETURNS_SPLIT_FILE.with_suffix('.csv')
+    log_returns_split_df.to_csv(csv_file, index=False)
+
+    logger.info(f"Log-returns (x100) saved: {WEIGHTED_LOG_RETURNS_SPLIT_FILE}")
+    logger.info(f"Log-returns (x100) saved: {csv_file}")
 
     return log_returns_split_df
+
+
+def add_log_returns_to_bars_file(
+    bars_parquet: Path,
+    bars_csv: Path,
+    price_col: str = "close",
+) -> None:
+    """Compute log returns (x100) and persist inside the dollar_bars dataset.
+
+    This replaces the separate log_returns_* artifacts: a single dataset
+    (Parquet + CSV) contains both bars and the scaled log_return column.
+    """
+    if not bars_parquet.exists():
+        raise FileNotFoundError(f"dollar_bars parquet not found at {bars_parquet}")
+
+    df_bars = pd.read_parquet(bars_parquet)
+
+    prices = df_bars[price_col]
+    log_returns = np.log(prices / prices.shift(1))
+    df_bars["log_return"] = log_returns * 100  # scale to percentage points
+    df_bars = df_bars.dropna(subset=["log_return"])
+
+    logger.info(
+        "Log-returns x100 stats in dollar_bars - Mean: %.6f, Std: %.6f",
+        df_bars["log_return"].mean(),
+        df_bars["log_return"].std(),
+    )
+
+    # Save consolidated dataset (Parquet + CSV)
+    bars_parquet.parent.mkdir(parents=True, exist_ok=True)
+    df_bars.to_parquet(bars_parquet, index=False)
+    df_bars.to_csv(bars_csv, index=False)
+    logger.info("Saved dollar_bars with log_return to:")
+    logger.info("  Parquet: %s", bars_parquet)
+    logger.info("  CSV: %s", bars_csv)
 
 
 # =============================================================================

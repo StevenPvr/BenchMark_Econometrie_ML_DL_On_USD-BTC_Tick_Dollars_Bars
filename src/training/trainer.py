@@ -1,9 +1,12 @@
-"""Generic model trainer for all model types.
+"""Generic model trainer for classification models.
 
 This module provides a unified training interface compatible with:
-- Econometric models (Ridge, Lasso)
-- Machine Learning models (XGBoost, LightGBM, CatBoost, RandomForest)
-- Deep Learning models (LSTM)
+- Econometric classifiers (Ridge, Lasso, Logistic)
+- Machine Learning classifiers (XGBoost, LightGBM, CatBoost, RandomForest)
+- Deep Learning classifiers (LSTM)
+- Baseline classifiers (Random, Persistence, AR1)
+
+Supports De Prado's triple-barrier labeling (-1, 0, 1).
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import pandas as pd  # type: ignore[import-untyped]
 
 from src.constants import DEFAULT_RANDOM_STATE
 from src.optimisation.walk_forward_cv import (
+    DEFAULT_METRIC,
     FittableModel,
     METRIC_FUNCTIONS,
     WalkForwardConfig,
@@ -265,7 +269,7 @@ class Trainer:
         model: TrainableModel,
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
-        metric: str = "mse",
+        metric: str = DEFAULT_METRIC,
         fit_kwargs: dict[str, Any] | None = None,
     ) -> TrainingResult:
         """Train a model with optional validation.
@@ -273,8 +277,8 @@ class Trainer:
         Args:
             model: Model to train.
             X: Training features.
-            y: Training target.
-            metric: Evaluation metric ("mse", "rmse", "mae", "qlike").
+            y: Training target (class labels).
+            metric: Evaluation metric ("accuracy", "f1_macro", etc.).
             fit_kwargs: Additional kwargs for model.fit().
 
         Returns:
@@ -342,7 +346,7 @@ class Trainer:
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
         cv_config: WalkForwardConfig,
-        metric: str = "mse",
+        metric: str = DEFAULT_METRIC,
         fit_kwargs: dict[str, Any] | None = None,
         retrain_on_full: bool = True,
     ) -> CrossValidationTrainingResult:
@@ -354,9 +358,9 @@ class Trainer:
         Args:
             model: Model to train.
             X: Training features.
-            y: Training target.
+            y: Training target (class labels).
             cv_config: Walk-forward CV configuration.
-            metric: Evaluation metric.
+            metric: Evaluation metric ("accuracy", "f1_macro", etc.).
             fit_kwargs: Additional kwargs for model.fit().
             retrain_on_full: If True, retrain on full data after CV.
 
@@ -435,7 +439,7 @@ def train_model(
     X: np.ndarray | pd.DataFrame,
     y: np.ndarray | pd.Series,
     validation_split: float = 0.2,
-    metric: str = "mse",
+    metric: str = DEFAULT_METRIC,
     verbose: bool = True,
     **fit_kwargs: Any,
 ) -> TrainingResult:
@@ -444,9 +448,9 @@ def train_model(
     Args:
         model: Model to train.
         X: Training features.
-        y: Training target.
+        y: Training target (class labels).
         validation_split: Fraction for validation.
-        metric: Evaluation metric.
+        metric: Evaluation metric ("accuracy", "f1_macro", etc.).
         verbose: Show progress.
         **fit_kwargs: Additional kwargs for model.fit().
 
@@ -454,8 +458,8 @@ def train_model(
         TrainingResult with scores and model.
 
     Example:
-        >>> from src.model.machine_learning.xgboost_model import XGBoostModel
-        >>> model = XGBoostModel(n_estimators=100)
+        >>> from src.model.machine_learning.lightgbm.lightgbm_model import LightGBMModel
+        >>> model = LightGBMModel(n_estimators=100)
         >>> result = train_model(model, X, y, validation_split=0.2)
     """
     config = TrainingConfig(
@@ -473,7 +477,7 @@ def train_with_cv(
     n_splits: int = 5,
     purge_gap: int = 1,
     min_train_size: int = 100,
-    metric: str = "mse",
+    metric: str = DEFAULT_METRIC,
     verbose: bool = True,
     retrain_on_full: bool = True,
     **fit_kwargs: Any,
@@ -483,11 +487,11 @@ def train_with_cv(
     Args:
         model: Model to train.
         X: Training features.
-        y: Training target.
+        y: Training target (class labels).
         n_splits: Number of CV splits.
         purge_gap: Samples to purge between train/test.
         min_train_size: Minimum training size.
-        metric: Evaluation metric.
+        metric: Evaluation metric ("accuracy", "f1_macro", etc.).
         verbose: Show progress.
         retrain_on_full: Retrain on full data after CV.
         **fit_kwargs: Additional kwargs for model.fit().
@@ -496,10 +500,10 @@ def train_with_cv(
         CrossValidationTrainingResult with CV scores and model.
 
     Example:
-        >>> from src.model.machine_learning.xgboost_model import XGBoostModel
-        >>> model = XGBoostModel(n_estimators=100)
+        >>> from src.model.machine_learning.lightgbm.lightgbm_model import LightGBMModel
+        >>> model = LightGBMModel(n_estimators=100)
         >>> result = train_with_cv(model, X, y, n_splits=5, purge_gap=10)
-        >>> print(f"CV MSE: {result.cv_result.mean_score:.4f}")
+        >>> print(f"CV F1: {result.cv_result.mean_score:.4f}")
     """
     from src.optimisation.walk_forward_cv import create_cv_config
 

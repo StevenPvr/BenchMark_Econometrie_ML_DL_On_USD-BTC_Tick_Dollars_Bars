@@ -37,13 +37,13 @@ logger = get_logger(__name__)
 
 def load_and_split_data(
     dataset_path: Path | None = None,
-    target_column: str = "log_volatility",
+    target_column: str = "label",
 ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     """Load dataset and split into train/test sets.
 
     Args:
         dataset_path: Path to dataset file. If None, uses default.
-        target_column: Name of the target column.
+        target_column: Name of the target column (De Prado triple-barrier labels: -1, 0, 1).
 
     Returns:
         Tuple of (X_train, y_train, X_test, y_test).
@@ -153,7 +153,6 @@ def main() -> None:
         purge_gap=5,
         min_train_size=200,
         validation_split=0.2,
-        metric="mse",
         output_dir=output_dir,
         random_state=DEFAULT_RANDOM_STATE,
         verbose=True,

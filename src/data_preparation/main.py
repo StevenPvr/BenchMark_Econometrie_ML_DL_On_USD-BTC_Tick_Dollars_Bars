@@ -13,8 +13,16 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from src.config_logging import setup_logging
-from src.data_preparation.preparation import run_dollar_bars_pipeline, save_log_returns_split
-from src.path import DATASET_RAW_PARQUET, DOLLAR_BARS_PARQUET, DOLLAR_BARS_CSV, WEIGHTED_LOG_RETURNS_SPLIT_FILE
+from src.data_preparation.preparation import (
+    add_log_returns_to_bars_file,
+    run_dollar_bars_pipeline,
+    run_dollar_bars_pipeline_batch,
+)
+from src.path import (
+    DATASET_RAW_PARQUET,
+    DOLLAR_BARS_PARQUET,
+    DOLLAR_BARS_CSV,
+)
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -36,9 +44,25 @@ def main() -> None:
             logger.error("Please run data_fetching and data_cleaning first")
             sys.exit(1)
 
-        # Generate dollar bars using adaptive threshold (De Prado methodology)
-        logger.info("Generating dollar bars with adaptive threshold...")
-        df_bars = run_dollar_bars_pipeline()
+        # Determine processing approach based on input type
+        if DATASET_RAW_PARQUET.is_dir():
+            # Directory with partitioned files - use batch processing
+            logger.info("📁 Detected partitioned dataset - using memory-efficient batch processing")
+            logger.info("Generating dollar bars from partitioned files with adaptive threshold...")
+            df_bars = run_dollar_bars_pipeline_batch(
+                input_dir=DATASET_RAW_PARQUET,
+                output_parquet=DOLLAR_BARS_PARQUET,
+                output_csv=DOLLAR_BARS_CSV
+            )
+        else:
+            # Single file - use traditional processing
+            logger.info("📄 Detected single file - using traditional processing")
+            logger.info("Generating dollar bars with adaptive threshold...")
+            df_bars = run_dollar_bars_pipeline(
+                input_parquet=DATASET_RAW_PARQUET,
+                output_parquet=DOLLAR_BARS_PARQUET,
+                output_csv=DOLLAR_BARS_CSV
+            )
 
         logger.info("✓ Dollar bars generation completed")
         logger.info("  • Bars generated: %d", len(df_bars))
@@ -53,12 +77,10 @@ def main() -> None:
             logger.info("  • Date range: %s - %s",
                        df_bars.index.min(), df_bars.index.max())
 
-        # Generate log returns split (x100) for GARCH
+        # Add log returns (x100) into the consolidated dollar_bars dataset
         logger.info("=" * 60)
-        logger.info("Generating log returns (x100) for GARCH...")
-        log_returns_df = save_log_returns_split(df_bars)
-        logger.info("  • Log returns generated: %d", len(log_returns_df))
-        logger.info("  • Output saved to: %s", WEIGHTED_LOG_RETURNS_SPLIT_FILE)
+        logger.info("Adding log returns (x100) into dollar_bars dataset...")
+        add_log_returns_to_bars_file(DOLLAR_BARS_PARQUET, DOLLAR_BARS_CSV)
 
         logger.info("=" * 60)
         logger.info("Data preparation completed successfully")

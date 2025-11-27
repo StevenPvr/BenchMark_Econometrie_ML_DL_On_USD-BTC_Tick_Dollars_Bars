@@ -17,6 +17,7 @@ import pandas as pd  # type: ignore[import-untyped]
 from src.constants import DEFAULT_RANDOM_STATE
 from src.optimisation.hyperparams import HyperparamSpace, get_hyperparam_space
 from src.optimisation.walk_forward_cv import (
+    DEFAULT_METRIC,
     WalkForwardConfig,
     create_cv_config,
     walk_forward_cv,
@@ -45,7 +46,7 @@ class OptimizationConfig:
         n_jobs: Number of parallel jobs.
         sampler: Optuna sampler ("tpe", "random", "cmaes").
         pruner: Whether to use median pruning.
-        direction: "minimize" or "maximize".
+        direction: "minimize" or "maximize" (default: maximize for classification metrics).
         study_name: Optional name for the study.
         random_state: Random seed for reproducibility.
     """
@@ -55,7 +56,7 @@ class OptimizationConfig:
     n_jobs: int = DEFAULT_N_JOBS
     sampler: str = "tpe"
     pruner: bool = False
-    direction: str = "minimize"
+    direction: str = "maximize"  # Maximize for accuracy, F1, etc.
     study_name: str | None = None
     random_state: int = DEFAULT_RANDOM_STATE
 
@@ -254,7 +255,7 @@ class OptunaOptimizer:
         self,
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
-        metric: str = "mse",
+        metric: str = DEFAULT_METRIC,
         fit_kwargs: dict[str, Any] | None = None,
         show_progress_bar: bool = True,
         verbose: bool = True,
@@ -263,8 +264,8 @@ class OptunaOptimizer:
 
         Args:
             X: Training features.
-            y: Training target.
-            metric: Metric to optimize ("mse", "rmse", "mae", "qlike").
+            y: Training target (class labels for classification).
+            metric: Metric to optimize ("accuracy", "balanced_accuracy", "f1_macro", "f1_weighted").
             fit_kwargs: Additional kwargs for model.fit().
             show_progress_bar: Show Optuna progress bar.
             verbose: Log optimization progress.
@@ -366,7 +367,7 @@ def optimize_model(
     purge_gap: int = 1,
     min_train_size: int = 100,
     n_trials: int = 100,
-    metric: str = "mse",
+    metric: str = DEFAULT_METRIC,
     fixed_params: dict[str, Any] | None = None,
     verbose: bool = True,
 ) -> OptimizationResult:
@@ -375,14 +376,14 @@ def optimize_model(
     Args:
         model_class: Model class to optimize.
         X: Training features.
-        y: Training target.
+        y: Training target (class labels for classification).
         model_name: Name to lookup default hyperparams (if space not given).
         hyperparam_space: Custom hyperparameter space.
         n_splits: Number of CV splits.
         purge_gap: Samples to purge between train/test.
         min_train_size: Minimum training size.
         n_trials: Number of Optuna trials.
-        metric: Metric to optimize.
+        metric: Metric to optimize ("accuracy", "balanced_accuracy", "f1_macro", "f1_weighted").
         fixed_params: Model params that won't be optimized.
         verbose: Log progress.
 
@@ -390,11 +391,11 @@ def optimize_model(
         OptimizationResult with best parameters.
 
     Example:
-        >>> from src.model.machine_learning.xgboost_model import XGBoostModel
+        >>> from src.model.machine_learning.lightgbm.lightgbm_model import LightGBMModel
         >>> result = optimize_model(
-        ...     XGBoostModel,
+        ...     LightGBMModel,
         ...     X_train, y_train,
-        ...     model_name="xgboost",
+        ...     model_name="lightgbm",
         ...     n_splits=5,
         ...     purge_gap=5,
         ...     n_trials=50,

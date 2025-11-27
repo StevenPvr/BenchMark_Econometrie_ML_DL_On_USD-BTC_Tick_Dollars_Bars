@@ -1,4 +1,4 @@
-"""LightGBM model for regression/classification."""
+"""LightGBM model for multi-class classification (De Prado triple-barrier labeling)."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from src.training.trainer import TrainableModel  # type: ignore[import-untyped]
 
 class LightGBMModel(BaseModel, TrainableModel):
     """
-    LightGBM (Light Gradient Boosting Machine) model.
+    LightGBM (Light Gradient Boosting Machine) classifier.
 
     Rapide et efficace en memoire, bon pour grands datasets.
+    Supporte classification multi-classe (triple-barrier: -1, 0, 1).
     """
 
     def __init__(
@@ -29,9 +30,9 @@ class LightGBMModel(BaseModel, TrainableModel):
         colsample_bytree: float = 0.8,
         reg_alpha: float = 0.0,
         reg_lambda: float = 0.0,
-        objective: str = "regression",
         random_state: int = 42,
         n_jobs: int = -1,
+        class_weight: dict[Any, float] | str | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -55,8 +56,6 @@ class LightGBMModel(BaseModel, TrainableModel):
             Regularisation L1.
         reg_lambda : float, default=0.0
             Regularisation L2.
-        objective : str, default="regression"
-            Fonction objectif.
         random_state : int, default=42
             Seed pour reproductibilite.
         n_jobs : int, default=-1
@@ -71,10 +70,11 @@ class LightGBMModel(BaseModel, TrainableModel):
         self.colsample_bytree = colsample_bytree
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
-        self.objective = objective
         self.random_state = random_state
         self.n_jobs = n_jobs
-        self.model: lgb.LGBMRegressor | None = None
+        self.class_weight = class_weight
+        self.model: lgb.LGBMClassifier | None = None
+        self.classes_: np.ndarray | None = None
         # Keep feature names to avoid sklearn warnings about missing names at prediction time
         self.feature_names: list[str] | None = None
 
@@ -117,25 +117,31 @@ class LightGBMModel(BaseModel, TrainableModel):
         callbacks: list | None = None,
         **kwargs: Any,
     ) -> "LightGBMModel":
-        """Entraine le modele LightGBM."""
+        """Entraine le modele LightGBM classifier."""
         X_df, feature_names = self._prepare_features(X)
         self.feature_names = feature_names
         y_arr = np.asarray(y).ravel()
 
-        self.model = lgb.LGBMRegressor(
-            n_estimators=self.n_estimators,
-            max_depth=self.max_depth,
-            num_leaves=self.num_leaves,
-            learning_rate=self.learning_rate,
-            subsample=self.subsample,
-            colsample_bytree=self.colsample_bytree,
-            reg_alpha=self.reg_alpha,
-            reg_lambda=self.reg_lambda,
-            objective=self.objective,
-            random_state=self.random_state,
-            n_jobs=self.n_jobs,
-            verbose=-1,
-        )
+        # Store unique classes for later use
+        self.classes_ = np.unique(y_arr)
+
+        model_params = {
+            "n_estimators": self.n_estimators,
+            "max_depth": self.max_depth,
+            "num_leaves": self.num_leaves,
+            "learning_rate": self.learning_rate,
+            "subsample": self.subsample,
+            "colsample_bytree": self.colsample_bytree,
+            "reg_alpha": self.reg_alpha,
+            "reg_lambda": self.reg_lambda,
+            "random_state": self.random_state,
+            "n_jobs": self.n_jobs,
+            "verbose": -1,
+        }
+        if self.class_weight is not None:
+            model_params["class_weight"] = self.class_weight
+
+        self.model = lgb.LGBMClassifier(**model_params)
 
         fit_params: Dict[str, Any] = {}
         if eval_set is not None:
@@ -161,6 +167,24 @@ class LightGBMModel(BaseModel, TrainableModel):
         X_df, _ = self._prepare_features(X, self.feature_names)
         predictions = self.model.predict(X_df)
         return np.asarray(predictions)
+
+    def predict_proba(self, X: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """
+        Get probability estimates for all classes.
+
+        Returns
+        -------
+        np.ndarray
+            Probability matrix of shape (n_samples, n_classes).
+            For triple-barrier: columns correspond to classes [-1, 0, 1].
+        """
+        if not self.is_fitted or self.model is None:
+            raise ValueError("Model must be fitted before prediction.")
+        if self.feature_names is None:
+            raise ValueError("Feature names not set. Fit the model before predicting.")
+
+        X_df, _ = self._prepare_features(X, self.feature_names)
+        return self.model.predict_proba(X_df)
 
     def set_params(self, **params: Any) -> "BaseModel":
         """Met a jour les hyperparametres du modele."""

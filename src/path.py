@@ -38,7 +38,7 @@ DATASET_CLEAN_PARQUET = CLEANED_DATA_DIR / "dataset_clean.parquet"
 
 # Prepared log-returns (map weighted aliases to existing files)
 WEIGHTED_LOG_RETURNS_FILE = PREPARED_DATA_DIR / "log_returns.csv"
-WEIGHTED_LOG_RETURNS_SPLIT_FILE = PREPARED_DATA_DIR / "log_returns_split.csv"
+WEIGHTED_LOG_RETURNS_SPLIT_FILE = PREPARED_DATA_DIR / "log_returns_split.parquet"
 LOG_RETURNS_PARQUET = PREPARED_DATA_DIR / "log_returns.parquet"
 LOG_RETURNS_CSV = PREPARED_DATA_DIR / "log_returns.csv"
 DOLLAR_BARS_PARQUET = PREPARED_DATA_DIR / "dollar_bars.parquet"
@@ -52,10 +52,22 @@ SCALERS_DIR = FEATURES_DIR / "scalers"
 LOG_RETURNS_SPLIT_PARQUET = PREPARED_DATA_DIR / "log_returns_split.parquet"
 DATASET_FEATURES_PARQUET = FEATURES_DIR / "dataset_features.parquet"
 DATASET_FEATURES_CSV = FEATURES_DIR / "dataset_features.csv"
+DATASET_FEATURES_TRAIN_PARQUET = FEATURES_DIR / "dataset_features_train.parquet"
+DATASET_FEATURES_TEST_PARQUET = FEATURES_DIR / "dataset_features_test.parquet"
+DATASET_FEATURES_TRAIN_CSV = FEATURES_DIR / "dataset_features_train.csv"
+DATASET_FEATURES_TEST_CSV = FEATURES_DIR / "dataset_features_test.csv"
 DATASET_FEATURES_LINEAR_PARQUET = FEATURES_DIR / "dataset_features_linear.parquet"
 DATASET_FEATURES_LINEAR_CSV = FEATURES_DIR / "dataset_features_linear.csv"
+DATASET_FEATURES_LINEAR_TRAIN_PARQUET = FEATURES_DIR / "dataset_features_linear_train.parquet"
+DATASET_FEATURES_LINEAR_TEST_PARQUET = FEATURES_DIR / "dataset_features_linear_test.parquet"
+DATASET_FEATURES_LINEAR_TRAIN_CSV = FEATURES_DIR / "dataset_features_linear_train.csv"
+DATASET_FEATURES_LINEAR_TEST_CSV = FEATURES_DIR / "dataset_features_linear_test.csv"
 DATASET_FEATURES_LSTM_PARQUET = FEATURES_DIR / "dataset_features_lstm.parquet"
 DATASET_FEATURES_LSTM_CSV = FEATURES_DIR / "dataset_features_lstm.csv"
+DATASET_FEATURES_LSTM_TRAIN_PARQUET = FEATURES_DIR / "dataset_features_lstm_train.parquet"
+DATASET_FEATURES_LSTM_TEST_PARQUET = FEATURES_DIR / "dataset_features_lstm_test.parquet"
+DATASET_FEATURES_LSTM_TRAIN_CSV = FEATURES_DIR / "dataset_features_lstm_train.csv"
+DATASET_FEATURES_LSTM_TEST_CSV = FEATURES_DIR / "dataset_features_lstm_test.csv"
 # Scalers (fit on train only)
 ZSCORE_SCALER_FILE = SCALERS_DIR / "zscore_scaler.joblib"
 MINMAX_SCALER_FILE = SCALERS_DIR / "minmax_scaler.joblib"
@@ -205,9 +217,55 @@ ECONOMETRIC_DIR = RESULTS_DIR / "econometric"
 
 # Ridge
 RIDGE_DIR = ECONOMETRIC_DIR / "ridge"
+RIDGE_ARTIFACTS_DIR = RIDGE_DIR / "artifacts"
+RIDGE_MODEL_FILE = RIDGE_ARTIFACTS_DIR / "ridge_model.joblib"
+RIDGE_BEST_PARAMS_FILE = RIDGE_ARTIFACTS_DIR / "best_params.json"
+RIDGE_TRAINING_RESULTS_FILE = RIDGE_ARTIFACTS_DIR / "training_results.json"
+RIDGE_TEST_EVAL_FILE = RIDGE_ARTIFACTS_DIR / "test_evaluation.json"
 
 # Lasso
 LASSO_DIR = ECONOMETRIC_DIR / "lasso"
+LASSO_ARTIFACTS_DIR = LASSO_DIR / "artifacts"
+LASSO_MODEL_FILE = LASSO_ARTIFACTS_DIR / "lasso_model.joblib"
+LASSO_BEST_PARAMS_FILE = LASSO_ARTIFACTS_DIR / "best_params.json"
+LASSO_TRAINING_RESULTS_FILE = LASSO_ARTIFACTS_DIR / "training_results.json"
+LASSO_TEST_EVAL_FILE = LASSO_ARTIFACTS_DIR / "test_evaluation.json"
+
+# OLS (Ordinary Least Squares)
+OLS_DIR = ECONOMETRIC_DIR / "ols"
+OLS_ARTIFACTS_DIR = OLS_DIR / "artifacts"
+OLS_MODEL_FILE = OLS_ARTIFACTS_DIR / "ols_model.joblib"
+OLS_BEST_PARAMS_FILE = OLS_ARTIFACTS_DIR / "best_params.json"
+OLS_TRAINING_RESULTS_FILE = OLS_ARTIFACTS_DIR / "training_results.json"
+OLS_TEST_EVAL_FILE = OLS_ARTIFACTS_DIR / "test_evaluation.json"
+
+# ============================================================================
+# ECONOMETRIC CLASSIFIER DIRECTORIES
+# ============================================================================
+
+# Ridge Classifier
+RIDGE_CLASSIFIER_DIR = ECONOMETRIC_DIR / "ridge_classifier"
+RIDGE_CLASSIFIER_ARTIFACTS_DIR = RIDGE_CLASSIFIER_DIR / "artifacts"
+RIDGE_CLASSIFIER_MODEL_FILE = RIDGE_CLASSIFIER_ARTIFACTS_DIR / "ridge_classifier_model.joblib"
+RIDGE_CLASSIFIER_BEST_PARAMS_FILE = RIDGE_CLASSIFIER_ARTIFACTS_DIR / "best_params.json"
+RIDGE_CLASSIFIER_TRAINING_RESULTS_FILE = RIDGE_CLASSIFIER_ARTIFACTS_DIR / "training_results.json"
+RIDGE_CLASSIFIER_TEST_EVAL_FILE = RIDGE_CLASSIFIER_ARTIFACTS_DIR / "test_evaluation.json"
+
+# Lasso Classifier (L1 Logistic)
+LASSO_CLASSIFIER_DIR = ECONOMETRIC_DIR / "lasso_classifier"
+LASSO_CLASSIFIER_ARTIFACTS_DIR = LASSO_CLASSIFIER_DIR / "artifacts"
+LASSO_CLASSIFIER_MODEL_FILE = LASSO_CLASSIFIER_ARTIFACTS_DIR / "lasso_classifier_model.joblib"
+LASSO_CLASSIFIER_BEST_PARAMS_FILE = LASSO_CLASSIFIER_ARTIFACTS_DIR / "best_params.json"
+LASSO_CLASSIFIER_TRAINING_RESULTS_FILE = LASSO_CLASSIFIER_ARTIFACTS_DIR / "training_results.json"
+LASSO_CLASSIFIER_TEST_EVAL_FILE = LASSO_CLASSIFIER_ARTIFACTS_DIR / "test_evaluation.json"
+
+# Logistic Regression (no penalty)
+LOGISTIC_DIR = ECONOMETRIC_DIR / "logistic"
+LOGISTIC_ARTIFACTS_DIR = LOGISTIC_DIR / "artifacts"
+LOGISTIC_MODEL_FILE = LOGISTIC_ARTIFACTS_DIR / "logistic_model.joblib"
+LOGISTIC_BEST_PARAMS_FILE = LOGISTIC_ARTIFACTS_DIR / "best_params.json"
+LOGISTIC_TRAINING_RESULTS_FILE = LOGISTIC_ARTIFACTS_DIR / "training_results.json"
+LOGISTIC_TEST_EVAL_FILE = LOGISTIC_ARTIFACTS_DIR / "test_evaluation.json"
 
 # ============================================================================
 # DEEP LEARNING MODEL DIRECTORIES
@@ -217,3 +275,57 @@ DL_RESULTS_DIR = RESULTS_DIR / "deep_learning"
 
 # LSTM
 LSTM_DIR = DL_RESULTS_DIR / "lstm"
+
+# ============================================================================
+# LABEL PRIMAIRE - Triple-Barrier Labeling
+# ============================================================================
+
+LABEL_PRIMAIRE_DIR = RESULTS_DIR / "label_primaire"
+LABEL_PRIMAIRE_OPTIMIZATION_FILE = LABEL_PRIMAIRE_DIR / "joint_optimization.json"
+LABEL_PRIMAIRE_LABELING_PARAMS_FILE = LABEL_PRIMAIRE_DIR / "labeling_params.json"
+LABEL_PRIMAIRE_EVENTS_TRAIN_FILE = LABEL_PRIMAIRE_DIR / "events_train.parquet"
+LABEL_PRIMAIRE_EVENTS_TEST_FILE = LABEL_PRIMAIRE_DIR / "events_test.parquet"
+
+# ============================================================================
+# LABEL META - Meta-Model & Benchmarking
+# ============================================================================
+
+LABEL_META_DIR = RESULTS_DIR / "label_meta"
+LABEL_META_MODEL_FILE = LABEL_META_DIR / "meta_model.joblib"
+LABEL_META_BENCHMARKS_DIR = LABEL_META_DIR / "benchmarks"
+
+# ============================================================================
+# LABELING (LEGACY - DEPRECATED, use LABEL_PRIMAIRE_DIR and LABEL_META_DIR)
+# ============================================================================
+
+LABELING_DIR = RESULTS_DIR / "labeling"
+LABELING_ARTIFACTS_DIR = LABELING_DIR / "artifacts"
+LABELING_OPTIMIZATION_FILE = LABELING_DIR / "labeling_optimization.json"
+LABELING_PARAMS_FILE = LABELING_DIR / "optimal_labeling_params.json"
+
+# Two-stage model artifacts
+META_LABELING_DIR = LABELING_DIR / "meta_labeling"
+PRIMARY_MODEL_FILE = META_LABELING_DIR / "primary_model.joblib"
+META_MODEL_FILE = META_LABELING_DIR / "meta_model.joblib"
+META_LABELING_RESULTS_FILE = META_LABELING_DIR / "results.json"
+
+# Events files (for meta-labeling)
+EVENTS_TRAIN_PARQUET = LABELING_DIR / "events_train.parquet"
+EVENTS_TEST_PARQUET = LABELING_DIR / "events_test.parquet"
+JOINT_OPTIMIZATION_FILE = LABELING_DIR / "joint_optimization.json"
+
+# ============================================================================
+# LABELED DATASETS
+# ============================================================================
+
+# Raw features with labels (for tree-based ML: XGBoost, LightGBM, CatBoost, RF)
+DATASET_FEATURES_LABEL_PARQUET = FEATURES_DIR / "dataset_features_label.parquet"
+DATASET_FEATURES_LABEL_CSV = FEATURES_DIR / "dataset_features_label.csv"
+
+# Z-scored features with labels (for linear models: Ridge, Lasso, OLS)
+DATASET_FEATURES_LINEAR_LABEL_PARQUET = FEATURES_DIR / "dataset_features_linear_label.parquet"
+DATASET_FEATURES_LINEAR_LABEL_CSV = FEATURES_DIR / "dataset_features_linear_label.csv"
+
+# Min-max scaled features with labels (for deep learning: LSTM)
+DATASET_FEATURES_LSTM_LABEL_PARQUET = FEATURES_DIR / "dataset_features_lstm_label.parquet"
+DATASET_FEATURES_LSTM_LABEL_CSV = FEATURES_DIR / "dataset_features_lstm_label.csv"

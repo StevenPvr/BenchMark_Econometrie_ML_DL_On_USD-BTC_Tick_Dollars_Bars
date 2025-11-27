@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterator, Protocol
 
 import numpy as np
 import pandas as pd # type: ignore[import-untyped]
+from sklearn.metrics import matthews_corrcoef  # type: ignore[import-untyped]
 
 from src.utils import get_logger
 
@@ -224,48 +225,139 @@ class WalkForwardSplitter:
 
 
 # ============================================================================
-# METRICS
+# CLASSIFICATION METRICS
 # ============================================================================
 
 
-def mse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Mean Squared Error."""
-    return float(np.mean((y_true - y_pred) ** 2))
+def accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Classification accuracy."""
+    return float(np.mean(y_true == y_pred))
 
 
-def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Root Mean Squared Error."""
-    return float(np.sqrt(mse(y_true, y_pred)))
+def balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Balanced accuracy (average of recall for each class).
+
+    Useful for imbalanced multi-class classification (triple-barrier labeling).
+    """
+    classes = np.unique(y_true)
+    recalls = []
+    for cls in classes:
+        mask = y_true == cls
+        if np.sum(mask) > 0:
+            recalls.append(float(np.mean(y_pred[mask] == cls)))
+    return float(np.mean(recalls)) if recalls else 0.0
 
 
-def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Mean Absolute Error."""
-    return float(np.mean(np.abs(y_true - y_pred)))
+def f1_macro(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Macro-averaged F1 score for multi-class classification.
+
+    Calculates F1 for each class and averages them.
+    """
+    classes = np.unique(np.concatenate([y_true, y_pred]))
+    f1_scores = []
+
+    for cls in classes:
+        # True positives, false positives, false negatives
+        tp = np.sum((y_pred == cls) & (y_true == cls))
+        fp = np.sum((y_pred == cls) & (y_true != cls))
+        fn = np.sum((y_pred != cls) & (y_true == cls))
+
+        # Precision and recall
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+        # F1
+        if precision + recall > 0:
+            f1 = 2 * precision * recall / (precision + recall)
+        else:
+            f1 = 0.0
+        f1_scores.append(f1)
+
+    return float(np.mean(f1_scores)) if f1_scores else 0.0
 
 
-def qlike(y_true: np.ndarray, y_pred: np.ndarray, epsilon: float = 1e-10) -> float:
-    """QLIKE loss for variance forecasting.
+def f1_weighted(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Weighted F1 score for multi-class classification.
 
-    QLIKE = mean(y_true / y_pred + log(y_pred))
+    Weights F1 for each class by its support (number of samples).
+    """
+    classes = np.unique(np.concatenate([y_true, y_pred]))
+    f1_scores = []
+    weights = []
+
+    for cls in classes:
+        # True positives, false positives, false negatives
+        tp = np.sum((y_pred == cls) & (y_true == cls))
+        fp = np.sum((y_pred == cls) & (y_true != cls))
+        fn = np.sum((y_pred != cls) & (y_true == cls))
+
+        # Precision and recall
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+        # F1
+        if precision + recall > 0:
+            f1 = 2 * precision * recall / (precision + recall)
+        else:
+            f1 = 0.0
+
+        support = np.sum(y_true == cls)
+        f1_scores.append(f1)
+        weights.append(support)
+
+    total_weight = sum(weights)
+    if total_weight > 0:
+        return float(sum(f * w for f, w in zip(f1_scores, weights)) / total_weight)
+    return 0.0
+
+
+def mcc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Matthews correlation coefficient (robust to class imbalance)."""
+    # sklearn implements the multiclass extension
+    return float(matthews_corrcoef(y_true, y_pred))
+
+
+def log_loss(y_true: np.ndarray, y_pred_proba: np.ndarray, epsilon: float = 1e-15) -> float:
+    """Multi-class logarithmic loss (cross-entropy).
+
+    Note: This requires probability predictions, not class predictions.
+    For optimization with class predictions, use negative accuracy or F1.
 
     Args:
-        y_true: Actual values (must be positive for variance).
-        y_pred: Predicted values (must be positive for variance).
-        epsilon: Small value to avoid division by zero.
+        y_true: True class labels.
+        y_pred_proba: Predicted probabilities of shape (n_samples, n_classes).
+        epsilon: Small value for numerical stability.
 
     Returns:
-        QLIKE loss value.
+        Log loss value (lower is better).
     """
-    y_pred_safe = np.maximum(y_pred, epsilon)
-    return float(np.mean(y_true / y_pred_safe + np.log(y_pred_safe)))
+    # Clip probabilities to avoid log(0)
+    y_pred_proba = np.clip(y_pred_proba, epsilon, 1 - epsilon)
+
+    # Get unique classes and create mapping
+    classes = np.unique(y_true)
+    n_samples = len(y_true)
+
+    # One-hot encode y_true
+    y_true_onehot = np.zeros_like(y_pred_proba)
+    for i, cls in enumerate(classes):
+        y_true_onehot[y_true == cls, i] = 1
+
+    # Calculate log loss
+    return float(-np.sum(y_true_onehot * np.log(y_pred_proba)) / n_samples)
 
 
+# Default metric functions using class predictions
 METRIC_FUNCTIONS: dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
-    "mse": mse,
-    "rmse": rmse,
-    "mae": mae,
-    "qlike": qlike,
+    "accuracy": accuracy,
+    "balanced_accuracy": balanced_accuracy,
+    "f1_macro": f1_macro,
+    "f1_weighted": f1_weighted,
+    "mcc": mcc,
 }
+
+# Default metric for classification optimization
+DEFAULT_METRIC = "f1_macro"
 
 
 # ============================================================================
@@ -318,7 +410,7 @@ def walk_forward_cv(
     X: np.ndarray | pd.DataFrame,
     y: np.ndarray | pd.Series,
     config: WalkForwardConfig,
-    metric: str = "mse",
+    metric: str = DEFAULT_METRIC,
     return_predictions: bool = False,
     verbose: bool = False,
     fit_kwargs: dict[str, Any] | None = None,
@@ -328,9 +420,9 @@ def walk_forward_cv(
     Args:
         model: Model implementing FittableModel protocol.
         X: Features array or DataFrame.
-        y: Target array or Series.
+        y: Target array or Series (class labels for classification).
         config: Walk-forward configuration.
-        metric: Metric to use ("mse", "rmse", "mae", "qlike").
+        metric: Metric to use ("accuracy", "balanced_accuracy", "f1_macro", "f1_weighted").
         return_predictions: If True, store predictions in results.
         verbose: If True, log progress.
         fit_kwargs: Additional kwargs for model.fit().
@@ -363,6 +455,25 @@ def walk_forward_cv(
         y_train = y_arr[fold.train_indices]
         X_test = X_arr[fold.test_indices]
         y_test = y_arr[fold.test_indices]
+
+        unique_train = np.unique(y_train)
+        if len(unique_train) < 2:
+            if verbose:
+                logger.warning(
+                    "Fold %d skipped: only %d class present in train (%s)",
+                    fold.fold_idx + 1,
+                    len(unique_train),
+                    unique_train,
+                )
+            fold_results.append(
+                CVResult(
+                    fold_idx=fold.fold_idx,
+                    metric_value=float("nan"),
+                    train_size=len(X_train),
+                    test_size=len(X_test),
+                )
+            )
+            continue
 
         if verbose:
             logger.info(

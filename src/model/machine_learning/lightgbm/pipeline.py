@@ -29,6 +29,7 @@ from src.optimisation import (
     create_cv_config,
     save_optimization_results,
 )
+from src.optimisation.walk_forward_cv import DEFAULT_METRIC
 from src.training import (
     CrossValidationTrainingResult,
     TrainingResult,
@@ -67,7 +68,7 @@ class LightGBMPipelineConfig:
     purge_gap: int = 5
     min_train_size: int = 200
     validation_split: float = 0.2
-    metric: str = "mse"
+    metric: str = DEFAULT_METRIC
     output_dir: Path | None = None
     random_state: int = 42
     verbose: bool = True
@@ -296,7 +297,6 @@ class LightGBMPipeline:
 
         result = evaluate_model(
             model, X_test, y_test,
-            metrics=["mse", "rmse", "mae", "r2", "mape"],
             verbose=self.config.verbose,
         )
 
@@ -430,7 +430,7 @@ def run_lightgbm_pipeline(
 
     Example:
         >>> result = run_lightgbm_pipeline(X_train, y_train, X_test, y_test)
-        >>> print(f"Test MSE: {result.evaluation_result.metrics['mse']:.4f}")
+        >>> print(f"Test F1: {result.evaluation_result.metrics['f1_macro']:.4f}")
     """
     config = LightGBMPipelineConfig(
         n_trials=n_trials,

@@ -280,8 +280,8 @@ GARCH_MODEL_PARAMS_COUNT: dict[str, int] = {
 # Crypto tick download defaults (used by ccxt pipeline + tests)
 EXCHANGE_ID: str = "binance"  # Try Binance for potentially more data
 SYMBOL: str = "BTC/USDT"  # Binance uses USDT instead of USD
-START_DATE: str = "2024-01-10"  # 3-month period for more data
-END_DATE: str = "2024-01-15"
+START_DATE: str = "2024-02-01"  # 3-month period for more data
+END_DATE: str = "2024-02-05"
 
 # Data conversion constants
 MAX_ERROR_DATES_DISPLAY: int = 5
@@ -408,3 +408,12 @@ YEAR_MAX: int = 2100
 
 # LightGBM dataset file
 LIGHTGBM_DATASET_COMPLETE_FILE: str = "lightgbm_dataset_complete.parquet"
+
+# ============================================================================
+# LABELING CONSTANTS
+# ============================================================================
+
+# Default triple barrier labeling parameters
+DEFAULT_PT_MULT: float = 1.0  # Profit-taking multiplier
+DEFAULT_SL_MULT: float = 1.0  # Stop-loss multiplier
+DEFAULT_MAX_HOLDING: int = 20  # Maximum holding period in bars

@@ -1,4 +1,4 @@
-"""Lightweight LSTM model for time series forecasting."""
+"""Lightweight LSTM model for multi-class classification (De Prado triple-barrier labeling)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from src.model.base import BaseModel
 
 
 class LSTMNetwork(nn.Module):
-    """LSTM Network for time series forecasting."""
+    """LSTM Network for multi-class classification."""
 
     def __init__(
         self,
@@ -21,6 +21,7 @@ class LSTMNetwork(nn.Module):
         hidden_size: int,
         num_layers: int,
         dropout: float,
+        num_classes: int = 3,
     ):
         super().__init__()
         self.lstm = nn.LSTM(
@@ -30,9 +31,9 @@ class LSTMNetwork(nn.Module):
             dropout=dropout if num_layers > 1 else 0.0,
             batch_first=True,
         )
-        self.fc = nn.Linear(hidden_size, 1)
+        self.fc = nn.Linear(hidden_size, num_classes)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
         lstm_out, _ = self.lstm(x)
         # Prendre la derniere sortie de la sequence
         out = self.fc(lstm_out[:, -1, :])
@@ -41,9 +42,10 @@ class LSTMNetwork(nn.Module):
 
 class LSTMModel(BaseModel):
     """
-    LSTM (Long Short-Term Memory) leger pour series temporelles.
+    LSTM (Long Short-Term Memory) classifier pour series temporelles.
 
-    Version legere et optimisee pour la prediction financiere.
+    Version legere et optimisee pour classification multi-classe.
+    Supporte triple-barrier labeling (De Prado): -1, 0, 1.
     """
 
     def __init__(
@@ -61,7 +63,7 @@ class LSTMModel(BaseModel):
         **kwargs: Any,
     ) -> None:
         """
-        Initialise le modele LSTM.
+        Initialise le modele LSTM classifier.
 
         Parameters
         ----------
@@ -102,6 +104,9 @@ class LSTMModel(BaseModel):
         self.scaler: Any = None
         self._device: Any = None
         self._history: dict = {"train_loss": [], "val_loss": []}
+        self.classes_: np.ndarray | None = None
+        self._label_to_idx: dict | None = None
+        self._idx_to_label: dict | None = None
 
     def _get_device(self) -> Any:
         """Determine le meilleur device disponible."""
@@ -120,7 +125,7 @@ class LSTMModel(BaseModel):
             return torch.device("cpu")
         return torch.device(self.device_str)
 
-    def _build_model(self) -> Any:
+    def _build_model(self, num_classes: int) -> Any:
         """Construit le modele LSTM PyTorch."""
         import torch  # type: ignore
 
@@ -129,6 +134,7 @@ class LSTMModel(BaseModel):
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
             dropout=self.dropout,
+            num_classes=num_classes,
         )
         return model.to(self._device)
 
@@ -174,14 +180,14 @@ class LSTMModel(BaseModel):
         verbose: bool = True,
     ) -> "LSTMModel":
         """
-        Entraine le modele LSTM.
+        Entraine le modele LSTM classifier.
 
         Parameters
         ----------
         X : np.ndarray | pd.DataFrame
             Features d'entrainement.
         y : np.ndarray | pd.Series
-            Target d'entrainement.
+            Target d'entrainement (labels: -1, 0, 1).
         X_val : np.ndarray | pd.DataFrame, optional
             Features de validation.
         y_val : np.ndarray | pd.Series, optional
@@ -197,6 +203,15 @@ class LSTMModel(BaseModel):
         X_arr = np.asarray(X)
         y_arr = np.asarray(y).ravel()
 
+        # Store unique classes and create mappings
+        self.classes_ = np.unique(y_arr)
+        self._label_to_idx = {label: idx for idx, label in enumerate(self.classes_)}
+        self._idx_to_label = {idx: label for label, idx in self._label_to_idx.items()}
+        num_classes = len(self.classes_)
+
+        # Convert labels to indices (0, 1, 2)
+        y_idx = np.array([self._label_to_idx[label] for label in y_arr])
+
         # Si X est 1D, ajouter une dimension avant normalisation
         if X_arr.ndim == 1:
             X_arr = X_arr.reshape(-1, 1)
@@ -208,18 +223,18 @@ class LSTMModel(BaseModel):
         self.input_size = X_scaled.shape[1]
 
         # Creer les sequences
-        X_seq, y_seq = self._create_sequences(X_scaled, y_arr)
+        X_seq, y_seq = self._create_sequences(X_scaled, y_idx)
 
         if X_seq is None or len(X_seq) == 0:
             raise ValueError("Not enough data for sequence creation.")
 
         # Device et modele
         self._device = self._get_device()
-        self.model = self._build_model()
+        self.model = self._build_model(num_classes)
 
         # Convertir en tenseurs
         X_tensor = torch.FloatTensor(X_seq).to(self._device)
-        y_tensor = torch.FloatTensor(y_seq).unsqueeze(1).to(self._device)
+        y_tensor = torch.LongTensor(y_seq).to(self._device)
 
         # DataLoader
         dataset = TensorDataset(X_tensor, y_tensor)
@@ -230,18 +245,19 @@ class LSTMModel(BaseModel):
         if X_val is not None and y_val is not None:
             X_val_arr = np.asarray(X_val)
             y_val_arr = np.asarray(y_val).ravel()
+            y_val_idx = np.array([self._label_to_idx[label] for label in y_val_arr])
             X_val_scaled = self.scaler.transform(X_val_arr)
             if X_val_scaled.ndim == 1:
                 X_val_scaled = X_val_scaled.reshape(-1, 1)
-            X_val_seq, y_val_seq = self._create_sequences(X_val_scaled, y_val_arr)
+            X_val_seq, y_val_seq = self._create_sequences(X_val_scaled, y_val_idx)
             if X_val_seq is not None and len(X_val_seq) > 0:
                 X_val_tensor = torch.FloatTensor(X_val_seq).to(self._device)
-                y_val_tensor = torch.FloatTensor(y_val_seq).unsqueeze(1).to(self._device)
+                y_val_tensor = torch.LongTensor(y_val_seq).to(self._device)
                 val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
                 val_loader = DataLoader(val_dataset, batch_size=self.batch_size)
 
-        # Training
-        criterion = nn.MSELoss()
+        # Training with CrossEntropyLoss for multi-class
+        criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
 
         best_loss = float("inf")
@@ -309,12 +325,14 @@ class LSTMModel(BaseModel):
         Returns
         -------
         np.ndarray
-            Predictions.
+            Predictions (labels: -1, 0, 1).
         """
         import torch  # type: ignore
 
         if not self.is_fitted or self.model is None:
             raise ValueError("Model must be fitted before prediction.")
+        if self._idx_to_label is None:
+            raise ValueError("Label mapping not set. Fit the model before predicting.")
 
         X_arr = np.asarray(X)
 
@@ -336,9 +354,58 @@ class LSTMModel(BaseModel):
         self.model.eval()
         with torch.no_grad():
             X_tensor = torch.FloatTensor(X_seq).to(self._device)
-            predictions = self.model(X_tensor).cpu().numpy()
+            logits = self.model(X_tensor)
+            # Get class indices with highest probability
+            pred_idx = torch.argmax(logits, dim=1).cpu().numpy()
 
-        return predictions.ravel()
+        # Convert indices back to original labels
+        predictions = np.array([self._idx_to_label[idx] for idx in pred_idx])
+        return predictions
+
+    def predict_proba(self, X: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """
+        Get probability estimates for all classes.
+
+        Parameters
+        ----------
+        X : np.ndarray | pd.DataFrame
+            Features pour la prediction.
+
+        Returns
+        -------
+        np.ndarray
+            Probability matrix of shape (n_samples, n_classes).
+            For triple-barrier: columns correspond to classes [-1, 0, 1].
+        """
+        import torch  # type: ignore
+        import torch.nn.functional as F  # type: ignore
+
+        if not self.is_fitted or self.model is None:
+            raise ValueError("Model must be fitted before prediction.")
+
+        X_arr = np.asarray(X)
+
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(-1, 1)
+
+        if self.scaler is not None:
+            X_scaled = self.scaler.transform(X_arr)
+        else:
+            X_scaled = X_arr
+
+        X_seq, _ = self._create_sequences(X_scaled, None)
+
+        if X_seq is None or len(X_seq) == 0:
+            raise ValueError("Not enough data for prediction (need >= sequence_length rows).")
+
+        self.model.eval()
+        with torch.no_grad():
+            X_tensor = torch.FloatTensor(X_seq).to(self._device)
+            logits = self.model(X_tensor)
+            # Apply softmax to get probabilities
+            probabilities = F.softmax(logits, dim=1).cpu().numpy()
+
+        return probabilities
 
     def get_history(self) -> dict:
         """Retourne l'historique d'entrainement."""

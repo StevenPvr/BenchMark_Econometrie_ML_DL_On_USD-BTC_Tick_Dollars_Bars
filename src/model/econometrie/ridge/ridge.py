@@ -38,17 +38,42 @@ class RidgeModel(BaseModel):
         normalize : bool, default=True
             Si True, normalise les features avant l'entrainement.
         """
-        super().__init__(name="Ridge", **kwargs)
+        super().__init__(
+            name="Ridge",
+            alpha=alpha,
+            fit_intercept=fit_intercept,
+            normalize=normalize,
+            **kwargs,
+        )
         self.alpha = alpha
         self.fit_intercept = fit_intercept
         self.normalize = normalize
         self.scaler: StandardScaler | None = None
         self.model: Ridge | None = None
 
+    def get_params(self) -> dict[str, Any]:
+        """Retourne les hyperparametres du modele."""
+        return {
+            "alpha": self.alpha,
+            "fit_intercept": self.fit_intercept,
+            "normalize": self.normalize,
+        }
+
+    def set_params(self, **params: Any) -> "RidgeModel":
+        """Met a jour les hyperparametres du modele."""
+        if "alpha" in params:
+            self.alpha = params["alpha"]
+        if "fit_intercept" in params:
+            self.fit_intercept = params["fit_intercept"]
+        if "normalize" in params:
+            self.normalize = params["normalize"]
+        return self
+
     def fit(
         self,
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
+        **kwargs: Any,
     ) -> "RidgeModel":
         """Entraine le modele Ridge."""
         X_arr = np.asarray(X)

@@ -1,10 +1,12 @@
-"""Complete pipeline for Lasso model: optimization, training, and evaluation.
+"""Complete pipeline for Lasso Classifier: optimization, training, and evaluation.
 
 This module provides a unified pipeline for:
 1. Hyperparameter optimization with Optuna + walk-forward CV
 2. Model training with the best parameters
 3. Model evaluation with comprehensive metrics
 4. Feature selection analysis (Lasso promotes sparsity)
+
+Supports De Prado's triple-barrier labeling (-1, 0, 1).
 """
 
 from __future__ import annotations
@@ -20,14 +22,15 @@ from src.evaluation import (
     EvaluationResult,
     evaluate_model,
 )
-from src.model.econometrie.lasso.lasso import LassoModel
+from src.model.econometrie.lasso_classifier.lasso_classifier import LassoClassifierModel
 from src.optimisation import (
-    LassoHyperparams,
+    LassoClassifierHyperparams,
     OptimizationConfig,
     OptimizationResult,
     OptunaOptimizer,
     create_cv_config,
 )
+from src.optimisation.walk_forward_cv import DEFAULT_METRIC
 from src.training import (
     CrossValidationTrainingResult,
     TrainingResult,
@@ -46,7 +49,7 @@ logger = get_logger(__name__)
 
 @dataclass
 class LassoPipelineConfig:
-    """Configuration for the Lasso pipeline.
+    """Configuration for the Lasso Classifier pipeline.
 
     Attributes:
         n_trials: Number of optimization trials.
@@ -54,7 +57,7 @@ class LassoPipelineConfig:
         purge_gap: Samples to purge between train and test.
         min_train_size: Minimum training set size.
         validation_split: Validation split for final training.
-        metric: Metric to optimize/evaluate.
+        metric: Metric to optimize/evaluate (default: f1_macro).
         output_dir: Directory for saving outputs.
         random_state: Random seed.
         verbose: Verbosity level.
@@ -65,7 +68,7 @@ class LassoPipelineConfig:
     purge_gap: int = 5
     min_train_size: int = 100
     validation_split: float = 0.2
-    metric: str = "mse"
+    metric: str = DEFAULT_METRIC
     output_dir: Path | None = None
     random_state: int = 42
     verbose: bool = True
@@ -78,7 +81,7 @@ class LassoPipelineConfig:
 
 @dataclass
 class LassoPipelineResult:
-    """Complete result from the Lasso pipeline.
+    """Complete result from the Lasso Classifier pipeline.
 
     Attributes:
         optimization_result: Hyperparameter optimization results.
@@ -94,7 +97,7 @@ class LassoPipelineResult:
     training_result: TrainingResult | CrossValidationTrainingResult
     evaluation_result: EvaluationResult
     best_params: dict[str, Any]
-    model: LassoModel
+    model: LassoClassifierModel
     selected_features: list[int | str]
     n_selected_features: int
 
@@ -102,7 +105,7 @@ class LassoPipelineResult:
         """Generate a summary of the pipeline results."""
         lines = [
             "=" * 60,
-            "Lasso Pipeline Results",
+            "Lasso Classifier Pipeline Results",
             "=" * 60,
             "",
         ]
@@ -140,7 +143,11 @@ class LassoPipelineResult:
 
         # Feature selection summary
         if self.model.is_fitted:
-            total_features = len(self.model.coef_)
+            coefs = self.model.coef_
+            if coefs.ndim == 1:
+                total_features = len(coefs)
+            else:
+                total_features = coefs.shape[1]
             lines.extend([
                 "",
                 "FEATURE SELECTION:",
@@ -165,10 +172,12 @@ class LassoPipelineResult:
 
 
 class LassoPipeline:
-    """Complete pipeline for Lasso: optimize, train, evaluate.
+    """Complete pipeline for Lasso Classifier: optimize, train, evaluate.
 
-    Lasso is particularly useful for feature selection as it promotes
-    sparsity in the coefficient vector.
+    Lasso Classifier is particularly useful for feature selection as it promotes
+    sparsity in the coefficient vector via L1 regularization.
+
+    Supports De Prado's triple-barrier labeling (-1, 0, 1).
 
     Example:
         >>> pipeline = LassoPipeline(config=LassoPipelineConfig(
@@ -193,20 +202,20 @@ class LassoPipeline:
         self,
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
-        hyperparam_space: LassoHyperparams | None = None,
+        hyperparam_space: LassoClassifierHyperparams | None = None,
     ) -> OptimizationResult:
         """Optimize hyperparameters using Optuna with walk-forward CV.
 
         Args:
             X: Training features.
-            y: Training target.
+            y: Training target (class labels: -1, 0, 1).
             hyperparam_space: Custom hyperparameter space.
 
         Returns:
             OptimizationResult with best parameters.
         """
         if self.config.verbose:
-            logger.info("Starting Lasso hyperparameter optimization...")
+            logger.info("Starting Lasso Classifier hyperparameter optimization...")
 
         # Create configurations
         cv_config = create_cv_config(
@@ -220,11 +229,11 @@ class LassoPipeline:
             random_state=self.config.random_state,
         )
 
-        space = hyperparam_space or LassoHyperparams()
+        space = hyperparam_space or LassoClassifierHyperparams()
 
         # Run optimization
         optimizer = OptunaOptimizer(
-            model_class=LassoModel,
+            model_class=LassoClassifierModel,
             hyperparam_space=space,
             cv_config=cv_config,
             optimization_config=opt_config,
@@ -237,7 +246,7 @@ class LassoPipeline:
         )
 
         if self.config.verbose:
-            logger.info("Optimization complete. Best %s: %.6f", self.config.metric, result.best_score)
+            logger.info("Optimization complete. Best %s: %.4f", self.config.metric, result.best_score)
 
         return result
 
@@ -247,12 +256,12 @@ class LassoPipeline:
         y: np.ndarray | pd.Series,
         params: dict[str, Any],
         use_cv: bool = True,
-    ) -> tuple[LassoModel, TrainingResult | CrossValidationTrainingResult]:
+    ) -> tuple[LassoClassifierModel, TrainingResult | CrossValidationTrainingResult]:
         """Train the model with given parameters.
 
         Args:
             X: Training features.
-            y: Training target.
+            y: Training target (class labels: -1, 0, 1).
             params: Model hyperparameters.
             use_cv: If True, use walk-forward CV for training.
 
@@ -260,10 +269,10 @@ class LassoPipeline:
             Tuple of (trained model, training result).
         """
         if self.config.verbose:
-            logger.info("Training Lasso with optimized parameters...")
+            logger.info("Training Lasso Classifier with optimized parameters...")
 
         # Create model with best params
-        model = LassoModel(**params)
+        model = LassoClassifierModel(**params)
 
         if use_cv:
             result = train_with_cv(
@@ -286,7 +295,7 @@ class LassoPipeline:
 
     def evaluate(
         self,
-        model: LassoModel,
+        model: LassoClassifierModel,
         X_test: np.ndarray | pd.DataFrame,
         y_test: np.ndarray | pd.Series,
     ) -> EvaluationResult:
@@ -295,17 +304,16 @@ class LassoPipeline:
         Args:
             model: Trained model.
             X_test: Test features.
-            y_test: Test target.
+            y_test: Test target (class labels: -1, 0, 1).
 
         Returns:
             EvaluationResult with metrics.
         """
         if self.config.verbose:
-            logger.info("Evaluating Lasso on test set...")
+            logger.info("Evaluating Lasso Classifier on test set...")
 
         result = evaluate_model(
             model, X_test, y_test,
-            metrics=["mse", "rmse", "mae", "r2", "mape"],
             verbose=self.config.verbose,
         )
 
@@ -325,9 +333,9 @@ class LassoPipeline:
 
         Args:
             X_train: Training features.
-            y_train: Training target.
+            y_train: Training target (class labels: -1, 0, 1).
             X_test: Test features.
-            y_test: Test target.
+            y_test: Test target (class labels: -1, 0, 1).
             skip_optimization: If True, skip optimization and use default_params.
             default_params: Parameters to use if skipping optimization.
             feature_names: Names of features for selected features output.
@@ -337,14 +345,14 @@ class LassoPipeline:
         """
         if self.config.verbose:
             logger.info("=" * 60)
-            logger.info("Starting Lasso Pipeline")
+            logger.info("Starting Lasso Classifier Pipeline")
             logger.info("=" * 60)
 
         # Step 1: Optimization
         opt_result = None
         if skip_optimization:
             if default_params is None:
-                default_params = {"alpha": 1.0}
+                default_params = {"C": 1.0}
             best_params = default_params
             if self.config.verbose:
                 logger.info("Skipping optimization, using default parameters")
@@ -393,7 +401,7 @@ class LassoPipeline:
         train_result: TrainingResult | CrossValidationTrainingResult,
         eval_result: EvaluationResult,
         best_params: dict[str, Any],
-        model: LassoModel,
+        model: LassoClassifierModel,
         selected_features: list[int | str],
     ) -> None:
         """Save pipeline results to output directory."""
@@ -422,12 +430,14 @@ class LassoPipeline:
 
         # Save model coefficients and selected features
         if model.is_fitted:
+            coefs = model.coef_
+            n_total = coefs.shape[1] if coefs.ndim > 1 else len(coefs)
             coef_data = {
-                "coefficients": model.coef_.tolist(),
-                "intercept": float(model.intercept_),
+                "coefficients": coefs.tolist(),
+                "intercept": model.intercept_.tolist() if hasattr(model.intercept_, "tolist") else float(model.intercept_),
                 "selected_features": [str(f) for f in selected_features],
                 "n_selected": len(selected_features),
-                "n_total": len(model.coef_),
+                "n_total": n_total,
             }
             save_json_pretty(coef_data, output_dir / "model_coefficients.json")
 
@@ -450,13 +460,13 @@ def run_lasso_pipeline(
     verbose: bool = True,
     feature_names: list[str] | None = None,
 ) -> LassoPipelineResult:
-    """Convenience function to run the complete Lasso pipeline.
+    """Convenience function to run the complete Lasso Classifier pipeline.
 
     Args:
         X_train: Training features.
-        y_train: Training target.
+        y_train: Training target (class labels: -1, 0, 1).
         X_test: Test features.
-        y_test: Test target.
+        y_test: Test target (class labels: -1, 0, 1).
         n_trials: Number of optimization trials.
         n_splits: Number of CV splits.
         purge_gap: Samples to purge between train/test.
@@ -468,7 +478,7 @@ def run_lasso_pipeline(
 
     Example:
         >>> result = run_lasso_pipeline(X_train, y_train, X_test, y_test)
-        >>> print(f"Test MSE: {result.evaluation_result.metrics['mse']:.4f}")
+        >>> print(f"Test accuracy: {result.evaluation_result.metrics['accuracy']:.4f}")
         >>> print(f"Selected features: {result.selected_features}")
     """
     config = LassoPipelineConfig(
@@ -486,24 +496,24 @@ def quick_lasso(
     y_train: np.ndarray | pd.Series,
     X_test: np.ndarray | pd.DataFrame,
     y_test: np.ndarray | pd.Series,
-    alpha: float = 1.0,
-) -> tuple[LassoModel, dict[str, float], list[int]]:
+    C: float = 1.0,
+) -> tuple[LassoClassifierModel, dict[str, float], list[str]]:
     """Quick training and evaluation without optimization.
 
     Args:
         X_train: Training features.
-        y_train: Training target.
+        y_train: Training target (class labels: -1, 0, 1).
         X_test: Test features.
-        y_test: Test target.
-        alpha: Regularization parameter.
+        y_test: Test target (class labels: -1, 0, 1).
+        C: Inverse regularization strength.
 
     Returns:
         Tuple of (trained model, test metrics dict, selected feature indices).
     """
-    model = LassoModel(alpha=alpha)
+    model = LassoClassifierModel(C=C)
     model.fit(X_train, y_train)
 
     result = evaluate_model(model, X_test, y_test, verbose=False)
     selected = model.get_selected_features()
 
-    return model, result.metrics, [int(f) for f in selected]
+    return model, result.metrics, selected

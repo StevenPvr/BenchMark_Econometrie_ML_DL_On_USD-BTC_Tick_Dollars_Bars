@@ -1,4 +1,4 @@
-"""XGBoost model for regression/classification."""
+"""XGBoost model for multi-class classification (De Prado triple-barrier labeling)."""
 
 from __future__ import annotations
 
@@ -13,9 +13,10 @@ from src.model.base import BaseModel
 
 class XGBoostModel(BaseModel):
     """
-    XGBoost (eXtreme Gradient Boosting) model.
+    XGBoost (eXtreme Gradient Boosting) classifier.
 
     Performant pour les donnees tabulaires.
+    Supporte classification multi-classe (triple-barrier: -1, 0, 1).
     """
 
     def __init__(
@@ -27,7 +28,6 @@ class XGBoostModel(BaseModel):
         colsample_bytree: float = 0.8,
         reg_alpha: float = 0.0,
         reg_lambda: float = 1.0,
-        objective: str = "reg:squarederror",
         random_state: int = 42,
         n_jobs: int = -1,
         early_stopping_rounds: int | None = None,
@@ -52,8 +52,6 @@ class XGBoostModel(BaseModel):
             Regularisation L1.
         reg_lambda : float, default=1.0
             Regularisation L2.
-        objective : str, default="reg:squarederror"
-            Fonction objectif.
         random_state : int, default=42
             Seed pour reproductibilite.
         n_jobs : int, default=-1
@@ -69,11 +67,11 @@ class XGBoostModel(BaseModel):
         self.colsample_bytree = colsample_bytree
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
-        self.objective = objective
         self.random_state = random_state
         self.n_jobs = n_jobs
         self.early_stopping_rounds = early_stopping_rounds
-        self.model: xgb.XGBRegressor | None = None
+        self.model: xgb.XGBClassifier | None = None
+        self.classes_: np.ndarray | None = None
 
     def fit(
         self,
@@ -83,11 +81,13 @@ class XGBoostModel(BaseModel):
         early_stopping_rounds: int | None = None,
         verbose: bool = False,
     ) -> "XGBoostModel":
-        """Entraine le modele XGBoost."""
+        """Entraine le modele XGBoost classifier."""
+        y_arr = np.asarray(y).ravel()
+        self.classes_ = np.unique(y_arr)
+
         # Use early_stopping_rounds from constructor if not provided
         effective_early_stopping = early_stopping_rounds or self.early_stopping_rounds
 
-        # Create model with early stopping parameters if available
         model_params = {
             "n_estimators": self.n_estimators,
             "max_depth": self.max_depth,
@@ -96,7 +96,6 @@ class XGBoostModel(BaseModel):
             "colsample_bytree": self.colsample_bytree,
             "reg_alpha": self.reg_alpha,
             "reg_lambda": self.reg_lambda,
-            "objective": self.objective,
             "random_state": self.random_state,
             "n_jobs": self.n_jobs,
         }
@@ -106,16 +105,15 @@ class XGBoostModel(BaseModel):
             try:
                 model_params["early_stopping_rounds"] = effective_early_stopping
             except (TypeError, ValueError):
-                # If not supported in constructor, we'll skip early stopping
                 pass
 
-        self.model = xgb.XGBRegressor(**model_params)
+        self.model = xgb.XGBClassifier(**model_params)
 
         fit_params: Dict[str, Any] = {"verbose": verbose}
         if eval_set is not None:
             fit_params["eval_set"] = eval_set
 
-        self.model.fit(X, y, **fit_params)
+        self.model.fit(X, y_arr, **fit_params)
         self.is_fitted = True
         return self
 
@@ -124,6 +122,20 @@ class XGBoostModel(BaseModel):
         if not self.is_fitted or self.model is None:
             raise ValueError("Model must be fitted before prediction.")
         return self.model.predict(X)
+
+    def predict_proba(self, X: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """
+        Get probability estimates for all classes.
+
+        Returns
+        -------
+        np.ndarray
+            Probability matrix of shape (n_samples, n_classes).
+            For triple-barrier: columns correspond to classes [-1, 0, 1].
+        """
+        if not self.is_fitted or self.model is None:
+            raise ValueError("Model must be fitted before prediction.")
+        return self.model.predict_proba(X)
 
     def get_feature_importance(
         self,

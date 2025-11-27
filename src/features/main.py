@@ -69,13 +69,25 @@ from src.features.trend import (
 from src.features.vpin import compute_vpin
 from src.path import (
     DATASET_FEATURES_CSV,
+    DOLLAR_BARS_PARQUET,
+    DATASET_FEATURES_LINEAR_TEST_CSV,
+    DATASET_FEATURES_LINEAR_TEST_PARQUET,
+    DATASET_FEATURES_LINEAR_TRAIN_CSV,
+    DATASET_FEATURES_LINEAR_TRAIN_PARQUET,
     DATASET_FEATURES_LINEAR_CSV,
     DATASET_FEATURES_LINEAR_PARQUET,
+    DATASET_FEATURES_LSTM_TEST_CSV,
+    DATASET_FEATURES_LSTM_TEST_PARQUET,
+    DATASET_FEATURES_LSTM_TRAIN_CSV,
+    DATASET_FEATURES_LSTM_TRAIN_PARQUET,
     DATASET_FEATURES_LSTM_CSV,
     DATASET_FEATURES_LSTM_PARQUET,
+    DATASET_FEATURES_TEST_CSV,
+    DATASET_FEATURES_TEST_PARQUET,
+    DATASET_FEATURES_TRAIN_CSV,
+    DATASET_FEATURES_TRAIN_PARQUET,
     DATASET_FEATURES_PARQUET,
     FEATURES_DIR,
-    LOG_RETURNS_SPLIT_PARQUET,
     MINMAX_SCALER_FILE,
     SCALERS_DIR,
     ZSCORE_SCALER_FILE,
@@ -93,15 +105,15 @@ def load_input_data() -> pd.DataFrame:
     Returns:
         DataFrame with dollar bars and log returns.
     """
-    logger.info("Loading input data from %s", LOG_RETURNS_SPLIT_PARQUET)
+    logger.info("Loading input data from %s", DOLLAR_BARS_PARQUET)
 
-    if not LOG_RETURNS_SPLIT_PARQUET.exists():
+    if not DOLLAR_BARS_PARQUET.exists():
         raise FileNotFoundError(
-            f"Input file not found: {LOG_RETURNS_SPLIT_PARQUET}. "
+            f"Input file not found: {DOLLAR_BARS_PARQUET}. "
             "Please run data_preparation first."
         )
 
-    df = pd.read_parquet(LOG_RETURNS_SPLIT_PARQUET)
+    df = pd.read_parquet(DOLLAR_BARS_PARQUET)
 
     logger.info(
         "Loaded %d rows, %d columns. Columns: %s",
@@ -723,6 +735,81 @@ def save_outputs(
     )
 
 
+def _split_dataframe_for_output(
+    df: pd.DataFrame,
+    train_ratio: float = TRAIN_RATIO,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split a DataFrame into chronological train/test slices.
+
+    Uses an existing 'split' column if present; otherwise applies an 80/20
+    chronological split and tags the rows with a new 'split' column.
+    """
+    if "split" in df.columns:
+        mask_train = df["split"] == "train"
+        mask_test = df["split"] == "test"
+        df_train = df.loc[mask_train].copy()
+        df_test = df.loc[mask_test].copy()
+
+        if df_train.empty or df_test.empty:
+            logger.warning("Existing split column is empty; falling back to ratio split")
+        else:
+            return df_train, df_test
+
+    split_idx = int(len(df) * train_ratio)
+    df_train = df.iloc[:split_idx].copy()
+    df_train["split"] = "train"
+    df_test = df.iloc[split_idx:].copy()
+    df_test["split"] = "test"
+    return df_train, df_test
+
+
+def save_train_test_splits() -> None:
+    """Create and save 80/20 train/test splits for all feature variants."""
+    datasets = [
+        (
+            DATASET_FEATURES_PARQUET,
+            DATASET_FEATURES_TRAIN_PARQUET,
+            DATASET_FEATURES_TEST_PARQUET,
+            DATASET_FEATURES_TRAIN_CSV,
+            DATASET_FEATURES_TEST_CSV,
+        ),
+        (
+            DATASET_FEATURES_LINEAR_PARQUET,
+            DATASET_FEATURES_LINEAR_TRAIN_PARQUET,
+            DATASET_FEATURES_LINEAR_TEST_PARQUET,
+            DATASET_FEATURES_LINEAR_TRAIN_CSV,
+            DATASET_FEATURES_LINEAR_TEST_CSV,
+        ),
+        (
+            DATASET_FEATURES_LSTM_PARQUET,
+            DATASET_FEATURES_LSTM_TRAIN_PARQUET,
+            DATASET_FEATURES_LSTM_TEST_PARQUET,
+            DATASET_FEATURES_LSTM_TRAIN_CSV,
+            DATASET_FEATURES_LSTM_TEST_CSV,
+        ),
+    ]
+
+    for input_path, train_parquet, test_parquet, train_csv, test_csv in datasets:
+        if not input_path.exists():
+            logger.warning("Cannot create split: missing %s", input_path)
+            continue
+
+        df = pd.read_parquet(input_path)
+        df_train, df_test = _split_dataframe_for_output(df)
+
+        df_train.to_parquet(train_parquet, index=False)
+        df_test.to_parquet(test_parquet, index=False)
+        df_train.to_csv(train_csv, index=False)
+        df_test.to_csv(test_csv, index=False)
+
+        logger.info(
+            "Saved train/test splits for %s -> train: %s, test: %s",
+            input_path.name,
+            train_parquet.name,
+            test_parquet.name,
+        )
+
+
 def main() -> None:
     """Run the complete feature engineering pipeline."""
     setup_logging()
@@ -755,18 +842,25 @@ def main() -> None:
 
         # 8. Split into train/test
         df_train, df_test, _ = split_train_test(df_features_clean)
+        df_train["split"] = "train"
+        df_test["split"] = "test"
+        df_features_with_split = pd.concat([df_train, df_test], axis=0)
 
         # 9. Create scaled datasets (fit on train only!)
         train_linear, test_linear, train_lstm, test_lstm = create_scaled_datasets(
             df_train, df_test
         )
+        train_linear["split"] = "train"
+        test_linear["split"] = "test"
+        train_lstm["split"] = "train"
+        test_lstm["split"] = "test"
 
         # 10. Concatenate train + test for final datasets
         df_features_linear = pd.concat([train_linear, test_linear], axis=0)
         df_features_lstm = pd.concat([train_lstm, test_lstm], axis=0)
 
         # 11. Save outputs (timestamp columns dropped, cleaned data)
-        save_outputs(df_features_clean, df_features_linear, df_features_lstm)
+        save_outputs(df_features_with_split, df_features_linear, df_features_lstm)
 
         logger.info("=" * 60)
         logger.info("FEATURE ENGINEERING COMPLETE")

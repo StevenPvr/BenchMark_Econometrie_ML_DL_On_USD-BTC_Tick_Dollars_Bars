@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
 from src.evaluation.evaluator import EvaluationResult, Evaluator, EvaluationConfig, PredictableModel
-from src.evaluation.metrics import REGRESSION_METRICS
+from src.evaluation.metrics import CLASSIFICATION_METRICS
 from src.utils import get_logger, save_json_pretty
 from pathlib import Path
 
@@ -241,7 +241,7 @@ class ModelComparator:
             lower_is_better: If True, lower metric values are better.
             verbose: Show progress.
         """
-        self.metrics = metrics or list(REGRESSION_METRICS.keys())
+        self.metrics = metrics or list(CLASSIFICATION_METRICS.keys())
         self.primary_metric = primary_metric
         self.lower_is_better = lower_is_better
         self.verbose = verbose

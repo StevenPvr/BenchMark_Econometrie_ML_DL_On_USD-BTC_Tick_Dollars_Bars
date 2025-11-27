@@ -1,9 +1,12 @@
-"""Generic model evaluator for all model types.
+"""Generic model evaluator for classification models.
 
 This module provides a unified evaluation interface compatible with:
-- Econometric models (Ridge, Lasso)
-- Machine Learning models (XGBoost, LightGBM, CatBoost, RandomForest)
-- Deep Learning models (LSTM)
+- Econometric classifiers (Ridge, Lasso, Logistic)
+- Machine Learning classifiers (XGBoost, LightGBM, CatBoost, RandomForest)
+- Deep Learning classifiers (LSTM)
+- Baseline classifiers (Random, Persistence, AR1)
+
+Supports De Prado's triple-barrier labeling (-1, 0, 1).
 """
 
 from __future__ import annotations
@@ -18,11 +21,13 @@ import pandas as pd  # type: ignore[import-untyped]
 
 from src.evaluation.metrics import (
     ALL_METRICS,
-    REGRESSION_METRICS,
-    ResidualDiagnostics,
+    CLASSIFICATION_METRICS,
+    DEFAULT_CLASSIFICATION_METRICS,
+    ClassificationReport,
+    compute_classification_report,
     compute_metrics,
-    compute_residual_diagnostics,
-    mincer_zarnowitz_r2,
+    confusion_matrix,
+    per_class_accuracy,
 )
 from src.utils import get_logger, save_json_pretty
 
@@ -59,16 +64,16 @@ class EvaluationConfig:
     """Configuration for model evaluation.
 
     Attributes:
-        metrics: List of metrics to compute (None = all regression metrics).
-        compute_residual_diagnostics: Whether to compute residual diagnostics.
-        compute_mz_regression: Whether to compute Mincer-Zarnowitz regression.
+        metrics: List of metrics to compute (None = all classification metrics).
+        compute_confusion_matrix: Whether to compute confusion matrix.
+        compute_per_class: Whether to compute per-class metrics.
         verbose: Verbosity level (0=silent, 1=summary, 2=detailed).
         output_dir: Directory for saving outputs.
     """
 
     metrics: list[str] | None = None
-    compute_residual_diagnostics: bool = True
-    compute_mz_regression: bool = False
+    compute_confusion_matrix: bool = True
+    compute_per_class: bool = True
     verbose: int = 1
     output_dir: Path | None = None
 
@@ -94,13 +99,11 @@ class EvaluationResult:
     Attributes:
         model_name: Name of the evaluated model.
         metrics: Dict of metric name to value.
-        predictions: Model predictions.
-        actuals: Actual values.
-        residuals: Prediction residuals (actuals - predictions).
-        residual_diagnostics: Residual analysis results.
-        mz_r2: Mincer-Zarnowitz R².
-        mz_alpha: Mincer-Zarnowitz intercept.
-        mz_beta: Mincer-Zarnowitz slope.
+        predictions: Model predictions (class labels).
+        actuals: Actual class labels.
+        confusion_matrix: Confusion matrix (n_classes x n_classes).
+        per_class_accuracy: Per-class accuracy dict.
+        class_labels: List of class labels.
         evaluation_time: Evaluation duration in seconds.
         n_samples: Number of samples evaluated.
         model_params: Model hyperparameters.
@@ -110,11 +113,9 @@ class EvaluationResult:
     metrics: dict[str, float]
     predictions: np.ndarray
     actuals: np.ndarray
-    residuals: np.ndarray
-    residual_diagnostics: ResidualDiagnostics | None
-    mz_r2: float | None
-    mz_alpha: float | None
-    mz_beta: float | None
+    confusion_matrix: np.ndarray | None
+    per_class_accuracy: dict[int, float] | None
+    class_labels: list[int] | None
     evaluation_time: float
     n_samples: int
     model_params: dict[str, Any]
@@ -129,29 +130,19 @@ class EvaluationResult:
             "model_params": self.model_params,
         }
 
-        if self.mz_r2 is not None:
-            result["mincer_zarnowitz"] = {
-                "r2": self.mz_r2,
-                "alpha": self.mz_alpha,
-                "beta": self.mz_beta,
-            }
+        if self.confusion_matrix is not None:
+            result["confusion_matrix"] = self.confusion_matrix.tolist()
+            result["class_labels"] = self.class_labels
 
-        if self.residual_diagnostics is not None:
-            result["residual_diagnostics"] = {
-                "mean": self.residual_diagnostics.mean,
-                "std": self.residual_diagnostics.std,
-                "skewness": self.residual_diagnostics.skewness,
-                "kurtosis": self.residual_diagnostics.kurtosis,
-                "jarque_bera_stat": self.residual_diagnostics.jarque_bera_stat,
-                "autocorr_lag1": self.residual_diagnostics.autocorr_lag1,
-            }
+        if self.per_class_accuracy is not None:
+            result["per_class_accuracy"] = self.per_class_accuracy
 
         return result
 
     def summary(self) -> str:
         """Generate a text summary of the evaluation."""
         lines = [
-            f"=== Evaluation Results: {self.model_name} ===",
+            f"=== Classification Results: {self.model_name} ===",
             f"Samples: {self.n_samples}",
             f"Evaluation time: {self.evaluation_time:.2f}s",
             "",
@@ -159,28 +150,22 @@ class EvaluationResult:
         ]
 
         for metric, value in self.metrics.items():
-            lines.append(f"  {metric}: {value:.6f}")
+            lines.append(f"  {metric}: {value:.4f}")
 
-        if self.mz_r2 is not None:
-            lines.extend([
-                "",
-                "Mincer-Zarnowitz Regression:",
-                f"  R²: {self.mz_r2:.4f}",
-                f"  alpha: {self.mz_alpha:.4f}",
-                f"  beta: {self.mz_beta:.4f}",
-            ])
+        if self.per_class_accuracy is not None:
+            lines.extend(["", "Per-class Accuracy:"])
+            for cls, acc in sorted(self.per_class_accuracy.items()):
+                lines.append(f"  Class {cls}: {acc:.4f}")
 
-        if self.residual_diagnostics is not None:
-            diag = self.residual_diagnostics
-            lines.extend([
-                "",
-                "Residual Diagnostics:",
-                f"  Mean: {diag.mean:.6f}",
-                f"  Std: {diag.std:.6f}",
-                f"  Skewness: {diag.skewness:.4f}",
-                f"  Kurtosis: {diag.kurtosis:.4f}",
-                f"  Autocorr(1): {diag.autocorr_lag1:.4f}",
-            ])
+        if self.confusion_matrix is not None and self.class_labels is not None:
+            lines.extend(["", "Confusion Matrix:"])
+            # Header
+            header = "      " + "  ".join(f"{c:>5}" for c in self.class_labels)
+            lines.append(header)
+            # Rows
+            for i, cls in enumerate(self.class_labels):
+                row = f"{cls:>5} " + "  ".join(f"{v:>5}" for v in self.confusion_matrix[i])
+                lines.append(row)
 
         return "\n".join(lines)
 
@@ -191,20 +176,20 @@ class EvaluationResult:
 
 
 class Evaluator:
-    """Generic evaluator for all model types.
+    """Generic evaluator for classification models.
 
     This evaluator provides a unified interface for evaluating any model
     that implements the PredictableModel protocol.
 
     Example:
-        >>> from src.model.machine_learning.xgboost_model import XGBoostModel
+        >>> from src.model.machine_learning.lightgbm.lightgbm_model import LightGBMModel
         >>> from src.evaluation import Evaluator, EvaluationConfig
         >>>
-        >>> model = XGBoostModel(n_estimators=100)
+        >>> model = LightGBMModel(n_estimators=100)
         >>> model.fit(X_train, y_train)
         >>>
         >>> evaluator = Evaluator(config=EvaluationConfig(
-        ...     metrics=["mse", "rmse", "mae", "r2"],
+        ...     metrics=["accuracy", "f1_macro", "balanced_accuracy"],
         ... ))
         >>> result = evaluator.evaluate(model, X_test, y_test)
         >>> print(result.summary())
@@ -229,7 +214,7 @@ class Evaluator:
         Args:
             model: Trained model to evaluate.
             X: Test features.
-            y: Test target.
+            y: Test target (class labels).
 
         Returns:
             EvaluationResult with all computed metrics.
@@ -245,34 +230,34 @@ class Evaluator:
 
         # Get predictions
         predictions = model.predict(X_arr)
-        residuals = y_arr - predictions
 
         # Compute metrics
-        metrics_to_compute = self.config.metrics or list(REGRESSION_METRICS.keys())
+        metrics_to_compute = self.config.metrics or DEFAULT_CLASSIFICATION_METRICS
         metrics = compute_metrics(y_arr, predictions, metrics_to_compute)
 
         if self.config.verbose >= 2:
             for metric, value in metrics.items():
-                logger.info("  %s: %.6f", metric, value)
+                logger.info("  %s: %.4f", metric, value)
 
-        # Residual diagnostics
-        residual_diag = None
-        if self.config.compute_residual_diagnostics:
-            residual_diag = compute_residual_diagnostics(y_arr, predictions)
+        # Confusion matrix
+        cm = None
+        class_labels = None
+        if self.config.compute_confusion_matrix:
+            cm = confusion_matrix(y_arr, predictions)
+            class_labels = sorted([int(c) for c in np.unique(np.concatenate([y_arr, predictions]))])
 
-        # Mincer-Zarnowitz regression
-        mz_r2, mz_alpha, mz_beta = None, None, None
-        if self.config.compute_mz_regression:
-            mz_r2, mz_alpha, mz_beta = mincer_zarnowitz_r2(y_arr, predictions)
+        # Per-class accuracy
+        per_class_acc = None
+        if self.config.compute_per_class:
+            per_class_acc = per_class_accuracy(y_arr, predictions)
 
         evaluation_time = (datetime.now() - start_time).total_seconds()
 
         if self.config.verbose >= 1:
-            primary_metric = metrics_to_compute[0]
             logger.info(
-                "Evaluation complete: %s=%.6f (%d samples, %.2fs)",
-                primary_metric,
-                metrics.get(primary_metric, float("nan")),
+                "Evaluation complete: accuracy=%.4f, f1_macro=%.4f (%d samples, %.2fs)",
+                metrics.get("accuracy", float("nan")),
+                metrics.get("f1_macro", float("nan")),
                 len(y_arr),
                 evaluation_time,
             )
@@ -282,11 +267,9 @@ class Evaluator:
             metrics=metrics,
             predictions=predictions,
             actuals=y_arr,
-            residuals=residuals,
-            residual_diagnostics=residual_diag,
-            mz_r2=mz_r2,
-            mz_alpha=mz_alpha,
-            mz_beta=mz_beta,
+            confusion_matrix=cm,
+            per_class_accuracy=per_class_acc,
+            class_labels=class_labels,
             evaluation_time=evaluation_time,
             n_samples=len(y_arr),
             model_params=model.get_params(),
@@ -310,7 +293,7 @@ def evaluate_model(
     Args:
         model: Trained model to evaluate.
         X: Test features.
-        y: Test target.
+        y: Test target (class labels).
         metrics: List of metrics to compute.
         verbose: Show progress.
 
@@ -319,7 +302,7 @@ def evaluate_model(
 
     Example:
         >>> result = evaluate_model(model, X_test, y_test)
-        >>> print(f"MSE: {result.metrics['mse']:.4f}")
+        >>> print(f"Accuracy: {result.metrics['accuracy']:.4f}")
     """
     config = EvaluationConfig(
         metrics=metrics,
@@ -339,12 +322,16 @@ def quick_evaluate(
     Args:
         model: Trained model.
         X: Test features.
-        y: Test target.
+        y: Test target (class labels).
 
     Returns:
         Dict of metric names to values.
     """
-    config = EvaluationConfig(verbose=0)
+    config = EvaluationConfig(
+        verbose=0,
+        compute_confusion_matrix=False,
+        compute_per_class=False,
+    )
     evaluator = Evaluator(config)
     result = evaluator.evaluate(model, X, y)
     return result.metrics

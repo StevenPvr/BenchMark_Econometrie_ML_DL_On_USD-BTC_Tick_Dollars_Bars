@@ -70,7 +70,6 @@ def main() -> None:
         n_splits=args.n_splits,
         purge_gap=args.purge_gap,
         min_train_size=200,
-        metric="mse",
         output_dir=RANDOM_FOREST_ARTIFACTS_DIR,
         verbose=True,
     )

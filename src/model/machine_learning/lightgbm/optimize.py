@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-trials",
         type=int,
-        default=50,
+        default=200,
         help="Number of Optuna trials (default: 50)",
     )
     parser.add_argument(
@@ -70,7 +70,6 @@ def main() -> None:
         n_splits=args.n_splits,
         purge_gap=args.purge_gap,
         min_train_size=200,
-        metric="mse",
         output_dir=LIGHTGBM_ARTIFACTS_DIR,
         verbose=True,
     )

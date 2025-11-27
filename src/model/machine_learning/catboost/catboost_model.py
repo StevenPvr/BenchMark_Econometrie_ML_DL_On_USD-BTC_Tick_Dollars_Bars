@@ -1,4 +1,4 @@
-"""CatBoost model for regression/classification."""
+"""CatBoost model for multi-class classification (De Prado triple-barrier labeling)."""
 
 from __future__ import annotations
 
@@ -6,16 +6,17 @@ from typing import Any, List
 
 import numpy as np
 import pandas as pd  # type: ignore
-from catboost import CatBoostRegressor  # type: ignore
+from catboost import CatBoostClassifier  # type: ignore
 
-from src.model.base import BaseModel # type: ignore[import-untyped]
+from src.model.base import BaseModel  # type: ignore[import-untyped]
 
 
 class CatBoostModel(BaseModel):
     """
-    CatBoost (Categorical Boosting) model.
+    CatBoost (Categorical Boosting) classifier.
 
     Excellent pour les features categoriques, robust au surapprentissage.
+    Supporte classification multi-classe (triple-barrier: -1, 0, 1).
     """
 
     def __init__(
@@ -26,7 +27,6 @@ class CatBoostModel(BaseModel):
         l2_leaf_reg: float = 3.0,
         random_strength: float = 1.0,
         bagging_temperature: float = 1.0,
-        loss_function: str = "RMSE",
         random_seed: int = 42,
         thread_count: int = -1,
         **kwargs: Any,
@@ -48,8 +48,6 @@ class CatBoostModel(BaseModel):
             Force de la randomisation des splits.
         bagging_temperature : float, default=1.0
             Temperature pour le bayesian bagging.
-        loss_function : str, default="RMSE"
-            Fonction de perte.
         random_seed : int, default=42
             Seed pour reproductibilite.
         thread_count : int, default=-1
@@ -62,10 +60,10 @@ class CatBoostModel(BaseModel):
         self.l2_leaf_reg = l2_leaf_reg
         self.random_strength = random_strength
         self.bagging_temperature = bagging_temperature
-        self.loss_function = loss_function
         self.random_seed = random_seed
         self.thread_count = thread_count
-        self.model: CatBoostRegressor | None = None
+        self.model: CatBoostClassifier | None = None
+        self.classes_: np.ndarray | None = None
 
     def fit(
         self,
@@ -77,14 +75,14 @@ class CatBoostModel(BaseModel):
         verbose: bool = False,
     ) -> "CatBoostModel":
         """
-        Entraine le modele CatBoost.
+        Entraine le modele CatBoost classifier.
 
         Parameters
         ----------
         X : np.ndarray | pd.DataFrame
             Features.
         y : np.ndarray | pd.Series
-            Target.
+            Target (labels: -1, 0, 1).
         cat_features : List[int] | List[str], optional
             Indices ou noms des features categoriques.
         eval_set : tuple, optional
@@ -94,14 +92,16 @@ class CatBoostModel(BaseModel):
         verbose : bool, default=False
             Affiche les logs d'entrainement.
         """
-        self.model = CatBoostRegressor(
+        y_arr = np.asarray(y).ravel()
+        self.classes_ = np.unique(y_arr)
+
+        self.model = CatBoostClassifier(
             iterations=self.iterations,
             depth=self.depth,
             learning_rate=self.learning_rate,
             l2_leaf_reg=self.l2_leaf_reg,
             random_strength=self.random_strength,
             bagging_temperature=self.bagging_temperature,
-            loss_function=self.loss_function,
             random_seed=self.random_seed,
             thread_count=self.thread_count,
             verbose=verbose,
@@ -109,7 +109,7 @@ class CatBoostModel(BaseModel):
 
         self.model.fit(
             X,
-            y,
+            y_arr,
             cat_features=cat_features,
             eval_set=eval_set,
             early_stopping_rounds=early_stopping_rounds,
@@ -121,7 +121,21 @@ class CatBoostModel(BaseModel):
         """Fait des predictions avec le modele CatBoost."""
         if not self.is_fitted or self.model is None:
             raise ValueError("Model must be fitted before prediction.")
-        return self.model.predict(X)
+        return self.model.predict(X).ravel()
+
+    def predict_proba(self, X: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """
+        Get probability estimates for all classes.
+
+        Returns
+        -------
+        np.ndarray
+            Probability matrix of shape (n_samples, n_classes).
+            For triple-barrier: columns correspond to classes [-1, 0, 1].
+        """
+        if not self.is_fitted or self.model is None:
+            raise ValueError("Model must be fitted before prediction.")
+        return self.model.predict_proba(X)
 
     def get_feature_importance(
         self,

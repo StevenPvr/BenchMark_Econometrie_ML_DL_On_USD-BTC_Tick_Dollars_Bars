@@ -1,39 +1,31 @@
-"""Evaluation module for all model types.
+"""Evaluation module for classification models.
 
 This module provides a unified evaluation interface compatible with:
-- Econometric models (Ridge, Lasso)
-- Machine Learning models (XGBoost, LightGBM, CatBoost, RandomForest)
-- Deep Learning models (LSTM)
+- Econometric classifiers (RidgeClassifier, LassoClassifier, Logistic)
+- Machine Learning classifiers (XGBoost, LightGBM, CatBoost, RandomForest)
+- Deep Learning classifiers (LSTM)
 
 Key Features:
-- Comprehensive regression metrics (MSE, RMSE, MAE, R², MAPE, etc.)
-- Volatility forecasting metrics (QLIKE, MZ regression)
-- Residual diagnostics (normality, autocorrelation)
+- Multi-class classification metrics (De Prado triple-barrier: -1, 0, 1)
+- Accuracy, F1, Precision, Recall (macro and weighted)
+- Confusion matrix analysis
 - Model comparison with statistical significance tests
-- Easy-to-use convenience functions
 
 Example Usage:
     >>> from src.model.machine_learning.xgboost_model import XGBoostModel
-    >>> from src.evaluation import evaluate_model, compare_models
+    >>> from src.evaluation import evaluate_model
     >>>
     >>> # Evaluate a single model
     >>> model = XGBoostModel(n_estimators=100)
     >>> model.fit(X_train, y_train)
     >>> result = evaluate_model(model, X_test, y_test)
-    >>> print(f"MSE: {result.metrics['mse']:.4f}")
-    >>> print(f"R²: {result.metrics['r2']:.4f}")
-    >>>
-    >>> # Compare multiple models
-    >>> result = compare_models(
-    ...     {"xgb": xgb_model, "lgb": lgb_model},
-    ...     X_test, y_test,
-    ... )
-    >>> print(f"Best model: {result.best_model}")
+    >>> print(f"Accuracy: {result.metrics['accuracy']:.4f}")
+    >>> print(f"F1 (macro): {result.metrics['f1_macro']:.4f}")
 
 Computing specific metrics:
-    >>> from src.evaluation import mse, rmse, mae, r2_score, qlike
-    >>> mse_val = mse(y_true, y_pred)
-    >>> r2_val = r2_score(y_true, y_pred)
+    >>> from src.evaluation import accuracy, f1_macro, balanced_accuracy
+    >>> acc = accuracy(y_true, y_pred)
+    >>> f1 = f1_macro(y_true, y_pred)
 """
 
 from __future__ import annotations
@@ -41,30 +33,21 @@ from __future__ import annotations
 # Metrics
 from src.evaluation.metrics import (
     ALL_METRICS,
-    DIRECTION_METRICS,
-    REGRESSION_METRICS,
-    VOLATILITY_METRICS,
-    ResidualDiagnostics,
-    adjusted_r2,
-    aic,
-    bic,
+    CLASSIFICATION_METRICS,
+    DEFAULT_CLASSIFICATION_METRICS,
+    accuracy,
+    balanced_accuracy,
+    compute_classification_report,
     compute_metrics,
-    compute_residual_diagnostics,
-    direction_accuracy,
+    confusion_matrix,
+    f1_macro,
+    f1_weighted,
     get_metric,
-    hit_rate,
     list_available_metrics,
-    mae,
-    mape,
-    max_error,
-    median_absolute_error,
-    mincer_zarnowitz_r2,
-    mse,
-    mse_log,
-    qlike,
-    r2_score,
-    rmse,
-    smape,
+    log_loss_multiclass,
+    per_class_accuracy,
+    precision_macro,
+    recall_macro,
 )
 
 # Evaluator
@@ -91,35 +74,26 @@ from src.evaluation.comparison import (
 )
 
 __all__ = [
-    # Metric functions
-    "mse",
-    "rmse",
-    "mae",
-    "mape",
-    "smape",
-    "r2_score",
-    "adjusted_r2",
-    "max_error",
-    "median_absolute_error",
-    "qlike",
-    "mse_log",
-    "direction_accuracy",
-    "hit_rate",
-    "aic",
-    "bic",
-    "mincer_zarnowitz_r2",
+    # Classification metric functions
+    "accuracy",
+    "balanced_accuracy",
+    "precision_macro",
+    "recall_macro",
+    "f1_macro",
+    "f1_weighted",
+    "log_loss_multiclass",
+    "confusion_matrix",
+    "per_class_accuracy",
+    "compute_classification_report",
     # Metric utilities
     "get_metric",
     "compute_metrics",
     "list_available_metrics",
-    "compute_residual_diagnostics",
     # Metric registries
     "ALL_METRICS",
-    "REGRESSION_METRICS",
-    "VOLATILITY_METRICS",
-    "DIRECTION_METRICS",
+    "CLASSIFICATION_METRICS",
+    "DEFAULT_CLASSIFICATION_METRICS",
     # Data classes
-    "ResidualDiagnostics",
     "EvaluationResult",
     "EvaluationConfig",
     "ModelComparisonResult",

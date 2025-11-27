@@ -44,7 +44,15 @@ class LassoModel(BaseModel):
         tol : float, default=1e-4
             Tolerance pour la convergence.
         """
-        super().__init__(name="Lasso", **kwargs)
+        super().__init__(
+            name="Lasso",
+            alpha=alpha,
+            fit_intercept=fit_intercept,
+            normalize=normalize,
+            max_iter=max_iter,
+            tol=tol,
+            **kwargs,
+        )
         self.alpha = alpha
         self.fit_intercept = fit_intercept
         self.normalize = normalize
@@ -53,10 +61,35 @@ class LassoModel(BaseModel):
         self.scaler: StandardScaler | None = None
         self.model: Lasso | None = None
 
+    def get_params(self) -> dict[str, Any]:
+        """Retourne les hyperparametres du modele."""
+        return {
+            "alpha": self.alpha,
+            "fit_intercept": self.fit_intercept,
+            "normalize": self.normalize,
+            "max_iter": self.max_iter,
+            "tol": self.tol,
+        }
+
+    def set_params(self, **params: Any) -> "LassoModel":
+        """Met a jour les hyperparametres du modele."""
+        if "alpha" in params:
+            self.alpha = params["alpha"]
+        if "fit_intercept" in params:
+            self.fit_intercept = params["fit_intercept"]
+        if "normalize" in params:
+            self.normalize = params["normalize"]
+        if "max_iter" in params:
+            self.max_iter = params["max_iter"]
+        if "tol" in params:
+            self.tol = params["tol"]
+        return self
+
     def fit(
         self,
         X: np.ndarray | pd.DataFrame,
         y: np.ndarray | pd.Series,
+        **kwargs: Any,
     ) -> "LassoModel":
         """Entraine le modele Lasso."""
         X_arr = np.asarray(X)

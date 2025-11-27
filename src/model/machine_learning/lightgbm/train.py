@@ -88,7 +88,6 @@ def main() -> None:
         n_splits=args.n_splits,
         purge_gap=args.purge_gap,
         min_train_size=200,
-        metric="mse",
         output_dir=LIGHTGBM_ARTIFACTS_DIR,
         verbose=True,
         validation_split=0.0,  # No validation split

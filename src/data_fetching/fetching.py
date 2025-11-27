@@ -3,8 +3,8 @@
 Implementation that:
 - validates exchange/symbol availability,
 - downloads trades in 2-week chunks for robustness,
-- saves incrementally to CSV/Parquet after each chunk,
-- supports resume from existing data.
+- saves each chunk to a Parquet dataset without reloading existing data,
+- supports resume from existing data using metadata only.
 """
 
 from __future__ import annotations
@@ -13,9 +13,10 @@ import concurrent.futures
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Deque
+import uuid
 
 import pandas as pd  # type: ignore[import-untyped]
 
@@ -25,6 +26,16 @@ try:  # pragma: no cover - best-effort import
 except Exception:  # pragma: no cover - missing ccxt is acceptable in tests
     _ccxt = None
 ccxt = _ccxt
+
+try:  # pragma: no cover - best-effort import
+    import pyarrow as _pa  # type: ignore[import-untyped]
+    import pyarrow.parquet as _pq  # type: ignore[import-untyped]
+except Exception:  # pragma: no cover - pyarrow may be missing in some envs
+    _pa = None
+    _pq = None
+
+pa = _pa
+pq = _pq
 
 from src.constants import END_DATE, EXCHANGE_ID, START_DATE, SYMBOL
 from src.path import DATASET_RAW_CSV, DATASET_RAW_PARQUET
@@ -115,18 +126,6 @@ def _validate_symbol(exchange: Any) -> None:
         raise ValueError(f"Symbole {SYMBOL} inactif sur {EXCHANGE_ID}")
 
 
-def _compute_since_timestamp() -> int:
-    """Compute 'since' timestamp in milliseconds.
-
-    Uses START_DATE when provided; falls back to one-week lookback.
-    """
-    try:
-        start_dt = pd.to_datetime(START_DATE)
-    except Exception:
-        start_dt = datetime.utcnow() - timedelta(days=7)
-    return int(start_dt.timestamp() * 1000)
-
-
 def _fetch_trades_for_time_range(args: tuple[Any, int, int, int]) -> list[dict]:
     """Fetch trades for a specific time range in a separate thread.
 
@@ -169,19 +168,21 @@ def _fetch_all_trades_parallel(start_ts: int, end_ts: int, max_workers: int = 6)
     Returns a list of dictionaries (records) to maintain backward compatibility,
     but internally uses DataFrames for memory efficiency during collection.
     """
-    # Calculate time range per worker
-    total_range = end_ts - start_ts
-    range_per_worker = total_range // max_workers
+    # Non-overlapping ranges: start inclusive, end exclusive
+    total_range = max(1, end_ts - start_ts)
+    slice_size = max(1, total_range // max_workers)
 
-    # Create time ranges for each worker
     time_ranges = []
-    for i in range(max_workers):
-        worker_start = start_ts + (i * range_per_worker)
-        worker_end = start_ts + ((i + 1) * range_per_worker) if i < max_workers - 1 else end_ts
-        time_ranges.append((EXCHANGE_ID, worker_start, worker_end, i))
+    worker_start = start_ts
+    worker_id = 0
+    while worker_start < end_ts:
+        worker_end = min(worker_start + slice_size, end_ts)
+        time_ranges.append((EXCHANGE_ID, worker_start, worker_end, worker_id))
+        worker_start = worker_end
+        worker_id += 1
 
     logger.info("Starting parallel fetch with %d workers for time range %s to %s",
-               max_workers,
+               len(time_ranges),
                pd.to_datetime(start_ts, unit='ms', utc=True),
                pd.to_datetime(end_ts, unit='ms', utc=True))
 
@@ -200,7 +201,7 @@ def _fetch_all_trades_parallel(start_ts: int, end_ts: int, max_workers: int = 6)
                 trades = future.result()
                 if trades:
                     # Convert to DataFrame immediately if not already
-                    df_chunk = pd.DataFrame(trades)
+                    df_chunk = _optimize_trades_memory(pd.DataFrame(trades))
                     if not df_chunk.empty:
                         all_trades_dfs.append(df_chunk)
                         logger.info("Worker %d completed: fetched %d trades", worker_id, len(df_chunk))
@@ -233,12 +234,13 @@ def _fetch_all_trades_in_range(exchange: Any, start_ts: int, end_ts: int) -> lis
 
     Since ccxt limits results per call, we iterate until we get all data.
     """
+    start_dt = pd.to_datetime(start_ts, unit="ms", utc=True)
+    end_dt = pd.to_datetime(end_ts, unit="ms", utc=True)
     all_trades_dfs: list[pd.DataFrame] = []
     current_since = start_ts
     total_trades_count = 0
 
-    logger.info("Fetching trades from %s to %s", pd.to_datetime(start_ts, unit='ms', utc=True),
-                pd.to_datetime(end_ts, unit='ms', utc=True))
+    logger.info("Fetching trades from %s to %s", start_dt, end_dt)
 
     while current_since < end_ts:
         try:
@@ -251,47 +253,42 @@ def _fetch_all_trades_in_range(exchange: Any, start_ts: int, end_ts: int) -> lis
                 logger.info("No more trades returned, stopping iteration")
                 break
 
-            # Convert to DataFrame immediately
-            temp_df = pd.DataFrame(trades)
-            
-            if "timestamp" in temp_df.columns:
-                temp_df["timestamp"] = pd.to_datetime(temp_df["timestamp"], unit="ms", utc=True, errors="coerce")
-                temp_df = temp_df.dropna(subset=["timestamp"])
+            temp_df = _optimize_trades_memory(pd.DataFrame(trades))
 
-                # Filter trades that are within our range
-                mask = (temp_df["timestamp"] >= pd.to_datetime(start_ts, unit='ms', utc=True)) & \
-                       (temp_df["timestamp"] <= pd.to_datetime(end_ts, unit='ms', utc=True))
-                valid_trades = temp_df[mask].copy()  # Ensure we have a DataFrame
-
-                if valid_trades.empty:
-                    logger.info("No valid trades in current batch, stopping iteration")
-                    break
-
-                # Add valid trades to our collection as DataFrame
-                all_trades_dfs.append(valid_trades)
-                total_trades_count += len(valid_trades)
-
-                # Update current_since to the timestamp of the last trade + 1ms
-                last_timestamp = valid_trades["timestamp"].max()
-                current_since = int(last_timestamp.timestamp() * 1000) + 1
-
-                # Log batch information with timestamp
-                last_trade_datetime = pd.to_datetime(last_timestamp, unit='ns', utc=True)
-                logger.info("Fetched %d trades so far (current batch: %d valid) - Last trade: %s",
-                           total_trades_count, len(valid_trades), last_trade_datetime.strftime('%Y-%m-%d %H:%M:%S UTC'))
-
-                # Safety check: if we got less than MAX_TRADES_PER_CALL, we're probably at the end
-                if len(trades) < MAX_TRADES_PER_CALL:
-                    logger.info("Received less than max trades per call (%d < %d), likely reached end of data", len(trades), MAX_TRADES_PER_CALL)
-                    break
-
-                # Check if we're still within our date range
-                if current_since >= end_ts:
-                    logger.info("Reached end timestamp, stopping iteration")
-                    break
-
-            else:
+            if "timestamp" not in temp_df.columns or temp_df.empty:
                 logger.warning("No timestamp column in trades data, skipping batch")
+                break
+
+            # Filter trades that are within our range
+            mask = (temp_df["timestamp"] >= start_dt) & (temp_df["timestamp"] < end_dt)
+            valid_trades = temp_df.loc[mask].copy()
+
+            if valid_trades.empty:
+                logger.info("No valid trades in current batch, stopping iteration")
+                break
+
+            # Add valid trades to our collection as DataFrame
+            all_trades_dfs.append(valid_trades)
+            total_trades_count += len(valid_trades)
+
+            # Update current_since to the timestamp of the last trade + 1ms
+            last_timestamp = valid_trades["timestamp"].max()
+            current_since = int(last_timestamp.timestamp() * 1000) + 1
+
+            # Log batch information with timestamp
+            last_trade_datetime = pd.to_datetime(last_timestamp, unit="ns", utc=True)
+            logger.info("Fetched %d trades so far (current batch: %d valid) - Last trade: %s",
+                        total_trades_count, len(valid_trades),
+                        last_trade_datetime.strftime("%Y-%m-%d %H:%M:%S UTC"))
+
+            # Safety check: if we got less than MAX_TRADES_PER_CALL, we're probably at the end
+            if len(trades) < MAX_TRADES_PER_CALL:
+                logger.info("Received less than max trades per call (%d < %d), likely reached end of data", len(trades), MAX_TRADES_PER_CALL)
+                break
+
+            # Check if we're still within our date range
+            if current_since >= end_ts:
+                logger.info("Reached end timestamp, stopping iteration")
                 break
 
         except Exception as e:
@@ -311,217 +308,240 @@ def _fetch_all_trades_in_range(exchange: Any, start_ts: int, end_ts: int) -> lis
         return []
 
 
-def _filter_date_range(df: pd.DataFrame) -> pd.DataFrame:
-    """Limit trades to START_DATE..END_DATE if END_DATE is provided."""
+def _filter_date_range(df: pd.DataFrame, start_dt: pd.Timestamp | None = None, end_dt: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Limit trades to date range."""
     if df.empty or "timestamp" not in df.columns:
         return df
 
     df = df.copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce", utc=True)
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):  # type: ignore[attr-defined]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce", utc=True)
     df = df.dropna(subset=["timestamp"])
 
-    start_dt = pd.to_datetime(START_DATE, utc=True)
-    end_dt = pd.to_datetime(END_DATE, utc=True)
-    mask = (df["timestamp"] >= start_dt) & (df["timestamp"] <= end_dt)
+    # Use provided dates or fall back to constants
+    if start_dt is None or end_dt is None:
+        start_dt, end_dt = _get_date_bounds()
+
+    mask = (df["timestamp"] >= start_dt) & (df["timestamp"] < end_dt)
     return df.loc[mask].reset_index(drop=True)
 
 
-def _persist_trades(df: pd.DataFrame) -> None:
-    """Write cleaned trades to CSV and Parquet outputs (overwrite mode)."""
-    ensure_output_dir(DATASET_RAW_PARQUET)
-    df.to_parquet(DATASET_RAW_PARQUET, index=False)
-    df.to_csv(DATASET_RAW_CSV, index=False, lineterminator="\n")
-    logger.info("Saved %d trades to %s / %s", len(df), DATASET_RAW_PARQUET, DATASET_RAW_CSV)
+def _optimize_trades_memory(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop heavyweight columns and downcast to trim memory usage."""
+    if df.empty:
+        return df
+
+    drop_cols = [col for col in ("info", "datetime") if col in df.columns]
+    if drop_cols:
+        df = df.drop(columns=drop_cols, errors="ignore")
+
+    if "timestamp" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):  # type: ignore[attr-defined]
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"]) if "timestamp" in df.columns else df
+
+    if "amount" in df.columns:
+        df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+        df["amount"] = df["amount"].astype("float32")
+    if "price" in df.columns:
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        df["price"] = df["price"].astype("float32")
+    if "side" in df.columns and df["side"].dtype == object:
+        df["side"] = df["side"].astype("category")
+
+    return df
 
 
-def _load_existing_trades() -> pd.DataFrame:
-    """Load existing trades from parquet file if it exists."""
-    if Path(DATASET_RAW_PARQUET).exists():
+def _get_date_bounds() -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return start/end datetimes for configured date range (end exclusive)."""
+    start_dt = pd.to_datetime(START_DATE, utc=True)
+    end_dt = pd.to_datetime(END_DATE, utc=True)
+    return start_dt, end_dt
+
+
+def _iter_parquet_files(dataset_path: Path) -> list[Path]:
+    """Return list of parquet files for a dataset path (file or directory)."""
+    if dataset_path.is_file():
+        return [dataset_path]
+    if dataset_path.is_dir():
+        return sorted(p for p in dataset_path.glob("*.parquet") if p.is_file())
+    return []
+
+
+def _get_existing_timestamp_range() -> tuple[pd.Timestamp | None, pd.Timestamp | None, int]:
+    """Read min/max timestamps from parquet metadata without loading full data."""
+    dataset_path = Path(DATASET_RAW_PARQUET)
+    files = _iter_parquet_files(dataset_path)
+    if not files or pq is None:
+        return None, None, 0
+
+    min_ts: pd.Timestamp | None = None
+    max_ts: pd.Timestamp | None = None
+    total_rows = 0
+
+    for file_path in files:
         try:
-            df = pd.read_parquet(DATASET_RAW_PARQUET)
-            logger.info("Loaded %d existing trades from %s", len(df), DATASET_RAW_PARQUET)
-            return df
-        except Exception as e:
-            logger.warning("Could not load existing trades: %s", e)
-    return pd.DataFrame()
+            pf = pq.ParquetFile(file_path)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Could not read metadata from %s: %s", file_path, exc)
+            continue
+
+        if pf.metadata:
+            total_rows += pf.metadata.num_rows
+
+        try:
+            col_index = pf.schema_arrow.get_field_index("timestamp")
+        except (KeyError, ValueError):
+            continue
+
+        for rg_idx in range(pf.metadata.num_row_groups):  # type: ignore[union-attr]
+            stats = pf.metadata.row_group(rg_idx).column(col_index).statistics  # type: ignore[union-attr]
+            if stats is None or stats.min is None or stats.max is None:
+                continue
+
+            rg_min = pd.to_datetime(stats.min, errors="coerce", utc=True)
+            rg_max = pd.to_datetime(stats.max, errors="coerce", utc=True)
+
+            if pd.notna(rg_min) and (min_ts is None or rg_min < min_ts):
+                min_ts = rg_min
+            if pd.notna(rg_max) and (max_ts is None or rg_max > max_ts):
+                max_ts = rg_max
+
+    return min_ts, max_ts, total_rows
 
 
-def _append_and_save_trades(new_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.DataFrame:
-    """Append new trades to existing and save incrementally.
+def _ensure_parquet_dataset_path(path: Path) -> Path:
+    """Guarantee that DATASET_RAW_PARQUET is a directory-based dataset."""
+    ensure_output_dir(path)
 
-    Returns the combined DataFrame.
-    """
-    if existing_df.empty:
-        combined_df = new_df
-    else:
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+    # Check for consolidated file and convert it to base partition
+    consolidated_file = path.parent / "dataset_raw_final.parquet"
+    if consolidated_file.exists() and consolidated_file.is_file():
+        logger.info("Found consolidated file %s, converting to base partition", consolidated_file)
+        path.mkdir(parents=True, exist_ok=True)
+        consolidated_file.rename(path / "part-00000.parquet")
+        logger.info("Converted consolidated file to base partition part-00000.parquet")
+        return path
 
-    # Deduplicate
-    subset_cols = [col for col in ("id", "timestamp") if col in combined_df.columns]
-    if subset_cols:
-        before = len(combined_df)
-        combined_df = combined_df.drop_duplicates(subset=subset_cols).reset_index(drop=True)
-        if len(combined_df) < before:
-            logger.info("Removed %d duplicate trades", before - len(combined_df))
+    if path.exists() and path.is_file():
+        migrated_src = path.with_suffix(path.suffix + ".single")
+        path.rename(migrated_src)
+        path.mkdir(parents=True, exist_ok=True)
+        migrated_src.rename(path / "part-00000.parquet")
+        logger.info("Converted single parquet file to dataset directory at %s", path)
+        return path
 
-    # Sort by timestamp
-    if "timestamp" in combined_df.columns:
-        combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
-
-    # Save immediately
-    _persist_trades(combined_df)
-
-    return combined_df
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def _get_last_timestamp(df: pd.DataFrame) -> int | None:
-    """Get the last timestamp from existing data in milliseconds."""
-    if df.empty or "timestamp" not in df.columns:
-        return None
+def _deduplicate_chunk(df: pd.DataFrame) -> pd.DataFrame:
+    """Deduplicate trades within a single chunk."""
+    subset_cols = [col for col in ("id", "timestamp") if col in df.columns]
+    if not subset_cols:
+        return df
 
-    last_ts = df["timestamp"].max()
-    # Ensure we have a scalar value for the NaN check
-    if isinstance(last_ts, pd.Series):
-        last_ts = last_ts.iloc[0] if not last_ts.empty else None
-
-    # Check if the scalar value is NaN
-    if last_ts is None or pd.isna(last_ts):
-        return None
-
-    # Convert to milliseconds if it's a datetime
-    if isinstance(last_ts, pd.Timestamp):
-        return int(last_ts.timestamp() * 1000)
-    return int(last_ts)
+    before = len(df)
+    deduped = df.drop_duplicates(subset=subset_cols).reset_index(drop=True)
+    removed = before - len(deduped)
+    if removed > 0:
+        logger.info("Removed %d duplicate trades in chunk", removed)
+    return deduped
 
 
-def _generate_chunk_ranges(start_ts: int, end_ts: int, chunk_days: int = CHUNK_DAYS) -> list[tuple[int, int]]:
-    """Generate list of (start_ts, end_ts) tuples for each chunk.
+def _append_trades_to_dataset(df: pd.DataFrame) -> None:
+    """Append trades to a parquet dataset without loading existing data."""
+    if pa is None or pq is None:
+        raise RuntimeError("pyarrow is required to append parquet data")
 
-    Each chunk covers `chunk_days` days (default 14 days = 2 weeks).
-    """
-    chunk_ms = chunk_days * 24 * 60 * 60 * 1000  # Convert days to milliseconds
-    chunks = []
-
-    current_start = start_ts
-    while current_start < end_ts:
-        current_end = min(current_start + chunk_ms, end_ts)
-        chunks.append((current_start, current_end))
-        current_start = current_end
-
-    logger.info("Generated %d chunks of %d days each", len(chunks), chunk_days)
-    return chunks
+    dataset_dir = _ensure_parquet_dataset_path(Path(DATASET_RAW_PARQUET))
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    filename = f"part-{int(time.time() * 1_000_000)}-{uuid.uuid4().hex[:8]}.parquet"
+    target_path = dataset_dir / filename
+    pq.write_table(table, target_path, compression="snappy")
+    logger.info("Saved %d trades to %s", len(df), target_path)
 
 
-def download_ticks_in_date_range(parallel: bool = True, max_workers: int = 12) -> None:
-    """Download trades for SYMBOL from EXCHANGE_ID for the date range in constants.
 
-    Downloads data for the date range specified in START_DATE/END_DATE and appends
-    to existing data. Data is merged chronologically and deduplicated.
+def download_ticks_in_date_range(parallel: bool = True, max_workers: int = 6,
+                               start_date: str | None = None, end_date: str | None = None) -> None:
+    """Download trades for SYMBOL from EXCHANGE_ID for the specified date range.
+
+    Downloads data for the date range specified by parameters or constants and appends
+    to existing data without loading the full parquet file in memory.
 
     This allows you to:
-    1. Change START_DATE/END_DATE in constants.py to a new week
-    2. Run the script to fetch that week's data
-    3. Data is automatically appended to existing file (no overwrite)
+    1. Specify custom date range or use defaults from constants
+    2. Run the script to fetch data for that period
+    3. Data is automatically appended to existing dataset directory (no overwrite)
 
     Args:
         parallel: Whether to use parallel fetching within each chunk (default: True)
         max_workers: Number of parallel workers per chunk (default: 6)
+        start_date: Start date in YYYY-MM-DD format (default: START_DATE from constants)
+        end_date: End date in YYYY-MM-DD format (default: END_DATE from constants)
     """
-    # Compute timestamp range using START_DATE and END_DATE from constants
-    start_ts = int(pd.to_datetime(START_DATE, utc=True).timestamp() * 1000)
-    end_ts = int(pd.to_datetime(END_DATE, utc=True).timestamp() * 1000)
+    if start_date is None or end_date is None:
+        start_dt, end_dt = _get_date_bounds()
+    else:
+        start_dt = pd.to_datetime(start_date, utc=True)
+        end_dt = pd.to_datetime(end_date, utc=True)
+
+    # Compute timestamp range
+    start_ts = int(start_dt.timestamp() * 1000)
+    end_ts = int(end_dt.timestamp() * 1000)
 
     # Validate exchange first
     exchange = _build_exchange()
     _validate_symbol(exchange)
 
-    # Load existing trades if any (for append capability)
-    existing_df = _load_existing_trades()
+    fetch_start_ts = start_ts
 
-    # Always use the dates from constants.py (allows fetching any date range)
-    actual_start_ts = start_ts
-    logger.info(
-        "Fetching date range from constants: %s to %s",
-        pd.to_datetime(start_ts, unit="ms", utc=True).strftime("%Y-%m-%d"),
-        pd.to_datetime(end_ts, unit="ms", utc=True).strftime("%Y-%m-%d"),
-    )
+    total_new_trades = 0
 
-    # Check if we already have data for this exact range (skip if complete)
-    if not existing_df.empty and "timestamp" in existing_df.columns:
-        existing_start = existing_df["timestamp"].min()
-        existing_end = existing_df["timestamp"].max()
+    chunk_ms = int(timedelta(days=CHUNK_DAYS).total_seconds() * 1000)
+    chunk_start = fetch_start_ts
 
-        # Convert to ms if needed
-        if isinstance(existing_start, pd.Timestamp):
-            existing_start_ts = int(existing_start.timestamp() * 1000)
-            existing_end_ts = int(existing_end.timestamp() * 1000)
+    while chunk_start < end_ts:
+        chunk_end = min(chunk_start + chunk_ms, end_ts)
+        logger.info("Chunk fetch: %s to %s",
+                    pd.to_datetime(chunk_start, unit="ms", utc=True),
+                    pd.to_datetime(chunk_end, unit="ms", utc=True))
+
+        if parallel and max_workers > 1:
+            trades = _fetch_all_trades_parallel(chunk_start, chunk_end, max_workers)
         else:
-            existing_start_ts = int(existing_start)
-            existing_end_ts = int(existing_end)
+            trades = _fetch_all_trades_in_range(exchange, chunk_start, chunk_end)
 
-        # Check if requested range is fully within existing data
-        if existing_start_ts <= start_ts and existing_end_ts >= end_ts:
-            logger.info("=" * 60)
-            logger.info("DATE RANGE ALREADY DOWNLOADED")
-            logger.info("Requested: %s to %s", START_DATE, END_DATE)
-            logger.info("Existing data covers: %s to %s",
-                       pd.to_datetime(existing_start_ts, unit="ms", utc=True).strftime("%Y-%m-%d"),
-                       pd.to_datetime(existing_end_ts, unit="ms", utc=True).strftime("%Y-%m-%d"))
-            logger.info("Total trades: %d", len(existing_df))
-            logger.info("=" * 60)
-            logger.info("To force re-download, delete the existing data file first.")
-            return
+        if not trades:
+            logger.info("Chunk returned no trades, moving to next window")
+            chunk_start = chunk_end + 1
+            continue
 
-        logger.info(
-            "Existing data: %s to %s (%d trades)",
-            pd.to_datetime(existing_start_ts, unit="ms", utc=True).strftime("%Y-%m-%d"),
-            pd.to_datetime(existing_end_ts, unit="ms", utc=True).strftime("%Y-%m-%d"),
-            len(existing_df),
-        )
+        new_df = pd.DataFrame(trades)
+        if new_df.empty:
+            logger.warning("Chunk DataFrame empty after normalization")
+            chunk_start = chunk_end + 1
+            continue
 
-    logger.info("=" * 60)
-    logger.info("FETCHING DATE RANGE")
-    logger.info("Range: %s to %s", START_DATE, END_DATE)
-    logger.info("=" * 60)
+        # Apply date filtering and downcasting to keep memory low
+        new_df = _filter_date_range(new_df, start_dt, end_dt)
+        new_df = _optimize_trades_memory(new_df)
+        if new_df.empty:
+            logger.warning("No trades within date range after filtering")
+            chunk_start = chunk_end + 1
+            continue
 
-    # Fetch all trades for the full date range (no chunking needed for weekly fetches)
-    if parallel and max_workers > 1:
-        trades = _fetch_all_trades_parallel(actual_start_ts, end_ts, max_workers)
-    else:
-        trades = _fetch_all_trades_in_range(exchange, actual_start_ts, end_ts)
+        new_df = _deduplicate_chunk(new_df)
+        if "timestamp" in new_df.columns:
+            new_df = new_df.sort_values("timestamp").reset_index(drop=True)
 
-    if not trades:
+        _append_trades_to_dataset(new_df)
+        total_new_trades += len(new_df)
+
+        chunk_start = chunk_end
+
+    if total_new_trades == 0:
         logger.warning("No trades returned for this date range")
         return
 
-    # Convert to DataFrame
-    new_df = pd.DataFrame(trades)
-    if new_df.empty:
-        logger.warning("DataFrame empty after normalization")
-        return
-
-    # Apply date filtering
-    new_df = _filter_date_range(new_df)
-    if new_df.empty:
-        logger.warning("No trades within date range after filtering")
-        return
-
-    # Append and save (merges with existing, deduplicates, sorts chronologically)
-    combined_df = _append_and_save_trades(new_df, existing_df)
-
-    # Show summary
-    logger.info("=" * 60)
-    logger.info("FETCH COMPLETE")
-    logger.info("New trades fetched:    %d", len(new_df))
-    logger.info("Total trades in file:  %d", len(combined_df))
-
-    if "timestamp" in combined_df.columns:
-        data_start = combined_df["timestamp"].min()
-        data_end = combined_df["timestamp"].max()
-        if isinstance(data_start, pd.Timestamp):
-            logger.info("Data range: %s to %s",
-                       data_start.strftime("%Y-%m-%d %H:%M"),
-                       data_end.strftime("%Y-%m-%d %H:%M"))
-
-    logger.info("=" * 60)
-    logger.info("To fetch more data, update START_DATE/END_DATE in constants.py and rerun.")
+    logger.info("New trades fetched: %d", total_new_trades)

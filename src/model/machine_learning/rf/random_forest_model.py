@@ -1,4 +1,4 @@
-"""Random Forest model for regression/classification."""
+"""Random Forest model for multi-class classification (De Prado triple-barrier labeling)."""
 
 from __future__ import annotations
 
@@ -6,16 +6,17 @@ from typing import Any, Union
 
 import numpy as np
 import pandas as pd  # type: ignore
-from sklearn.ensemble import RandomForestRegressor  # type: ignore
+from sklearn.ensemble import RandomForestClassifier  # type: ignore
 
 from src.model.base import BaseModel
 
 
 class RandomForestModel(BaseModel):
     """
-    Random Forest model.
+    Random Forest classifier.
 
-    Ensemble d'arbres de decision, robuste et interpretatble.
+    Ensemble d'arbres de decision, robuste et interpretable.
+    Supporte classification multi-classe (triple-barrier: -1, 0, 1).
     """
 
     def __init__(
@@ -65,7 +66,8 @@ class RandomForestModel(BaseModel):
         self.oob_score = oob_score
         self.random_state = random_state
         self.n_jobs = n_jobs
-        self.model: RandomForestRegressor | None = None
+        self.model: RandomForestClassifier | None = None
+        self.classes_: np.ndarray | None = None
 
     def fit(
         self,
@@ -73,8 +75,11 @@ class RandomForestModel(BaseModel):
         y: np.ndarray | pd.Series,
         **kwargs: Any,
     ) -> "RandomForestModel":
-        """Entraine le modele Random Forest."""
-        self.model = RandomForestRegressor(
+        """Entraine le modele Random Forest classifier."""
+        y_arr = np.asarray(y).ravel()
+        self.classes_ = np.unique(y_arr)
+
+        self.model = RandomForestClassifier(
             n_estimators=self.n_estimators,
             max_depth=self.max_depth,
             min_samples_split=self.min_samples_split,
@@ -85,7 +90,7 @@ class RandomForestModel(BaseModel):
             random_state=self.random_state,
             n_jobs=self.n_jobs,
         )
-        self.model.fit(X, y)
+        self.model.fit(X, y_arr)
         self.is_fitted = True
         return self
 
@@ -94,6 +99,20 @@ class RandomForestModel(BaseModel):
         if not self.is_fitted or self.model is None:
             raise ValueError("Model must be fitted before prediction.")
         return self.model.predict(X)
+
+    def predict_proba(self, X: np.ndarray | pd.DataFrame) -> np.ndarray:
+        """
+        Get probability estimates for all classes.
+
+        Returns
+        -------
+        np.ndarray
+            Probability matrix of shape (n_samples, n_classes).
+            For triple-barrier: columns correspond to classes [-1, 0, 1].
+        """
+        if not self.is_fitted or self.model is None:
+            raise ValueError("Model must be fitted before prediction.")
+        return self.model.predict_proba(X)
 
     def get_feature_importance(self) -> np.ndarray:
         """Retourne l'importance des features (impurity-based)."""

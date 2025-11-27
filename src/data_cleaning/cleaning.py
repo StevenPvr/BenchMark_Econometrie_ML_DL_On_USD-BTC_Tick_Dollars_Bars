@@ -73,7 +73,8 @@ def _persist_clean_dataset(df: pd.DataFrame) -> None:
     ensure_output_dir(DATASET_CLEAN_PARQUET)
     df.to_parquet(DATASET_CLEAN_PARQUET, index=False)
     df.to_csv(DATASET_CLEAN_CSV, index=False, lineterminator="\n")
-    logger.info("Saved cleaned trades to %s / %s", DATASET_CLEAN_PARQUET, DATASET_CLEAN_CSV)
+    logger.info("Saved cleaned trades to %s", DATASET_CLEAN_PARQUET)
+    logger.info("Saved cleaned trades to %s", DATASET_CLEAN_CSV)
 
 
 def clean_ticks_data() -> None:

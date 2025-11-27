@@ -931,10 +931,10 @@ def run_full_analysis(
     log_returns_df.to_parquet(LOG_RETURNS_PARQUET, index=False)
     print(f"\nDataset avec log-returns sauvegarde: {LOG_RETURNS_PARQUET}")
 
-    # CSV sample (10% pour inspection)
-    sample_size = max(1, int(len(log_returns_df) * 0.1))
-    log_returns_df.head(sample_size).to_csv(LOG_RETURNS_CSV, index=False)
-    print(f"CSV sample (10%) sauvegarde: {LOG_RETURNS_CSV}")
+    # CSV sample (10% pour inspection) - commented out
+    # sample_size = max(1, int(len(log_returns_df) * 0.1))
+    # log_returns_df.head(sample_size).to_csv(LOG_RETURNS_CSV, index=False)
+    # print(f"CSV sample (10%) sauvegarde: {LOG_RETURNS_CSV}")
 
     print("\n" + "=" * 80)
     print("ANALYSE TERMINEE")

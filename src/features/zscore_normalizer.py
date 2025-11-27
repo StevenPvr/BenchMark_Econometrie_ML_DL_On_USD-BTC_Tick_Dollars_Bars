@@ -406,10 +406,10 @@ def save_zscore_features(
         else:
             df_result = df_zscore
 
-    # Save to CSV
-    csv_path = output_path.with_suffix(".csv")
-    df_result.to_csv(csv_path, index=False)
-    logger.info("Saved z-score features to CSV: %s", csv_path)
+    # Save to CSV - commented out, using Parquet only
+    # csv_path = output_path.with_suffix(".csv")
+    # df_result.to_csv(csv_path, index=False)
+    # logger.info("Saved z-score features to CSV: %s", csv_path)
 
     # Save to Parquet
     parquet_path = output_path.with_suffix(".parquet")

@@ -43,7 +43,8 @@ TRAIN_RATIO = 0.8
 EXCLUDE_COLS = [
     "bar_id",
     "datetime_close",
-    "log_return",  # Target, not a feature
+    "log_return",
+    "label",  # Target
 ]
 
 
@@ -64,11 +65,14 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
     df = pd.read_parquet(DATASET_FEATURES_PARQUET)
     logger.info("Loaded dataset: %d rows, %d columns", len(df), len(df.columns))
 
-    # Prepare target
-    if "log_return" not in df.columns:
-        raise ValueError("Target column 'log_return' not found in dataset")
+    # Prepare target (De Prado triple-barrier labels: -1, 0, 1)
+    if "label" not in df.columns:
+        raise ValueError(
+            "Target column 'label' not found in dataset. "
+            "Please ensure labels have been generated using triple-barrier labeling."
+        )
 
-    y = df["log_return"].copy()
+    y = df["label"].copy()
 
     # Prepare features (exclude non-feature columns)
     feature_cols = [c for c in df.columns if c not in EXCLUDE_COLS]
@@ -141,7 +145,6 @@ def main() -> None:
         n_splits=args.n_splits,
         purge_gap=args.purge_gap,
         min_train_size=200,
-        metric="mse",
         output_dir=output_dir,
         verbose=True,
     )
@@ -164,7 +167,7 @@ def main() -> None:
 
     # Return best params for reference
     logger.info("Best parameters: %s", result.best_params)
-    logger.info("Test MSE: %.6f", result.evaluation_result.metrics.get("mse", float("nan")))
+    logger.info("Test F1 (macro): %.6f", result.evaluation_result.metrics.get("f1_macro", float("nan")))
 
 
 if __name__ == "__main__":
