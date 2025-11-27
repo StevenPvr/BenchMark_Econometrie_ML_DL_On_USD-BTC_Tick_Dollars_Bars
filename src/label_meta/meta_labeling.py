@@ -222,20 +222,32 @@ def compute_strategy_metrics(
     """
     metrics = {}
 
+    # Primary: only consider trades where signal != 0 (actual trades taken)
     primary_returns = pd.Series(strategy_returns["primary_return"].dropna())
-    metrics["primary_total_return"] = np.exp(primary_returns.sum()) - 1
-    metrics["primary_sharpe"] = compute_sharpe_ratio(primary_returns)
-    metrics["primary_n_trades"] = len(primary_returns)
-    metrics["primary_win_rate"] = (primary_returns > 0).mean()
-    metrics["primary_mean_return"] = primary_returns.mean()
+    primary_active = primary_returns[primary_returns != 0]
+
+    metrics["primary_total_return"] = np.exp(primary_active.sum()) - 1 if len(primary_active) > 0 else 0.0
+    metrics["primary_sharpe"] = compute_sharpe_ratio(primary_active)
+    metrics["primary_n_trades"] = len(primary_active)
+    metrics["primary_win_rate"] = (primary_active > 0).mean() if len(primary_active) > 0 else 0.0
+    metrics["primary_mean_return"] = primary_active.mean() if len(primary_active) > 0 else 0.0
 
     if "meta_return" in strategy_returns.columns:
         meta_returns = pd.Series(strategy_returns["meta_return"].dropna())
-        if len(meta_returns) > 0:
-            metrics["meta_total_return"] = np.exp(meta_returns.sum()) - 1
-            metrics["meta_sharpe"] = compute_sharpe_ratio(meta_returns)
-            metrics["meta_n_trades"] = len(meta_returns[meta_returns != 0])
-            metrics["meta_win_rate"] = (meta_returns[meta_returns != 0] > 0).mean()
-            metrics["meta_mean_return"] = meta_returns[meta_returns != 0].mean()
+        # Meta: only consider trades where meta_return != 0 (trades taken after meta filter)
+        meta_active = meta_returns[meta_returns != 0]
+
+        if len(meta_active) > 0:
+            metrics["meta_total_return"] = np.exp(meta_active.sum()) - 1
+            metrics["meta_sharpe"] = compute_sharpe_ratio(meta_active)
+            metrics["meta_n_trades"] = len(meta_active)
+            metrics["meta_win_rate"] = (meta_active > 0).mean()
+            metrics["meta_mean_return"] = meta_active.mean()
+        else:
+            metrics["meta_total_return"] = 0.0
+            metrics["meta_sharpe"] = 0.0
+            metrics["meta_n_trades"] = 0
+            metrics["meta_win_rate"] = 0.0
+            metrics["meta_mean_return"] = 0.0
 
     return metrics

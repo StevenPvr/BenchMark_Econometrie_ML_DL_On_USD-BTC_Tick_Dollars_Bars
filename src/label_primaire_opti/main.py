@@ -15,9 +15,9 @@ from datetime import datetime
 # Allow running as a script from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import pandas as pd
-from src.config_logging import get_logger
-from src.label_primaire.optimize import (
+import pandas as pd  # type: ignore[import-untyped]
+from src.config_logging import get_logger # type: ignore[import-untyped]
+from src.label_primaire.optimize import ( # type: ignore[import-untyped]
     AVAILABLE_MODELS,
     optimize_joint_params,
     save_optimization_results,

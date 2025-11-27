@@ -186,8 +186,47 @@ def main() -> None:
 
     meta_probs_series = pd.Series(meta_probs, index=events_test.index)
 
+    # Diagnostic: show meta probabilities distribution
+    print("\n" + "="*40)
+    print("META PROBABILITIES DISTRIBUTION")
+    print("="*40)
+    print(f"Min:    {meta_probs.min():.4f}")
+    print(f"Max:    {meta_probs.max():.4f}")
+    print(f"Mean:   {meta_probs.mean():.4f}")
+    print(f"Median: {np.median(meta_probs):.4f}")
+    print(f"Std:    {meta_probs.std():.4f}")
+
     # 7. Apply Threshold & Compute Metrics
-    threshold = 0.5  # Default, could be optimized or asked
+    # Find optimal threshold by testing different percentiles
+    print("\n" + "="*40)
+    print("THRESHOLD OPTIMIZATION")
+    print("="*40)
+
+    best_threshold = 0.5
+    best_sharpe = float("-inf")
+
+    for pct in [25, 40, 50, 60, 75]:
+        test_threshold = float(np.percentile(meta_probs, pct))
+        test_decision = (meta_probs_series > test_threshold).astype(int)
+
+        # Quick Sharpe calculation for threshold optimization
+        test_returns = np.asarray(events_test["ret"].values) * np.asarray(primary_signal.values) * np.asarray(test_decision.values)
+        test_active = test_returns[test_returns != 0]
+
+        if len(test_active) > 1 and np.std(test_active) > 1e-10:
+            test_sharpe = np.mean(test_active) / np.std(test_active, ddof=1)
+        else:
+            test_sharpe = 0.0
+
+        n_kept = (test_decision == 1).sum()
+        print(f"  P{pct} (thresh={test_threshold:.4f}): Sharpe={test_sharpe:.4f}, Trades={n_kept}")
+
+        if test_sharpe > best_sharpe:
+            best_sharpe = test_sharpe
+            best_threshold = test_threshold
+
+    threshold = best_threshold
+    print(f"\n→ Best threshold: {threshold:.4f} (Sharpe={best_sharpe:.4f})")
 
     # Filter: Trade if primary != 0 AND meta_prob > threshold
     # Note: Primary model already filters 0s usually, but let's be safe.
@@ -195,6 +234,14 @@ def main() -> None:
 
     # Meta signal: 1 if we take the trade, 0 otherwise
     meta_decision = (meta_probs_series > threshold).astype(int)
+
+    # Count trades filtered by meta
+    n_primary_trades = (primary_signal != 0).sum()
+    n_meta_kept = ((primary_signal != 0) & (meta_decision == 1)).sum()
+    n_filtered = n_primary_trades - n_meta_kept
+    print(f"\nPrimary trades (signal != 0): {n_primary_trades}")
+    print(f"Meta kept (prob > {threshold}):     {n_meta_kept}")
+    print(f"Trades filtered out:          {n_filtered} ({100*n_filtered/n_primary_trades:.1f}%)")
 
     # Calculate Returns
     print("Computing strategy returns...")

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import sys
 import os
-import joblib
-import pandas as pd
+import joblib # type: ignore[import-untyped]
+import pandas as pd # type: ignore[import-untyped]
 import numpy as np
 from typing import Any
 
@@ -81,6 +81,22 @@ def main() -> None:
     model_name = metadata.get("model_name")
     labeling_params = metadata.get("labeling_params")
     feature_cols = metadata.get("feature_cols")
+
+    # Validate required metadata fields
+    if model_name is None:
+        print("Error: 'model_name' not found in metadata.")
+        return
+    if labeling_params is None:
+        print("Error: 'labeling_params' not found in metadata.")
+        return
+    if feature_cols is None:
+        print("Error: 'feature_cols' not found in metadata.")
+        return
+
+    # Type assertions for type checker after validation
+    assert model_name is not None
+    assert labeling_params is not None
+    assert feature_cols is not None
 
     print(f"Model Type: {model_name.upper()}")
     print(f"Labeling Params: {labeling_params}")

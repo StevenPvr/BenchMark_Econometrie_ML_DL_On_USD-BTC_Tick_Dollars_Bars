@@ -190,7 +190,7 @@ ML_RESULTS_DIR = RESULTS_DIR / "ml"
 # LightGBM
 LIGHTGBM_DIR = ML_RESULTS_DIR / "lightgbm"
 LIGHTGBM_ARTIFACTS_DIR = LIGHTGBM_DIR / "artifacts"
-LIGHTGBM_MODEL_FILE = LIGHTGBM_ARTIFACTS_DIR / "lightgbm_model.joblib"
+LIGHTGBM_MODEL_FILE = LIGHTGBM_ARTIFACTS_DIR / "lightgbm_primary_model.joblib"
 LIGHTGBM_BEST_PARAMS_FILE = LIGHTGBM_ARTIFACTS_DIR / "best_params.json"
 LIGHTGBM_TRAINING_RESULTS_FILE = LIGHTGBM_ARTIFACTS_DIR / "training_results.json"
 LIGHTGBM_TEST_EVAL_FILE = LIGHTGBM_ARTIFACTS_DIR / "test_evaluation.json"
@@ -311,9 +311,15 @@ LABEL_META_MODELS_DIR = LABEL_META_DIR / "models"
 LABEL_META_PARAMS_DIR = LABEL_META_DIR / "params"
 
 # Refactored Label Meta
+# Step 1: Meta Model Optimization (separate from primary model)
+LABEL_META_OPTI_DIR = RESULTS_DIR / "label_meta_opti"
+LABEL_META_OPTIMIZATION_FILE = LABEL_META_OPTI_DIR / "meta_optimization.json"
+
+# Step 2: Meta Model Training
 LABEL_META_TRAIN_DIR = RESULTS_DIR / "label_meta_train"
 LABEL_META_TRAIN_MODELS_DIR = LABEL_META_TRAIN_DIR / "models"
 
+# Step 3: Meta Model Evaluation
 LABEL_META_EVAL_DIR = RESULTS_DIR / "label_meta_eval"
 LABEL_META_EVAL_RESULTS_DIR = LABEL_META_EVAL_DIR / "results"
 

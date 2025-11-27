@@ -36,9 +36,9 @@ from src.path import (
     DATASET_FEATURES_LSTM_LABEL_CSV,
     LABEL_META_TRAIN_DIR,
     LABEL_META_TRAIN_MODELS_DIR,
+    LABEL_META_OPTIMIZATION_FILE,
     LABEL_PRIMAIRE_MODELS_DIR,
     LABEL_PRIMAIRE_EVENTS_TRAIN_FILE,
-    LABEL_PRIMAIRE_OPTIMIZATION_FILE,
 )
 from src.utils import load_json_data
 
@@ -137,27 +137,32 @@ def load_training_data(model_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     return df_features, events_train
 
 
-def get_primary_params(model_name: str) -> dict[str, Any]:
-    """Load optimized parameters from primary model to reuse for meta model."""
-    if not LABEL_PRIMAIRE_OPTIMIZATION_FILE.exists():
-        logger.warning("No optimization file found. Using default LightGBM params.")
+def get_meta_params() -> dict[str, Any]:
+    """Load optimized parameters for the meta-model from label_meta_opti.
+
+    The meta-model has its own optimized hyperparameters, separate from the
+    primary model, because it solves a different task (binary classification
+    of trade correctness vs. multiclass direction prediction).
+    """
+    if not LABEL_META_OPTIMIZATION_FILE.exists():
+        logger.warning(
+            "No meta optimization file found at %s. "
+            "Using default LightGBM params. "
+            "Run 'python -m src.label_meta_opti.main' to optimize meta-model hyperparameters.",
+            LABEL_META_OPTIMIZATION_FILE,
+        )
         return {}
 
-    data = load_json_data(LABEL_PRIMAIRE_OPTIMIZATION_FILE)
-    opt_model = data.get("model_name", "")
+    data = load_json_data(LABEL_META_OPTIMIZATION_FILE)
+    best_params = data.get("best_params", {})
 
-    # Only reuse params if the primary model was LightGBM
-    # (since the meta model IS LightGBM)
-    if opt_model == "lightgbm":
-        logger.info("Reusing LightGBM parameters from primary model optimization.")
-        return data.get("best_model_params", {})
+    if best_params:
+        logger.info("Loaded optimized meta-model parameters from %s", LABEL_META_OPTIMIZATION_FILE)
+        logger.info("Best params: %s", best_params)
+    else:
+        logger.warning("No best_params found in meta optimization file.")
 
-    # If primary was not LightGBM, we can't strictly reuse params for a LightGBM meta-model,
-    # unless we want to use the default config.
-    # The prompt says: "Comme le meta label est lightgbm on peut récupérer les meilleurs paramètres du model primaire lightgbm"
-    # This implies if primary is lightgbm, we reuse.
-
-    return {}
+    return best_params
 
 
 def main() -> None:
@@ -241,7 +246,7 @@ def main() -> None:
         print("No trades taken by primary model on training set. Cannot train meta-model.")
         return
 
-    y_meta = meta_labels[valid_mask].astype(int).values
+    y_meta = np.asarray(meta_labels[valid_mask].astype(int))
     X_base_valid = X_train[valid_mask]
     primary_signal_valid = primary_preds[valid_mask]
 
@@ -254,8 +259,8 @@ def main() -> None:
     print(f"Meta-Label Distribution: 1s={y_meta.sum()}, 0s={len(y_meta)-y_meta.sum()}")
 
     # 7. Configure Meta Model
-    # Inherit params from primary if it was LightGBM
-    meta_params = get_primary_params(model_name)
+    # Load optimized meta-model params (separate from primary model)
+    meta_params = get_meta_params()
     meta_params["random_state"] = DEFAULT_RANDOM_STATE
 
     # Train

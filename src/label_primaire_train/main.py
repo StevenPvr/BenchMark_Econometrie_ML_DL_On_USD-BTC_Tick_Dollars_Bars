@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import sys
 import os
-import joblib
-import pandas as pd
+import joblib # type: ignore[import-untyped]
+import pandas as pd # type: ignore[import-untyped]
 from datetime import datetime
 
 # Allow running as a script from the repo root
