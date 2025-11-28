@@ -9,16 +9,14 @@ from typing import Any, Dict, List, Tuple, Optional, Sequence, cast
 import matplotlib.pyplot as plt # type: ignore
 import numpy as np
 import pandas as pd  # type: ignore
-import seaborn as sns  # type: ignore
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure # type: ignore
 from statsmodels.tsa.stattools import adfuller, kpss  # type: ignore
-from statsmodels.tsa.seasonal import seasonal_decompose  # type: ignore
 from scipy import stats  # type: ignore
 from scipy.stats import linregress  # type: ignore
 
 from ..constants import CLOSE_COLUMN, LOG_RETURN_COLUMN # type: ignore
-from ..path import DOLLAR_BARS_PARQUET, LOG_RETURNS_PARQUET, LOG_RETURNS_CSV # type: ignore
+from ..path import DOLLAR_BARS_PARQUET
 
 
 def load_dollar_bars(parquet_path: Path = DOLLAR_BARS_PARQUET) -> pd.DataFrame:
@@ -86,20 +84,25 @@ def plot_log_returns_distribution(
         Figure matplotlib.
     """
     data = log_returns.dropna()
+    q_low, q_high = data.quantile([0.005, 0.995])
+    plot_data = data[(data >= q_low) & (data <= q_high)]
+    if plot_data.empty:
+        plot_data = data
+        q_low, q_high = data.min(), data.max()
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
     # Histogram avec KDE
     ax1 = axes[0]
-    ax1.hist(data, bins=50, alpha=0.7, color="steelblue", edgecolor="white", density=True)
+    ax1.hist(plot_data, bins=50, alpha=0.7, color="steelblue", edgecolor="white", density=True)
 
     # KDE
-    kde = stats.gaussian_kde(data)
-    x_range = np.linspace(data.min(), data.max(), 200)
+    kde = stats.gaussian_kde(plot_data)
+    x_range = np.linspace(plot_data.min(), plot_data.max(), 200)
     ax1.plot(x_range, kde(x_range), color="red", linewidth=2, label="KDE")
 
     # Normal distribution overlay
-    mu, std = data.mean(), data.std()
+    mu, std = plot_data.mean(), plot_data.std()
     normal_pdf = stats.norm.pdf(x_range, mu, std)
     ax1.plot(x_range, normal_pdf, color="green", linewidth=2, linestyle="--", label="Normal")
 
@@ -107,19 +110,20 @@ def plot_log_returns_distribution(
     ax1.set_title("Distribution des Log-Returns", fontsize=12, fontweight="bold")
     ax1.set_xlabel("Log-Return")
     ax1.set_ylabel("Densite")
+    ax1.set_xlim(q_low, q_high)
     ax1.legend()
 
     # QQ-plot
     ax2 = axes[1]
-    stats.probplot(data, dist="norm", plot=ax2)
+    stats.probplot(plot_data, dist="norm", plot=ax2)
     ax2.set_title("Q-Q Plot (Normal)", fontsize=12, fontweight="bold")
     ax2.grid(True, alpha=0.3)
 
     # Stats
-    skewness = stats.skew(data)
-    kurtosis = stats.kurtosis(data)
+    skewness = stats.skew(plot_data)
+    kurtosis = stats.kurtosis(plot_data)
     fig.suptitle(
-        f"Log-Returns: Mean={mu:.6f}, Std={std:.6f}, Skew={skewness:.3f}, Kurt={kurtosis:.3f}",
+        f"Log-Returns (zoom central 99%): Mean={mu:.6f}, Std={std:.6f}, Skew={skewness:.3f}, Kurt={kurtosis:.3f}, range=[{q_low:.4f},{q_high:.4f}]",
         fontsize=10, y=1.02
     )
 
@@ -422,7 +426,7 @@ def compute_autocorrelation(
     return fig
 
 
-def mann_kendall_test(series: np.ndarray) -> Dict[str, Any]:
+def mann_kendall_test(series: np.ndarray, max_samples: int = 5000) -> Dict[str, Any]:
     """
     Test de Mann-Kendall pour detecter une tendance monotone.
 
@@ -433,6 +437,9 @@ def mann_kendall_test(series: np.ndarray) -> Dict[str, Any]:
     ----------
     series : np.ndarray
         Serie temporelle.
+    max_samples : int
+        Nombre maximum d'echantillons pour le calcul (sous-echantillonnage
+        si n > max_samples pour eviter O(n²) sur de gros datasets).
 
     Returns
     -------
@@ -440,16 +447,20 @@ def mann_kendall_test(series: np.ndarray) -> Dict[str, Any]:
         Resultats du test (statistic, p_value, trend).
     """
     n = len(series)
-    s = 0
 
-    # Calcul de la statistique S
-    for i in range(n - 1):
-        for j in range(i + 1, n):
-            diff = series[j] - series[i]
-            if diff > 0:
-                s += 1
-            elif diff < 0:
-                s -= 1
+    # Sous-echantillonnage si trop de donnees (le test O(n²) devient prohibitif)
+    if n > max_samples:
+        indices = np.linspace(0, n - 1, max_samples, dtype=int)
+        series = series[indices]
+        n = max_samples
+
+    # Calcul vectorise de la statistique S
+    # Pour chaque paire (i, j) avec i < j, calculer sign(series[j] - series[i])
+    # Utilise broadcasting: series[np.newaxis, :] - series[:, np.newaxis] donne
+    # une matrice ou M[i,j] = series[j] - series[i]
+    # On ne garde que la partie triangulaire superieure (i < j)
+    diff_matrix = series[np.newaxis, :] - series[:, np.newaxis]
+    s = int(np.sum(np.sign(diff_matrix[np.triu_indices(n, k=1)])))
 
     # Variance de S
     var_s = n * (n - 1) * (2 * n + 5) / 18
@@ -462,7 +473,7 @@ def mann_kendall_test(series: np.ndarray) -> Dict[str, Any]:
     else:
         z = 0
 
-    # P-value (test bilat?ral)
+    # P-value (test bilateral)
     p_value = 2 * (1 - stats.norm.cdf(abs(z)))
 
     # Interpretation de la tendance
@@ -866,19 +877,24 @@ def run_full_analysis(
 
     # Appliquer l'echantillonnage si necessaire
     if sample_fraction < 1.0 and not df.empty:
-        original_len = len(df)
         df = df.sample(frac=sample_fraction, random_state=42).sort_values("datetime_close").reset_index(drop=True)
         print(f"Echantillonnage applique: {len(df)} barres ({sample_fraction:.0%} de l'original)")
         if df.empty:
             raise ValueError("Dataset vide apres echantillonnage. Essayez d'augmenter sample_fraction.")
 
-    # Calculer les log-returns
-    print("\n[0/8] Calcul des log-returns...")
-    log_returns = compute_log_returns(df, price_col=CLOSE_COLUMN)
-    df[LOG_RETURN_COLUMN] = log_returns
+    # Utiliser les log-returns existants (naturels)
+    print("\n[0/8] Chargement des log-returns (naturels)...")
+    if LOG_RETURN_COLUMN in df.columns:
+        log_returns = df[LOG_RETURN_COLUMN]
+        print("Log-returns charges depuis la colonne existante (naturels)")
+    else:
+        # Fallback: calculer si la colonne n'existe pas
+        log_returns = compute_log_returns(df, price_col=CLOSE_COLUMN)
+        df[LOG_RETURN_COLUMN] = log_returns
+        print("Log-returns calcules (naturels) car colonne absente")
 
     n_valid = log_returns.dropna().shape[0]
-    print(f"Log-returns calcules: {n_valid} observations")
+    print(f"Log-returns (naturels): {n_valid} observations")
     print(f"  Mean: {log_returns.mean():.6f}")
     print(f"  Std:  {log_returns.std():.6f}")
     print(f"  Min:  {log_returns.min():.6f}")
@@ -932,20 +948,6 @@ def run_full_analysis(
     print("\n[8/8] Extraction de tendance (dollar bars)...")
     fig_decomp = plot_trend_extraction(prices, windows=[20, 50, 100, 200], output_dir=output_dir)
     results["fig_trend_extraction"] = fig_decomp
-
-    # Sauvegarder le dataset avec log-returns dans data/prepared/
-    log_returns_df = df.copy()
-    log_returns_df[LOG_RETURN_COLUMN] = log_returns
-
-    # Sauvegarder en parquet (complet) et CSV (sample)
-    LOG_RETURNS_PARQUET.parent.mkdir(parents=True, exist_ok=True)
-    log_returns_df.to_parquet(LOG_RETURNS_PARQUET, index=False)
-    print(f"\nDataset avec log-returns sauvegarde: {LOG_RETURNS_PARQUET}")
-
-    # CSV sample (10% pour inspection) - commented out
-    # sample_size = max(1, int(len(log_returns_df) * 0.1))
-    # log_returns_df.head(sample_size).to_csv(LOG_RETURNS_CSV, index=False)
-    # print(f"CSV sample (10%) sauvegarde: {LOG_RETURNS_CSV}")
 
     print("\n" + "=" * 80)
     print("ANALYSE TERMINEE")

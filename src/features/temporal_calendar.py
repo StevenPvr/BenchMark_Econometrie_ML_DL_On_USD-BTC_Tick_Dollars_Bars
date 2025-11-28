@@ -320,12 +320,11 @@ def compute_time_since_shock(
 # =============================================================================
 
 
-@njit(cache=True)
 def _rolling_std(
     values: NDArray[np.float64],
     window: int,
 ) -> NDArray[np.float64]:
-    """Compute rolling standard deviation (numba optimized).
+    """Compute rolling standard deviation using pandas (optimized in C).
 
     Args:
         values: Input array.
@@ -334,44 +333,18 @@ def _rolling_std(
     Returns:
         Array of rolling standard deviations.
     """
-    n = len(values)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    for i in range(window - 1, n):
-        mean = 0.0
-        count = 0
-        for j in range(window):
-            val = values[i - j]
-            if not np.isnan(val):
-                mean += val
-                count += 1
-
-        if count < 2:
-            continue
-
-        mean /= count
-
-        var_sum = 0.0
-        for j in range(window):
-            val = values[i - j]
-            if not np.isnan(val):
-                var_sum += (val - mean) ** 2
-
-        result[i] = np.sqrt(var_sum / (count - 1))
-
+    # Use pandas rolling std - highly optimized in C with O(n) complexity
+    series = pd.Series(values)
+    result = series.rolling(window=window, min_periods=2).std().to_numpy(dtype=np.float64)
     return result
 
 
-@njit(cache=True)
 def _expanding_quantile(
     values: NDArray[np.float64],
     quantile: float,
     min_periods: int,
 ) -> NDArray[np.float64]:
-    """Compute expanding quantile (numba optimized).
+    """Compute expanding quantile using pandas (O(n) optimized).
 
     Args:
         values: Input array.
@@ -381,24 +354,9 @@ def _expanding_quantile(
     Returns:
         Array of expanding quantiles.
     """
-    n = len(values)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    for i in range(min_periods - 1, n):
-        # Collect valid values up to current point
-        valid_vals = []
-        for j in range(i + 1):
-            if not np.isnan(values[j]):
-                valid_vals.append(values[j])
-
-        if len(valid_vals) < min_periods:
-            continue
-
-        # Sort and find quantile
-        sorted_vals = np.sort(np.array(valid_vals))
-        idx = int(quantile * (len(sorted_vals) - 1))
-        result[i] = sorted_vals[idx]
-
+    # Use pandas expanding quantile - highly optimized in C
+    series = pd.Series(values)
+    result = series.expanding(min_periods=min_periods).quantile(quantile).to_numpy(dtype=np.float64)
     return result
 
 
@@ -499,30 +457,32 @@ def _expanding_std(
     values: NDArray[np.float64],
     min_periods: int,
 ) -> NDArray[np.float64]:
-    """Compute expanding standard deviation (numba optimized)."""
+    """Compute expanding standard deviation using Welford's algorithm (O(n)).
+
+    Uses Welford's online algorithm for numerically stable single-pass
+    computation of variance/standard deviation.
+    """
     n = len(values)
     result = np.full(n, np.nan, dtype=np.float64)
 
-    for i in range(min_periods - 1, n):
-        mean = 0.0
-        count = 0
-        for j in range(i + 1):
-            if not np.isnan(values[j]):
-                mean += values[j]
-                count += 1
+    count = 0
+    mean = 0.0
+    m2 = 0.0  # Sum of squared differences from mean
 
-        if count < min_periods:
+    for i in range(n):
+        if np.isnan(values[i]):
+            if count >= min_periods:
+                result[i] = np.sqrt(m2 / (count - 1)) if count > 1 else 0.0
             continue
 
-        mean /= count
+        count += 1
+        delta = values[i] - mean
+        mean += delta / count
+        delta2 = values[i] - mean
+        m2 += delta * delta2
 
-        var_sum = 0.0
-        for j in range(i + 1):
-            if not np.isnan(values[j]):
-                var_sum += (values[j] - mean) ** 2
-
-        if count > 1:
-            result[i] = np.sqrt(var_sum / (count - 1))
+        if count >= min_periods and count > 1:
+            result[i] = np.sqrt(m2 / (count - 1))
 
     return result
 

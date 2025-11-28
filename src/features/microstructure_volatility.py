@@ -250,17 +250,17 @@ def compute_intrabar_volatility(
 
     # Convert timestamps to int64 (nanoseconds or milliseconds)
     if pd.api.types.is_datetime64_any_dtype(df_ticks[timestamp_col]):
-        tick_ts = df_ticks[timestamp_col].astype("int64").values
+        tick_ts = df_ticks[timestamp_col].to_numpy(dtype=np.int64)
     else:
-        tick_ts = df_ticks[timestamp_col].values.astype(np.int64)
+        tick_ts = df_ticks[timestamp_col].to_numpy(dtype=np.int64)
 
     # Get bar boundaries
     if pd.api.types.is_datetime64_any_dtype(df_bars[bar_timestamp_open]):
-        bar_open_ts = df_bars[bar_timestamp_open].astype("int64").values
-        bar_close_ts = df_bars[bar_timestamp_close].astype("int64").values
+        bar_open_ts = df_bars[bar_timestamp_open].to_numpy(dtype=np.int64)
+        bar_close_ts = df_bars[bar_timestamp_close].to_numpy(dtype=np.int64)
     else:
-        bar_open_ts = df_bars[bar_timestamp_open].values.astype(np.int64)
-        bar_close_ts = df_bars[bar_timestamp_close].values.astype(np.int64)
+        bar_open_ts = df_bars[bar_timestamp_open].to_numpy(dtype=np.int64)
+        bar_close_ts = df_bars[bar_timestamp_close].to_numpy(dtype=np.int64)
 
     # Compute statistics
     intrabar_var, tick_range, realized_var, mean_return, tick_count = (
@@ -384,7 +384,7 @@ def compute_microstructure_features(
             )
 
     # Compute volatility of volatility (rolling)
-    intrabar_vol = result["intrabar_volatility"].values
+    intrabar_vol = result["intrabar_volatility"].to_numpy(dtype=np.float64)
     vol_of_vol = _rolling_std_numba(intrabar_vol, window=20)
     result["vol_of_vol_20"] = vol_of_vol
 

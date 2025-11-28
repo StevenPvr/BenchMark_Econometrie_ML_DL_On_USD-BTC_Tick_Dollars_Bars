@@ -55,8 +55,19 @@ def _load_raw_trades(path: Path = DATASET_RAW_PARQUET) -> pd.DataFrame:
 
         return df
 
-    # Normal file loading
-    df = pd.read_parquet(path)
+    # Normal file loading with error handling for corrupted files
+    try:
+        df = pd.read_parquet(path)
+    except (OSError, TimeoutError) as e:
+        if "Operation timed out" in str(e) or "timeout" in str(e).lower():
+            raise RuntimeError(
+                f"Parquet file {path} appears to be corrupted or inaccessible (timeout error). "
+                f"Please remove the file and re-run data fetching to regenerate it. "
+                f"Error: {e}"
+            ) from e
+        else:
+            raise
+
     if df.empty:
         raise ValueError("Raw trades dataset is empty")
     return df
@@ -79,17 +90,33 @@ def _drop_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _filter_volume_outliers(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter obvious volume outliers using a high quantile cap."""
-    if "amount" not in df.columns or df.empty:
+def _filter_price_outliers(df: pd.DataFrame, max_pct_change: float = 0.05) -> pd.DataFrame:
+    """Filter ticks with aberrant price changes (causes extreme log returns).
+
+    Removes ticks where the price change vs previous tick exceeds max_pct_change.
+    This eliminates erroneous ticks that would create extreme log returns.
+
+    Args:
+        df: DataFrame with tick data (must have 'price' column).
+        max_pct_change: Maximum allowed price change (default 5% = 0.05).
+
+    Returns:
+        Filtered DataFrame without aberrant price ticks.
+    """
+    if "price" not in df.columns or df.empty:
         return df
 
-    quantile_9999 = df["amount"].quantile(0.9999) if not df.empty else float("inf")
-    mask_valid = (df["amount"] > 0) & (df["amount"] <= quantile_9999)
+    # Calculate percentage change from previous tick
+    pct_change = df["price"].pct_change().abs()
+
+    # Keep first tick (NaN pct_change) and ticks within threshold
+    mask_valid = pct_change.isna() | (pct_change <= max_pct_change)
     filtered = df.loc[mask_valid].copy()
+
     removed = len(df) - len(filtered)
     if removed > 0:
-        logger.info("Filtered %d outlier trades above 99.99%% quantile", removed)
+        logger.info("Filtered %d ticks with price change > %.1f%%", removed, max_pct_change * 100)
+
     return filtered
 
 
@@ -123,7 +150,7 @@ def clean_ticks_data() -> None:
 
     df = _drop_missing_essentials(df, required=("timestamp", "price", "amount"))
     df = _drop_duplicates(df)
-    df = _filter_volume_outliers(df)
+    df = _filter_price_outliers(df, max_pct_change=0.05)  # Filter >5% price jumps
     df = _strip_unwanted_columns(df)
 
     if "timestamp" in df.columns:

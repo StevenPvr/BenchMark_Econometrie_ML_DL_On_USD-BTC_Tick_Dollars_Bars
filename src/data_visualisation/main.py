@@ -19,7 +19,7 @@ def main() -> None:
         parquet_path=DOLLAR_BARS_PARQUET,
         output_dir=DATA_PLOTS_DIR,
         show_plots=True,
-        sample_fraction=0.1,
+        sample_fraction=0.2,
     )
 
 

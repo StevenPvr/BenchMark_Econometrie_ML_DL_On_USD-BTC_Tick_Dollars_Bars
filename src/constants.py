@@ -38,7 +38,6 @@ from src.path import (  # noqa: F401
     DATASET_FILTERED_FILE,
     DATASET_FILTERED_PARQUET_FILE,
     WEIGHTED_LOG_RETURNS_FILE,
-    WEIGHTED_LOG_RETURNS_SPLIT_FILE,
     LOG_RETURNS_PARQUET,
     LOG_RETURNS_CSV,
     DOLLAR_BARS_PARQUET,
@@ -417,3 +416,34 @@ LIGHTGBM_DATASET_COMPLETE_FILE: str = "lightgbm_dataset_complete.parquet"
 DEFAULT_PT_MULT: float = 1.0  # Profit-taking multiplier
 DEFAULT_SL_MULT: float = 1.0  # Stop-loss multiplier
 DEFAULT_MAX_HOLDING: int = 20  # Maximum holding period in bars
+DEFAULT_MIN_RETURN: float = 0.0  # Minimum return threshold (percentage)
+
+# Log return scale factor (dollar bars use log_return × 100)
+LOG_RETURN_SCALE: float = 100.0
+
+# Volatility estimation
+DEFAULT_VOL_WINDOW: int = 21  # Window for daily volatility estimation
+
+# ============================================================================
+# OPTIMIZATION CONSTANTS (Label Primaire)
+# ============================================================================
+
+# Optuna optimization defaults
+OPTI_N_TRIALS_DEFAULT: int = 50  # Number of Optuna trials
+OPTI_N_FOLDS_DEFAULT: int = 5  # Number of walk-forward folds
+OPTI_TIMEOUT_DEFAULT: int = 3600  # Timeout in seconds (1 hour)
+OPTI_METRIC_DEFAULT: str = "mcc_weighted"  # Default optimization metric
+
+# Walk-forward CV parameters
+OPTI_MIN_TRAIN_SIZE: int = 500  # Minimum training samples per fold
+OPTI_EMBARGO_PCTG: float = 0.01  # Embargo percentage to prevent leakage
+
+# Triple barrier search space bounds
+TRIPLE_BARRIER_PT_MULT_MIN: float = 0.5
+TRIPLE_BARRIER_PT_MULT_MAX: float = 3.0
+TRIPLE_BARRIER_SL_MULT_MIN: float = 0.5
+TRIPLE_BARRIER_SL_MULT_MAX: float = 3.0
+TRIPLE_BARRIER_MIN_RETURN_MIN: float = 0.1  # 0.1% minimum return
+TRIPLE_BARRIER_MIN_RETURN_MAX: float = 2.0  # 2.0% maximum return
+TRIPLE_BARRIER_MAX_HOLDING_MIN: int = 5
+TRIPLE_BARRIER_MAX_HOLDING_MAX: int = 50

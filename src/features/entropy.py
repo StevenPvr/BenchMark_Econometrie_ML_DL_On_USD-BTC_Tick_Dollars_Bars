@@ -325,6 +325,8 @@ def _rolling_apen(
         # Normalize data (std becomes 1)
         std = np.std(valid_data)
         if std < 1e-10:
+            # No variance = perfectly regular = 0 entropy
+            apen[i] = 0.0
             continue
 
         normalized = (valid_data - np.mean(valid_data)) / std
@@ -456,7 +458,8 @@ def _compute_sampen_single(
     B, A = _count_matches_sampen(data, m, r)
 
     if B == 0:
-        return np.nan
+        # No similar patterns found = maximum entropy (fully random)
+        return 5.0
     if A == 0:
         # No matches of length m+1 found - cap at reasonable max
         # This indicates maximum unpredictability
@@ -502,6 +505,8 @@ def _rolling_sampen(
         # Normalize data (std becomes 1)
         std = np.std(valid_data)
         if std < 1e-10:
+            # No variance = perfectly regular = 0 entropy
+            sampen[i] = 0.0
             continue
 
         normalized = (valid_data - np.mean(valid_data)) / std

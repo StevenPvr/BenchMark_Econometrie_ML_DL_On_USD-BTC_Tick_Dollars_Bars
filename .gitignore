@@ -22,3 +22,8 @@ Thumbs.db
 # Données et résultats
 data/
 outputs/
+
+# Cache et dépendances volumineuses
+.mypy_cache/
+tick/lib/python3.10/site-packages/pygments/lexers
+tick/lib/python3.10/site-packages/numba/tests

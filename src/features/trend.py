@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit  # type: ignore[import-untyped]  # Still used by _compute_streak
 
 from src.config_logging import get_logger
 
@@ -56,12 +56,11 @@ __all__ = [
 # =============================================================================
 
 
-@njit(cache=True)
 def _rolling_mean(
     values: NDArray[np.float64],
     window: int,
 ) -> NDArray[np.float64]:
-    """Compute rolling mean (numba optimized).
+    """Compute rolling mean using pandas (numerically stable).
 
     Args:
         values: Input array.
@@ -70,49 +69,16 @@ def _rolling_mean(
     Returns:
         Array of rolling means.
     """
-    n = len(values)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    # First valid window
-    window_sum = 0.0
-    count = 0
-    for j in range(window):
-        if not np.isnan(values[j]):
-            window_sum += values[j]
-            count += 1
-
-    if count > 0:
-        result[window - 1] = window_sum / count
-
-    # Rolling forward
-    for i in range(window, n):
-        old_val = values[i - window]
-        new_val = values[i]
-
-        if not np.isnan(old_val):
-            window_sum -= old_val
-            count -= 1
-        if not np.isnan(new_val):
-            window_sum += new_val
-            count += 1
-
-        if count > 0:
-            result[i] = window_sum / count
-
+    series = pd.Series(values)
+    result = np.asarray(series.rolling(window=window, min_periods=window).mean(), dtype=np.float64)
     return result
 
 
-@njit(cache=True)
 def _rolling_std(
     values: NDArray[np.float64],
     window: int,
 ) -> NDArray[np.float64]:
-    """Compute rolling standard deviation (numba optimized).
-
-    Uses Welford's online algorithm for numerical stability.
+    """Compute rolling standard deviation using pandas (numerically stable).
 
     Args:
         values: Input array.
@@ -121,32 +87,8 @@ def _rolling_std(
     Returns:
         Array of rolling standard deviations.
     """
-    n = len(values)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    for i in range(window - 1, n):
-        # Compute std for window
-        window_data = values[i - window + 1 : i + 1]
-
-        # Online mean and variance
-        mean = 0.0
-        m2 = 0.0
-        count = 0
-
-        for val in window_data:
-            if not np.isnan(val):
-                count += 1
-                delta = val - mean
-                mean += delta / count
-                delta2 = val - mean
-                m2 += delta * delta2
-
-        if count > 1:
-            result[i] = np.sqrt(m2 / (count - 1))
-
+    series = pd.Series(values)
+    result = np.asarray(series.rolling(window=window, min_periods=window).std(), dtype=np.float64)
     return result
 
 
@@ -200,12 +142,11 @@ def compute_moving_averages(
 # =============================================================================
 
 
-@njit(cache=True)
 def _compute_zscore(
     prices: NDArray[np.float64],
     window: int,
 ) -> NDArray[np.float64]:
-    """Compute price z-score relative to MA (numba optimized).
+    """Compute price z-score relative to MA using pandas (numerically stable).
 
     z_t = (P_t - MA_t) / std(P_{t-k:t})
 
@@ -216,43 +157,18 @@ def _compute_zscore(
     Returns:
         Array of z-scores.
     """
-    n = len(prices)
-    zscore = np.full(n, np.nan, dtype=np.float64)
+    series = pd.Series(prices)
+    rolling = series.rolling(window=window, min_periods=window)
 
-    if n < window:
-        return zscore
+    mean = rolling.mean()
+    std = rolling.std()
 
-    for i in range(window - 1, n):
-        # Get window data
-        window_data = prices[i - window + 1 : i + 1]
-
-        # Compute mean and std
-        mean = 0.0
-        count = 0
-        for val in window_data:
-            if not np.isnan(val):
-                mean += val
-                count += 1
-
-        if count == 0:
-            continue
-
-        mean /= count
-
-        # Compute std
-        var_sum = 0.0
-        for val in window_data:
-            if not np.isnan(val):
-                var_sum += (val - mean) ** 2
-
-        if count > 1:
-            std = np.sqrt(var_sum / (count - 1))
-        else:
-            std = 0.0
-
-        # Z-score
-        if std > 1e-10:
-            zscore[i] = (prices[i] - mean) / std
+    # Z-score: 0 when std is ~0 (price constant = no deviation)
+    zscore = np.where(
+        std > 1e-10,
+        (series - mean) / std,
+        0.0,  # No variance = price at mean = z-score of 0
+    )
 
     return zscore
 

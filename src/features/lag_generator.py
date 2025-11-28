@@ -4,15 +4,15 @@ This module generates lagged features with differentiated lag structures
 based on variable type:
 
 1. Fast variables (returns, order flow, volume, activity):
-   - Lags: 1, 2, 3, 5, 10 bars
+   - Lags: 1, 5, 10, 15, 25, 50 bars
    - Captures short-term dynamics and immediate dependencies
 
 2. Slow variables (volatility, range, toxicity):
-   - Lags: 1, 5, 10 bars
+   - Lags: 1, 5, 10, 15, 25, 50 bars
    - Already persistent, fewer lags needed
 
 3. Already aggregated/rolling features:
-   - Lags: 1 (optionally 5)
+   - Lags: 1, 5, 10, 15, 25, 50 bars
    - Already contain compressed memory
 
 4. Time/calendar features:
@@ -194,21 +194,21 @@ def get_lags_for_feature(feature_type: str) -> list[int]:
 
     Example:
         >>> get_lags_for_feature('fast')
-        [1, 2, 3, 5, 10]
+        [1, 5, 10, 15, 25, 50]
         >>> get_lags_for_feature('slow')
-        [1, 5, 10]
+        [1, 5, 10, 15, 25, 50]
         >>> get_lags_for_feature('aggregated')
-        [1]
+        [1, 5, 10, 15, 25, 50]
         >>> get_lags_for_feature('no_lag')
         []
     """
     lag_schemes = {
-        "fast": [1, 2, 3, 5, 10],
-        "slow": [1, 5, 10],
-        "aggregated": [1],
+        "fast": [1, 5, 10, 15, 25, 50],
+        "slow": [1, 5, 10, 15, 25, 50],
+        "aggregated": [1, 5, 10, 15, 25, 50],
         "no_lag": [],
     }
-    return lag_schemes.get(feature_type, [1, 5, 10])
+    return lag_schemes.get(feature_type, [1, 5, 10, 15, 25, 50])
 
 
 # =============================================================================
@@ -262,7 +262,8 @@ def compute_lagged_features(
     Example:
         >>> df_lags = compute_lagged_features(df, ["log_return"], [1, 2, 3])
     """
-    result = pd.DataFrame(index=df.index)
+    # Build all lagged columns in a dictionary to avoid DataFrame fragmentation
+    lagged_data: dict[str, np.ndarray] = {}
 
     for col in columns:
         values = df[col].values.astype(np.float64)
@@ -270,7 +271,10 @@ def compute_lagged_features(
         for lag in lags:
             lagged = _shift_array(values, lag)
             col_name = f"{col}{suffix_format.format(lag=lag)}"
-            result[col_name] = lagged
+            lagged_data[col_name] = lagged
+
+    # Create DataFrame in one operation to avoid fragmentation
+    result = pd.DataFrame(lagged_data, index=df.index)
 
     return result
 
@@ -286,9 +290,9 @@ def generate_all_lags(
     """Generate lagged features with intelligent lag structure.
 
     Automatically classifies features and applies appropriate lags:
-    - Fast variables: lags 1, 2, 3, 5, 10
-    - Slow variables: lags 1, 5, 10
-    - Aggregated: lag 1
+    - Fast variables: lags 1, 5, 10, 15, 25, 50
+    - Slow variables: lags 1, 5, 10, 15, 25, 50
+    - Aggregated: lags 1, 5, 10, 15, 25, 50
     - Time/calendar/frac_diff: no lags
 
     Args:
@@ -306,11 +310,11 @@ def generate_all_lags(
         >>> df_with_lags = generate_all_lags(df_features)
     """
     if fast_lags is None:
-        fast_lags = [1, 2, 3, 5, 10]
+        fast_lags = [1, 5, 10, 15, 25, 50]
     if slow_lags is None:
-        slow_lags = [1, 5, 10]
+        slow_lags = [1, 5, 10, 15, 25, 50]
     if aggregated_lags is None:
-        aggregated_lags = [1]
+        aggregated_lags = [1, 5, 10, 15, 25, 50]
     if exclude_columns is None:
         exclude_columns = []
 

@@ -249,8 +249,11 @@ def _rolling_garman_klass(
         if count > 0:
             avg_var = var_sum / count
             # Handle potential negative variance (can happen with GK)
+            # Return 0 for non-positive variance (no volatility)
             if avg_var > 0:
                 result[i] = np.sqrt(avg_var)
+            else:
+                result[i] = 0.0
 
     return result
 
@@ -386,8 +389,11 @@ def _rolling_rogers_satchell(
 
         if count > 0:
             avg_var = var_sum / count
+            # Return 0 for non-positive variance (no volatility)
             if avg_var > 0:
                 result[i] = np.sqrt(avg_var)
+            else:
+                result[i] = 0.0
 
     return result
 
@@ -561,8 +567,11 @@ def _rolling_yang_zhang(
         # Yang-Zhang variance
         yz_var = overnight_var + k * open_close_var + (1.0 - k) * rs_var
 
+        # Return 0 for non-positive variance (no volatility)
         if yz_var > 0:
             result[i] = np.sqrt(yz_var)
+        else:
+            result[i] = 0.0
 
     return result
 
@@ -665,8 +674,11 @@ def _compute_range_ratios(
         range_ratio[i] = hl_range / c
 
         # Body ratio: |C - O| / (H - L)
+        # When range is 0 (high == low), body ratio is 0 (no body possible)
         if hl_range > 1e-10:
             body_ratio[i] = abs(c - o) / hl_range
+        else:
+            body_ratio[i] = 0.0
 
     return range_ratio, body_ratio
 

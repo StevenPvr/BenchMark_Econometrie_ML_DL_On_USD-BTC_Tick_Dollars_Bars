@@ -41,12 +41,13 @@ __all__ = [
 ]
 
 
-@njit(cache=True)
 def _rolling_sum_squares(
     returns: NDArray[np.float64],
     window: int,
 ) -> NDArray[np.float64]:
-    """Compute rolling sum of squared returns (numba optimized).
+    """Compute rolling sum of squared returns using pandas (numerically stable).
+
+    Uses pandas rolling which is implemented in C with proper numerical stability.
 
     Args:
         returns: Array of returns.
@@ -55,41 +56,17 @@ def _rolling_sum_squares(
     Returns:
         Array of rolling sum of squares.
     """
-    n = len(returns)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    # First valid window
-    window_sum_sq = 0.0
-    for j in range(window):
-        if not np.isnan(returns[j]):
-            window_sum_sq += returns[j] ** 2
-
-    result[window - 1] = window_sum_sq
-
-    # Rolling forward
-    for i in range(window, n):
-        old_val = returns[i - window]
-        new_val = returns[i]
-
-        if not np.isnan(old_val):
-            window_sum_sq -= old_val ** 2
-        if not np.isnan(new_val):
-            window_sum_sq += new_val ** 2
-
-        result[i] = window_sum_sq
-
+    # Use pandas rolling sum - numerically stable implementation
+    series = pd.Series(returns ** 2)
+    result = series.rolling(window=window, min_periods=window).sum().values
     return result
 
 
-@njit(cache=True)
 def _rolling_sum(
     returns: NDArray[np.float64],
     window: int,
 ) -> NDArray[np.float64]:
-    """Compute rolling sum (numba optimized).
+    """Compute rolling sum using pandas (numerically stable).
 
     Args:
         returns: Array of returns.
@@ -98,32 +75,8 @@ def _rolling_sum(
     Returns:
         Array of rolling sums.
     """
-    n = len(returns)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    # First valid window
-    window_sum = 0.0
-    for j in range(window):
-        if not np.isnan(returns[j]):
-            window_sum += returns[j]
-
-    result[window - 1] = window_sum
-
-    # Rolling forward
-    for i in range(window, n):
-        old_val = returns[i - window]
-        new_val = returns[i]
-
-        if not np.isnan(old_val):
-            window_sum -= old_val
-        if not np.isnan(new_val):
-            window_sum += new_val
-
-        result[i] = window_sum
-
+    series = pd.Series(returns)
+    result = series.rolling(window=window, min_periods=window).sum().values
     return result
 
 
@@ -216,11 +169,11 @@ def compute_local_sharpe(
         sum_sq = _rolling_sum_squares(returns, k)
         realized_vol = np.sqrt(sum_sq)
 
-        # Local Sharpe (avoid division by zero)
+        # Local Sharpe (0 when vol is ~0, as there's no risk-adjusted return)
         sharpe = np.where(
             realized_vol > 1e-10,
             cum_ret / realized_vol,
-            np.nan,
+            0.0,  # No vol = no risk-adjusted return
         )
 
         col_name = f"local_sharpe_{k}"

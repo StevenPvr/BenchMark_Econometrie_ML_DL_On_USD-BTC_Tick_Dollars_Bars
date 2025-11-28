@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import sys
+import os
 from pathlib import Path
 
 # Add project root to Python path for direct execution.
@@ -26,6 +27,9 @@ _script_dir = Path(__file__).parent
 _project_root = _script_dir.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
+
+NUMBA_CACHE_DIR = os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+Path(NUMBA_CACHE_DIR).mkdir(parents=True, exist_ok=True)
 
 import pandas as pd  # type: ignore[import-untyped]
 
@@ -35,6 +39,7 @@ from src.features.entropy import (
     compute_sample_entropy,
     compute_shannon_entropy,
 )
+from src.features.technical_indicators import compute_all_technical_indicators
 from src.features.fractional_diff import compute_frac_diff_features
 from src.features.kyle_lambda import compute_kyle_lambda
 from src.features.lag_generator import generate_all_lags
@@ -68,23 +73,14 @@ from src.features.trend import (
 )
 from src.features.vpin import compute_vpin
 from src.path import (
-    DATASET_FEATURES_CSV,
     DOLLAR_BARS_PARQUET,
-    DATASET_FEATURES_LINEAR_TEST_CSV,
     DATASET_FEATURES_LINEAR_TEST_PARQUET,
-    DATASET_FEATURES_LINEAR_TRAIN_CSV,
     DATASET_FEATURES_LINEAR_TRAIN_PARQUET,
-    DATASET_FEATURES_LINEAR_CSV,
     DATASET_FEATURES_LINEAR_PARQUET,
-    DATASET_FEATURES_LSTM_TEST_CSV,
     DATASET_FEATURES_LSTM_TEST_PARQUET,
-    DATASET_FEATURES_LSTM_TRAIN_CSV,
     DATASET_FEATURES_LSTM_TRAIN_PARQUET,
-    DATASET_FEATURES_LSTM_CSV,
     DATASET_FEATURES_LSTM_PARQUET,
-    DATASET_FEATURES_TEST_CSV,
     DATASET_FEATURES_TEST_PARQUET,
-    DATASET_FEATURES_TRAIN_CSV,
     DATASET_FEATURES_TRAIN_PARQUET,
     DATASET_FEATURES_PARQUET,
     FEATURES_DIR,
@@ -287,6 +283,27 @@ def compute_all_features(df_bars: pd.DataFrame) -> pd.DataFrame:
     feature_dfs.append(df_frac)
 
     # =========================================================================
+    # 10. TECHNICAL ANALYSIS INDICATORS (ta library)
+    # =========================================================================
+    logger.info("Computing technical analysis indicators...")
+
+    try:
+        df_ta = compute_all_technical_indicators(
+            df_bars,
+            open_col="open",
+            high_col="high",
+            low_col="low",
+            close_col="close",
+            volume_col="volume",
+            fillna=False,  # Preserve NaN for causality
+        )
+        feature_dfs.append(df_ta)
+    except ImportError as e:
+        logger.warning("Skipping TA indicators: %s", e)
+    except ValueError as e:
+        logger.warning("Skipping TA indicators (missing columns): %s", e)
+
+    # =========================================================================
     # COMBINE ALL FEATURES
     # =========================================================================
     logger.info("Combining all features...")
@@ -315,15 +332,7 @@ def apply_lags(df_features: pd.DataFrame) -> pd.DataFrame:
         "timestamp_open",
         "timestamp_close",
         "datetime",
-        "date",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "buy_volume",
-        "sell_volume",
-        "n_ticks",
+        "date"
     ]
 
     df_lagged = generate_all_lags(
@@ -707,7 +716,6 @@ def save_outputs(
     # Save raw ML features
     logger.info("Saving dataset_features to %s", DATASET_FEATURES_PARQUET)
     df_features.to_parquet(DATASET_FEATURES_PARQUET, index=False)
-    df_features.to_csv(DATASET_FEATURES_CSV, index=False)
     logger.info(
         "Saved dataset_features: %d rows, %d columns",
         len(df_features),
@@ -717,7 +725,6 @@ def save_outputs(
     # Save z-scored linear features
     logger.info("Saving dataset_features_linear to %s", DATASET_FEATURES_LINEAR_PARQUET)
     df_features_linear.to_parquet(DATASET_FEATURES_LINEAR_PARQUET, index=False)
-    df_features_linear.to_csv(DATASET_FEATURES_LINEAR_CSV, index=False)
     logger.info(
         "Saved dataset_features_linear: %d rows, %d columns",
         len(df_features_linear),
@@ -727,7 +734,6 @@ def save_outputs(
     # Save min-max LSTM features
     logger.info("Saving dataset_features_lstm to %s", DATASET_FEATURES_LSTM_PARQUET)
     df_features_lstm.to_parquet(DATASET_FEATURES_LSTM_PARQUET, index=False)
-    df_features_lstm.to_csv(DATASET_FEATURES_LSTM_CSV, index=False)
     logger.info(
         "Saved dataset_features_lstm: %d rows, %d columns",
         len(df_features_lstm),
@@ -770,26 +776,20 @@ def save_train_test_splits() -> None:
             DATASET_FEATURES_PARQUET,
             DATASET_FEATURES_TRAIN_PARQUET,
             DATASET_FEATURES_TEST_PARQUET,
-            DATASET_FEATURES_TRAIN_CSV,
-            DATASET_FEATURES_TEST_CSV,
         ),
         (
             DATASET_FEATURES_LINEAR_PARQUET,
             DATASET_FEATURES_LINEAR_TRAIN_PARQUET,
             DATASET_FEATURES_LINEAR_TEST_PARQUET,
-            DATASET_FEATURES_LINEAR_TRAIN_CSV,
-            DATASET_FEATURES_LINEAR_TEST_CSV,
         ),
         (
             DATASET_FEATURES_LSTM_PARQUET,
             DATASET_FEATURES_LSTM_TRAIN_PARQUET,
             DATASET_FEATURES_LSTM_TEST_PARQUET,
-            DATASET_FEATURES_LSTM_TRAIN_CSV,
-            DATASET_FEATURES_LSTM_TEST_CSV,
         ),
     ]
 
-    for input_path, train_parquet, test_parquet, train_csv, test_csv in datasets:
+    for input_path, train_parquet, test_parquet in datasets:
         if not input_path.exists():
             logger.warning("Cannot create split: missing %s", input_path)
             continue
@@ -799,8 +799,6 @@ def save_train_test_splits() -> None:
 
         df_train.to_parquet(train_parquet, index=False)
         df_test.to_parquet(test_parquet, index=False)
-        df_train.to_csv(train_csv, index=False)
-        df_test.to_csv(test_csv, index=False)
 
         logger.info(
             "Saved train/test splits for %s -> train: %s, test: %s",

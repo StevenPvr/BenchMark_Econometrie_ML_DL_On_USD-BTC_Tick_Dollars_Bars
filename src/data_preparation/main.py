@@ -24,30 +24,15 @@ from src.path import (
     DOLLAR_BARS_CSV,
 )
 from src.utils import get_logger
-import pandas as pd
 
 logger = get_logger(__name__)
-
-
-def _calculate_optimal_threshold(parquet_path: Path, target_ticks: int = 50) -> float:
-    """Calculate optimal fixed threshold based on mean dollar value per tick."""
-    logger.info("Loading columns 'price' and 'amount' to calculate mean dollar value...")
-    # Load only necessary columns for speed
-    df = pd.read_parquet(parquet_path, columns=["price", "amount"])
-    
-    mean_dollar_value = (df["price"] * df["amount"]).mean()
-    threshold = mean_dollar_value * target_ticks
-    
-    logger.info("  • Mean Dollar Value/Tick: %.2f", mean_dollar_value)
-    logger.info("  • Target Ticks/Bar:       %d", target_ticks)
-    logger.info("  • Calculated Threshold:   %.2f", threshold)
-    
-    return float(threshold)
 
 
 def main() -> None:
     """Main CLI function for data preparation - generates dollar bars."""
     setup_logging()
+
+    calibration_fraction = 0.2  # use first 20% of ticks to calibrate T_0 (no lookahead)
 
     logger.info("Starting data preparation pipeline")
     logger.info("=" * 60)
@@ -65,35 +50,26 @@ def main() -> None:
         if DATASET_CLEAN_PARQUET.is_dir():
             # Directory with partitioned files - use batch processing
             logger.info("📁 Detected partitioned dataset - using memory-efficient batch processing")
-            
-            # For partitioned data, we need an estimate. We'll load the first partition to estimate the mean.
-            # This is an approximation but sufficient for setting a fixed threshold.
-            first_partition = next(DATASET_CLEAN_PARQUET.glob("*.parquet"))
-            logger.info("Estimating threshold from first partition: %s", first_partition.name)
-            threshold = _calculate_optimal_threshold(first_partition, target_ticks=50)
-            
-            logger.info("Generating dollar bars from partitioned files with FIXED threshold: %.2f", threshold)
+            logger.info("Generating dollar bars (De Prado fixed threshold, full-sample calibration)...")
             df_bars = run_dollar_bars_pipeline_batch(
                 input_dir=DATASET_CLEAN_PARQUET,
+                target_num_bars=500_000,
                 output_parquet=DOLLAR_BARS_PARQUET,
-                output_csv=DOLLAR_BARS_CSV,
-                threshold=threshold,
-                adaptive=False
+                adaptive=False,
+                calibration_fraction=1.0,
+                include_incomplete_final=True,
             )
         else:
             # Single file - use traditional processing
             logger.info("📄 Detected single file - using traditional processing")
-            
-            logger.info("Calculating optimal fixed threshold from dataset...")
-            threshold = _calculate_optimal_threshold(DATASET_CLEAN_PARQUET, target_ticks=50)
-            
-            logger.info("Generating dollar bars with FIXED threshold: %.2f", threshold)
+            logger.info("Generating dollar bars (De Prado fixed threshold, full-sample calibration)...")
             df_bars = run_dollar_bars_pipeline(
+                target_num_bars=500_000,
                 input_parquet=DATASET_CLEAN_PARQUET,
                 output_parquet=DOLLAR_BARS_PARQUET,
-                output_csv=DOLLAR_BARS_CSV,
-                threshold=threshold,
-                adaptive=False
+                adaptive=False,
+                calibration_fraction=1.0,
+                include_incomplete_final=True,
             )
 
         logger.info("✓ Dollar bars generation completed")
@@ -109,10 +85,10 @@ def main() -> None:
             logger.info("  • Date range: %s - %s",
                        df_bars.index.min(), df_bars.index.max())
 
-        # Add log returns (x100) into the consolidated dollar_bars dataset
+        # Add log returns (natural) into the consolidated dollar_bars dataset
         logger.info("=" * 60)
-        logger.info("Adding log returns (x100) into dollar_bars dataset...")
-        add_log_returns_to_bars_file(DOLLAR_BARS_PARQUET, DOLLAR_BARS_CSV)
+        logger.info("Adding log returns (natural) into dollar_bars dataset...")
+        add_log_returns_to_bars_file(DOLLAR_BARS_PARQUET)
 
         logger.info("=" * 60)
         logger.info("Data preparation completed successfully")

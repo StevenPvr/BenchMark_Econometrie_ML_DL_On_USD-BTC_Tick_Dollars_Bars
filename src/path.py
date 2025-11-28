@@ -38,7 +38,6 @@ DATASET_CLEAN_PARQUET = CLEANED_DATA_DIR / "dataset_clean.parquet"
 
 # Prepared log-returns (map weighted aliases to existing files)
 WEIGHTED_LOG_RETURNS_FILE = PREPARED_DATA_DIR / "log_returns.csv"
-WEIGHTED_LOG_RETURNS_SPLIT_FILE = PREPARED_DATA_DIR / "log_returns_split.parquet"
 LOG_RETURNS_PARQUET = PREPARED_DATA_DIR / "log_returns.parquet"
 LOG_RETURNS_CSV = PREPARED_DATA_DIR / "log_returns.csv"
 DOLLAR_BARS_PARQUET = PREPARED_DATA_DIR / "dollar_bars.parquet"
@@ -277,71 +276,32 @@ DL_RESULTS_DIR = RESULTS_DIR / "deep_learning"
 LSTM_DIR = DL_RESULTS_DIR / "lstm"
 
 # ============================================================================
-# LABEL PRIMAIRE - Triple-Barrier Labeling (Refactored)
+# LABEL PRIMAIRE - Primary Model (De Prado Chapter 3)
+# Predicts trade direction: +1 (Long), -1 (Short)
 # ============================================================================
 
 # Step 1: Optimization
 LABEL_PRIMAIRE_OPTI_DIR = RESULTS_DIR / "label_primaire_opti"
-# Default optimization file (legacy/default), new scripts may ask for user-defined names
-LABEL_PRIMAIRE_OPTIMIZATION_FILE = LABEL_PRIMAIRE_OPTI_DIR / "joint_optimization.json"
-LABEL_PRIMAIRE_LABELING_PARAMS_FILE = LABEL_PRIMAIRE_OPTI_DIR / "labeling_params.json"
 
 # Step 2: Training
 LABEL_PRIMAIRE_TRAIN_DIR = RESULTS_DIR / "label_primaire_train"
-# Legacy/Default model dir (if needed)
-LABEL_PRIMAIRE_MODELS_DIR = LABEL_PRIMAIRE_TRAIN_DIR
 
 # Step 3: Evaluation
 LABEL_PRIMAIRE_EVAL_DIR = RESULTS_DIR / "label_primaire_eval"
-LABEL_PRIMAIRE_EVENTS_TRAIN_FILE = LABEL_PRIMAIRE_EVAL_DIR / "events_train.parquet"
-LABEL_PRIMAIRE_EVENTS_TEST_FILE = LABEL_PRIMAIRE_EVAL_DIR / "events_test.parquet"
-LABEL_PRIMAIRE_EVALUATION_FILE = LABEL_PRIMAIRE_EVAL_DIR / "primary_evaluation.json"
-
-# Legacy directory (kept for backward compatibility reference)
-LABEL_PRIMAIRE_DIR = RESULTS_DIR / "label_primaire"
 
 # ============================================================================
-# LABEL META - Meta-Model & Benchmarking
+# LABEL META - Meta Model (De Prado Chapter 3.6)
+# Filters false positives: 1 (take trade), 0 (skip trade)
 # ============================================================================
 
-LABEL_META_DIR = RESULTS_DIR / "label_meta"
-LABEL_META_MODEL_FILE = LABEL_META_DIR / "meta_model.joblib"
-LABEL_META_BENCHMARKS_DIR = LABEL_META_DIR / "benchmarks"
-LABEL_META_MODELS_DIR = LABEL_META_DIR / "models"
-LABEL_META_PARAMS_DIR = LABEL_META_DIR / "params"
-
-# Refactored Label Meta
-# Step 1: Meta Model Optimization (separate from primary model)
+# Step 1: Meta Model Optimization
 LABEL_META_OPTI_DIR = RESULTS_DIR / "label_meta_opti"
-LABEL_META_OPTIMIZATION_FILE = LABEL_META_OPTI_DIR / "meta_optimization.json"
 
 # Step 2: Meta Model Training
 LABEL_META_TRAIN_DIR = RESULTS_DIR / "label_meta_train"
-LABEL_META_TRAIN_MODELS_DIR = LABEL_META_TRAIN_DIR / "models"
 
 # Step 3: Meta Model Evaluation
 LABEL_META_EVAL_DIR = RESULTS_DIR / "label_meta_eval"
-LABEL_META_EVAL_RESULTS_DIR = LABEL_META_EVAL_DIR / "results"
-
-# ============================================================================
-# LABELING (LEGACY - DEPRECATED, use LABEL_PRIMAIRE_DIR and LABEL_META_DIR)
-# ============================================================================
-
-LABELING_DIR = RESULTS_DIR / "labeling"
-LABELING_ARTIFACTS_DIR = LABELING_DIR / "artifacts"
-LABELING_OPTIMIZATION_FILE = LABELING_DIR / "labeling_optimization.json"
-LABELING_PARAMS_FILE = LABELING_DIR / "optimal_labeling_params.json"
-
-# Two-stage model artifacts
-META_LABELING_DIR = LABELING_DIR / "meta_labeling"
-PRIMARY_MODEL_FILE = META_LABELING_DIR / "primary_model.joblib"
-META_MODEL_FILE = META_LABELING_DIR / "meta_model.joblib"
-META_LABELING_RESULTS_FILE = META_LABELING_DIR / "results.json"
-
-# Events files (for meta-labeling)
-EVENTS_TRAIN_PARQUET = LABELING_DIR / "events_train.parquet"
-EVENTS_TEST_PARQUET = LABELING_DIR / "events_test.parquet"
-JOINT_OPTIMIZATION_FILE = LABELING_DIR / "joint_optimization.json"
 
 # ============================================================================
 # LABELED DATASETS
