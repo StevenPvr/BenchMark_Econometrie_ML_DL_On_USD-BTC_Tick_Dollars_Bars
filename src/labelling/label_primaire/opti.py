@@ -936,22 +936,27 @@ def select_models_interactive() -> List[str]:
                 return models.copy()
             
             # Parse multiple selections (comma or space separated)
-            raw_selections = choice.replace(",", " ").split()
+            # Remove parentheses and other non-alphanumeric separators, then split
+            cleaned_choice = choice.replace("(", " ").replace(")", " ").replace(",", " ").replace(";", " ")
+            raw_selections = cleaned_choice.split()
             selected_models: List[str] = []
             
             for sel in raw_selections:
                 sel = sel.strip()
                 if not sel:
                     continue
+                
+                # Remove any remaining non-digit characters for numeric selection
+                numeric_sel = "".join(c for c in sel if c.isdigit())
                     
-                if sel.isdigit():
-                    idx = int(sel) - 1
+                if numeric_sel and numeric_sel.isdigit():
+                    idx = int(numeric_sel) - 1
                     if 0 <= idx < len(models):
                         model_name = models[idx]
                         if model_name not in selected_models:
                             selected_models.append(model_name)
                     else:
-                        print(f"Index invalide: {sel}")
+                        print(f"Index invalide: {numeric_sel}")
                 elif sel.lower() in models:
                     if sel.lower() not in selected_models:
                         selected_models.append(sel.lower())
