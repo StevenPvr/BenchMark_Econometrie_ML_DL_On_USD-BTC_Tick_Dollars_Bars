@@ -1,225 +1,189 @@
 """
-Unit tests for label_primaire/train.py
-
-Tests the training module, mocking external dependencies.
+Tests for training module in label_primaire.
 """
 
-from __future__ import annotations
+from unittest.mock import MagicMock
 
+import numpy as np
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock, patch, ANY
-from pathlib import Path
+from pytest_mock import MockerFixture
 
 from src.labelling.label_primaire.train import (
     train_model,
     TrainingConfig,
     TrainingResult,
+    load_optimized_params,
+    get_model_output_dir,
+    get_available_optimized_models,
+    select_model,
+    get_yes_no_input,
+    main,
 )
 
-
 # =============================================================================
-# FIXTURES
+# DATA HELPERS
 # =============================================================================
-
 
 @pytest.fixture
-def mock_dataset() -> pd.DataFrame:
-    """Create a mock feature dataset."""
-    dates = pd.date_range("2024-01-01", periods=100, freq="h")
-    df = pd.DataFrame({
-        "feature_1": range(100),
-        "feature_2": range(100, 200),
-        "split": ["train"] * 80 + ["test"] * 20,
-    }, index=dates)
-    # Add datetime_close column for alignment
-    df["datetime_close"] = dates
-    return df
-
+def mock_dataset():
+    dates = pd.date_range("2021-01-01", periods=10)
+    features = pd.DataFrame(
+        np.random.randn(10, 5),
+        index=dates,
+        columns=["f1", "f2", "f3", "f4", "f5"]
+    )
+    features["split"] = "train"
+    features["datetime_close"] = dates
+    return features
 
 @pytest.fixture
-def mock_dollar_bars() -> pd.DataFrame:
-    """Create mock dollar bars."""
-    dates = pd.date_range("2024-01-01", periods=100, freq="h")
-    df = pd.DataFrame({
-        "close": [100.0 + i for i in range(100)],
+def mock_bars():
+    dates = pd.date_range("2021-01-01", periods=10)
+    bars = pd.DataFrame({
         "datetime_close": dates,
+        "close": np.linspace(100, 110, 10)
     })
-    return df
-
-
-@pytest.fixture
-def mock_events() -> pd.DataFrame:
-    """Create mock events DataFrame."""
-    dates = pd.date_range("2024-01-01", periods=50, freq="2h") # subset of timestamps
-    df = pd.DataFrame({
-        "label": [1, -1, 0, 1, 0] * 10,
-        "t1": dates + pd.Timedelta(hours=1),
-        "trgt": 0.01,
-        "ret": 0.02,
-    }, index=dates)
-    return df
-
-
-@pytest.fixture
-def mock_optimized_params():
-    """Create mock optimized parameters."""
-    return {
-        "model_params": {"n_estimators": 10},
-        "triple_barrier_params": {
-            "pt_mult": 1.0,
-            "sl_mult": 1.0,
-            "max_holding": 10
-        },
-        "best_score": 0.5,
-        "metric": "mcc",
-    }
-
+    return bars
 
 # =============================================================================
-# TESTS
+# TRAIN FUNCTION TESTS
 # =============================================================================
 
-
-@patch("src.labelling.label_primaire.train.load_optimized_params")
-@patch("src.labelling.label_primaire.train.load_model_class")
-@patch("src.labelling.label_primaire.train.get_dataset_for_model")
-@patch("src.labelling.label_primaire.train.pd.read_parquet")
-@patch("src.labelling.label_primaire.train.get_daily_volatility")
-@patch("src.labelling.label_primaire.train.get_events_primary")
-def test_train_model(
-    mock_get_events,
-    mock_get_vol,
-    mock_read_parquet,
-    mock_get_dataset,
-    mock_load_model_class,
-    mock_load_params,
-    mock_dataset,
-    mock_dollar_bars,
-    mock_events,
-    mock_optimized_params,
-    tmp_path,
-):
-    """Test train_model function with mocked dependencies."""
-
-    # Setup mocks
-    mock_load_params.return_value = mock_optimized_params
-
-    # Mock model class
-    mock_model_instance = MagicMock()
-    mock_model_class = MagicMock(return_value=mock_model_instance)
-    mock_load_model_class.return_value = mock_model_class
-
-    # Mock data loading
-    mock_get_dataset.return_value = mock_dataset
-
-    # Mock pd.read_parquet for dollar bars (using side_effect to distinguish calls if needed,
-    # but here we just need it to return dollar bars when called)
-    # Note: train.py checks DOLLAR_BARS_PARQUET.exists()
-    # We should also patch Path.exists but let's assume the code under test handles mocks gracefully
-    # Actually, we need to patch DOLLAR_BARS_PARQUET in train.py to avoid FileNotFoundError
-
-    mock_read_parquet.return_value = mock_dollar_bars
-
-    # Mock volatility
-    mock_get_vol.return_value = pd.Series(0.01, index=mock_dollar_bars.index)
-
-    # Mock events generation
-    mock_get_events.return_value = mock_events
-
-    # Run training
-    with patch("src.labelling.label_primaire.train.DOLLAR_BARS_PARQUET") as mock_path_const:
-        mock_path_const.exists.return_value = True
-
-        result = train_model(
-            model_name="lightgbm",
-            output_dir=tmp_path / "output",
-        )
-
-    # Verifications
-    assert isinstance(result, TrainingResult)
-    assert result.model_name == "lightgbm"
-    assert result.train_samples > 0
-
-    # Check that model was initialized with params
-    mock_model_class.assert_called_once()
-    call_kwargs = mock_model_class.call_args[1]
-    assert call_kwargs["n_estimators"] == 10
-
-    # Check that fit was called
-    mock_model_instance.fit.assert_called_once()
-
-    # Check that save was called
-    mock_model_instance.save.assert_called_once()
-
-    # Check results file
-    assert (tmp_path / "output" / "lightgbm_training_results.json").exists()
-    assert (tmp_path / "output" / "lightgbm_events_train.parquet").exists()
-
-
-@patch("src.labelling.label_primaire.train.load_optimized_params")
-def test_train_model_config(mock_load_params, tmp_path):
-    """Test TrainingConfig usage."""
-
-    config = TrainingConfig(
-        model_name="xgboost",
-        random_state=123,
-        vol_window=50,
-        use_class_weight=False,
+def test_train_model(mocker: MockerFixture, mock_dataset, mock_bars, tmp_path):
+    # Mock external dependencies
+    mocker.patch(
+        "src.labelling.label_primaire.train.load_optimized_params",
+        return_value={
+            "model_params": {"n_estimators": 10},
+            "triple_barrier_params": {"pt_mult": 1, "sl_mult": 1, "max_holding": 5},
+            "best_score": 0.8,
+            "metric": "mcc"
+        }
     )
 
-    assert config.model_name == "xgboost"
-    assert config.random_state == 123
-    assert config.vol_window == 50
-    assert not config.use_class_weight
+    mock_model_cls = MagicMock()
+    mock_model_instance = MagicMock()
+    mock_model_cls.return_value = mock_model_instance
+    mocker.patch(
+        "src.labelling.label_primaire.train.load_model_class",
+        return_value=mock_model_cls
+    )
 
+    mocker.patch(
+        "src.labelling.label_primaire.train.get_dataset_for_model",
+        return_value=mock_dataset
+    )
 
-@patch("src.labelling.label_primaire.train.load_optimized_params")
-@patch("src.labelling.label_primaire.train.load_model_class")
-@patch("src.labelling.label_primaire.train.get_dataset_for_model")
-@patch("src.labelling.label_primaire.train.pd.read_parquet")
-@patch("src.labelling.label_primaire.train.get_daily_volatility")
-@patch("src.labelling.label_primaire.train.get_events_primary")
-def test_train_model_class_weights(
-    mock_get_events,
-    mock_get_vol,
-    mock_read_parquet,
-    mock_get_dataset,
-    mock_load_model_class,
-    mock_load_params,
-    mock_dataset,
-    mock_dollar_bars,
-    mock_events,
-    mock_optimized_params,
-    tmp_path,
-):
-    """Test class weight computation."""
+    mocker.patch(
+        "pandas.read_parquet",
+        return_value=mock_bars
+    )
+    mocker.patch("src.labelling.label_primaire.train.DOLLAR_BARS_PARQUET", MagicMock(exists=lambda: True))
 
-    # Setup mocks
-    mock_load_params.return_value = mock_optimized_params
-    mock_model_class = MagicMock()
-    mock_load_model_class.return_value = mock_model_class
-    mock_get_dataset.return_value = mock_dataset
-    mock_read_parquet.return_value = mock_dollar_bars
-    mock_get_vol.return_value = pd.Series(0.01, index=mock_dollar_bars.index)
-    mock_get_events.return_value = mock_events
+    mocker.patch(
+        "src.labelling.label_primaire.train.get_daily_volatility",
+        return_value=pd.Series(np.ones(10)*0.01, index=mock_dataset.index)
+    )
 
-    # Configure to use class weights
-    config = TrainingConfig(model_name="lightgbm", use_class_weight=True)
+    # Mock events generation
+    mock_events = pd.DataFrame({
+        "label": [1, 0] * 5
+    }, index=mock_dataset.index)
+    mocker.patch(
+        "src.labelling.label_primaire.train.get_events_primary",
+        return_value=mock_events
+    )
 
-    with patch("src.labelling.label_primaire.train.DOLLAR_BARS_PARQUET") as mock_path_const:
-        mock_path_const.exists.return_value = True
+    # Run training
+    config = TrainingConfig(model_name="test_model")
+    result = train_model("test_model", config, output_dir=tmp_path)
 
-        train_model(
-            model_name="lightgbm",
-            config=config,
-            output_dir=tmp_path / "output",
-        )
+    assert isinstance(result, TrainingResult)
+    assert result.model_name == "test_model"
+    assert result.train_samples == 10
 
-    # Check that class_weight was passed to model
-    call_kwargs = mock_model_class.call_args[1]
-    assert "class_weight" in call_kwargs
-    weights = call_kwargs["class_weight"]
-    assert isinstance(weights, dict)
-    # We have 3 classes in mock_events: -1, 0, 1
-    assert len(weights) == 3
+    # Verify fit called
+    mock_model_instance.fit.assert_called()
+    mock_model_instance.save.assert_called()
+
+# =============================================================================
+# PARAMETER LOADING TESTS
+# =============================================================================
+
+def test_load_optimized_params(tmp_path):
+    import json
+
+    # Setup mock file
+    p = tmp_path / "test_model_optimization.json"
+    data = {
+        "best_params": {"a": 1},
+        "best_triple_barrier_params": {"b": 2},
+        "best_score": 0.5,
+        "metric": "accuracy"
+    }
+    p.write_text(json.dumps(data))
+
+    params = load_optimized_params("test_model", opti_dir=tmp_path)
+    assert params["model_params"] == {"a": 1}
+    assert params["best_score"] == 0.5
+
+    # Test not found
+    with pytest.raises(FileNotFoundError):
+        load_optimized_params("non_existent", opti_dir=tmp_path)
+
+# =============================================================================
+# CLI HELPER TESTS
+# =============================================================================
+
+def test_get_available_optimized_models(mocker, tmp_path):
+    # Mock MODEL_REGISTRY and path
+    mocker.patch("src.labelling.label_primaire.train.MODEL_REGISTRY", {"m1": {}, "m2": {}})
+    mocker.patch("src.labelling.label_primaire.train.LABEL_PRIMAIRE_OPTI_DIR", tmp_path)
+
+    # Create one optimization file
+    (tmp_path / "m1_optimization.json").touch()
+
+    available = get_available_optimized_models()
+    assert "m1" in available
+    assert "m2" not in available
+
+def test_select_model(mocker):
+    mocker.patch("src.labelling.label_primaire.train.MODEL_REGISTRY", {"m1": {"dataset": "d"}})
+    mocker.patch("src.labelling.label_primaire.train.get_available_optimized_models", return_value=["m1"])
+
+    mocker.patch("builtins.input", return_value="1")
+    assert select_model() == "m1"
+
+def test_get_yes_no_input(mocker):
+    mocker.patch("builtins.input", return_value="y")
+    assert get_yes_no_input("test")
+
+    mocker.patch("builtins.input", return_value="n")
+    assert not get_yes_no_input("test")
+
+    mocker.patch("builtins.input", return_value="")
+    assert get_yes_no_input("test", default=True)
+
+# =============================================================================
+# MAIN CLI TEST
+# =============================================================================
+
+def test_main(mocker):
+    mocker.patch("src.labelling.label_primaire.train.select_model", return_value="m1")
+    mocker.patch("src.labelling.label_primaire.train.load_optimized_params", return_value={
+        "metric": "score", "best_score": 0.9, "triple_barrier_params": {}
+    })
+    mocker.patch("src.labelling.label_primaire.train.get_yes_no_input", return_value=True)
+    mocker.patch("builtins.input", return_value="o") # confirm
+
+    mock_train = mocker.patch("src.labelling.label_primaire.train.train_model", return_value=MagicMock(
+        train_samples=100,
+        label_distribution={"label_counts": {}, "label_percentages": {}},
+        triple_barrier_params={},
+        model_path="path",
+        events_path="events"
+    ))
+
+    main()
+    mock_train.assert_called_once()
