@@ -432,14 +432,30 @@ def _evaluate_fold(
     val_idx: np.ndarray,
     model_class: Type[BaseModel],
     model_params: Dict[str, Any],
-) -> float | None:
-    """Evaluate a single CV fold."""
+    model_name: str | None = None,
+    fold_idx: int | None = None,
+) -> Tuple[float | None, str]:
+    """Evaluate a single CV fold.
+    
+    Returns
+    -------
+    Tuple[float | None, str]
+        (score, reason) - score is None if evaluation failed, reason explains why.
+    """
+    model_prefix = f"[{model_name}] " if model_name else ""
+    fold_prefix = f"Fold {fold_idx}: " if fold_idx is not None else ""
+    
     try:
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
 
         if len(y_train.unique()) < 2:
-            return None
+            reason = (
+                f"{model_prefix}{fold_prefix}SKIP: only 1 class in training set "
+                f"(classes: {y_train.unique().tolist()})"
+            )
+            logger.debug(reason)
+            return None, reason
 
         # Compute class weights
         classes = np.unique(y_train)
@@ -453,10 +469,15 @@ def _evaluate_fold(
 
         # Weighted MCC
         sample_weights = np.array([weight_map.get(c, 1.0) for c in y_val])
-        return matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
+        score = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
+        return score, "OK"
 
-    except Exception:
-        return None
+    except Exception as e:
+        reason = (
+            f"{model_prefix}{fold_prefix}FAILED: {type(e).__name__}: {str(e)}"
+        )
+        logger.debug(reason)
+        return None, reason
 
 
 def _run_cv_scoring(
@@ -467,6 +488,7 @@ def _run_cv_scoring(
     model_params: Dict[str, Any],
     config: OptimizationConfig,
     trial_number: int | None = None,
+    model_name: str | None = None,
 ) -> Tuple[float, str]:
     """Run walk-forward CV and return mean score.
     
@@ -490,26 +512,35 @@ def _run_cv_scoring(
         return float("-inf"), reason
 
     cv_scores = []
-    failed_folds = 0
+    failed_folds = []
     
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
-        score = _evaluate_fold(X, y, train_idx, val_idx, model_class, model_params)
+        score, fold_reason = _evaluate_fold(
+            X, y, train_idx, val_idx, model_class, model_params,
+            model_name=model_name, fold_idx=fold_idx
+        )
         if score is not None:
             cv_scores.append(score)
         else:
-            failed_folds += 1
+            failed_folds.append(fold_reason)
 
     if len(cv_scores) == 0:
+        # Log all fold failures at INFO level for visibility
         reason = (
             f"{trial_prefix}SKIP: all {len(splits)} CV folds failed evaluation"
         )
-        logger.debug(reason)
+        logger.info(reason)
+        # Log first few failures in detail
+        for i, fail_reason in enumerate(failed_folds[:3]):
+            logger.info(f"  {fail_reason}")
+        if len(failed_folds) > 3:
+            logger.info(f"  ... and {len(failed_folds) - 3} more failures")
         return float("-inf"), reason
     
     mean_score = float(np.mean(cv_scores))
     reason = (
         f"{trial_prefix}OK: MCC={mean_score:.4f} "
-        f"({len(cv_scores)}/{len(splits)} folds, {failed_folds} failed)"
+        f"({len(cv_scores)}/{len(splits)} folds, {len(failed_folds)} failed)"
     )
     logger.debug(reason)
     return mean_score, reason
@@ -573,7 +604,8 @@ def create_objective(
             return float("-inf")
         
         score, reason = _run_cv_scoring(
-            X, y, events_aligned, model_class, model_params, config, trial_num
+            X, y, events_aligned, model_class, model_params, config, trial_num,
+            model_name=config.model_name
         )
         
         # Log result
