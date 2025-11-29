@@ -1,0 +1,33 @@
+# Environment virtuel
+venv/
+tick/
+
+# Fichiers Python compilés
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Données et résultats
+data/
+outputs/
+
+# Cache et dépendances volumineuses
+.mypy_cache/
+tick/lib/python3.10/site-packages/pygments/lexers
+tick/lib/python3.10/site-packages/numba/tests
+.coverage
+coverage.json
+coverage.xml
