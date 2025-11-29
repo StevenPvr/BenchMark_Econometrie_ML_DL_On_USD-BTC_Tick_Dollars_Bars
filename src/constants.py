@@ -279,8 +279,8 @@ GARCH_MODEL_PARAMS_COUNT: dict[str, int] = {
 # Crypto tick download defaults (used by ccxt pipeline + tests)
 EXCHANGE_ID: str = "binance"  # Try Binance for potentially more data
 SYMBOL: str = "BTC/USDT"  # Binance uses USDT instead of USD
-START_DATE: str = "2024-02-01"  # 3-month period for more data
-END_DATE: str = "2024-02-05"
+START_DATE: str = "2024-01-01"  # 3-month period for more data
+END_DATE: str = "2024-01-05"
 
 # Data conversion constants
 MAX_ERROR_DATES_DISPLAY: int = 5
@@ -447,3 +447,40 @@ TRIPLE_BARRIER_MIN_RETURN_MIN: float = 0.1  # 0.1% minimum return
 TRIPLE_BARRIER_MIN_RETURN_MAX: float = 2.0  # 2.0% maximum return
 TRIPLE_BARRIER_MAX_HOLDING_MIN: int = 5
 TRIPLE_BARRIER_MAX_HOLDING_MAX: int = 50
+
+# ============================================================================
+# DATA CLEANING - OUTLIER DETECTION (Financial Markets / Dollar Bars)
+# ============================================================================
+
+# MAD (Median Absolute Deviation) outlier detection
+# MAD is more robust than standard deviation for fat-tailed distributions
+# Reference: Huber, P.J. (1981). Robust Statistics
+OUTLIER_MAD_THRESHOLD: float = 5.0  # Number of MADs from median (5 = very conservative)
+OUTLIER_MAD_SCALING_FACTOR: float = 1.4826  # Consistency factor for normal distribution
+
+# Rolling Z-score outlier detection (adaptive to local volatility regime)
+OUTLIER_ROLLING_WINDOW: int = 1000  # Window size for rolling statistics
+OUTLIER_ROLLING_ZSCORE_THRESHOLD: float = 6.0  # Z-score threshold (6 sigma = very rare event)
+OUTLIER_MIN_PERIODS: int = 100  # Minimum periods before applying rolling filter
+
+# Price spike detection (consecutive tick comparison)
+# For crypto markets, flash crashes/spikes can exceed 10% in milliseconds
+OUTLIER_MAX_TICK_RETURN: float = 0.15  # Max allowed log-return between consecutive ticks (15%)
+OUTLIER_SPIKE_LOOKBACK: int = 3  # Check if price reverts within N ticks (flash crash detection)
+OUTLIER_SPIKE_REVERSION_THRESHOLD: float = 0.5  # If 50% reverts within lookback, it's a spike
+
+# Volume outlier detection
+OUTLIER_VOLUME_MAD_THRESHOLD: float = 10.0  # MADs for volume outliers (more lenient)
+OUTLIER_MIN_VOLUME: float = 1e-10  # Minimum valid volume (avoid zero/dust trades)
+
+# Dollar value outlier detection (price * volume anomalies)
+OUTLIER_DOLLAR_VALUE_MAD_THRESHOLD: float = 8.0  # MADs for dollar value outliers
+
+# Winsorization bounds (percentiles) - alternative to removal
+OUTLIER_WINSORIZE_LOWER_PERCENTILE: float = 0.001  # 0.1th percentile
+OUTLIER_WINSORIZE_UPPER_PERCENTILE: float = 0.999  # 99.9th percentile
+
+# Bid-ask bounce filtering (De Prado tick rule anomalies)
+# When price oscillates too rapidly, it may indicate data quality issues
+OUTLIER_TICK_RULE_OSCILLATION_WINDOW: int = 5  # Window to check tick rule sign changes
+OUTLIER_TICK_RULE_MAX_SIGN_CHANGES: int = 4  # Max allowed sign changes in window

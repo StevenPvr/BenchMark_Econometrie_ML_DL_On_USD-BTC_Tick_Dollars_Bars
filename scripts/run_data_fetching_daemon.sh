@@ -38,7 +38,7 @@ start_daemon() {
 
     # Start daemon in background
     nohup python3 -m src.data_fetching.main --daemon \
-         --delay 300 \
+         --delay 30 \
          >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
 
@@ -167,7 +167,7 @@ case "${1:-status}" in
         echo "  $0 base  # Use existing consolidated file as base"
         echo "  $0 start && sleep 3600 && $0 stop  # Run for 1 hour then consolidate"
         echo ""
-        echo "The daemon fetches data every 5 minutes automatically."
+        echo "The daemon fetches data every 30 seconds automatically."
         exit 1
         ;;
 esac
