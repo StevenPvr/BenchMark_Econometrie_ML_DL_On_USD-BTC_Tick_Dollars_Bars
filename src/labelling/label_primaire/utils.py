@@ -102,7 +102,8 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "dataset": "linear",
         "search_space": {
             "C": ("categorical", [0.5, 1.0, 5.0]),
-            "max_iter": ("categorical", [2000, 5000]),
+            "max_iter": ("categorical", [500, 1000, 2000]),
+            "tol": ("categorical", [1e-3, 1e-2]),
         },
     },
     # Deep Learning

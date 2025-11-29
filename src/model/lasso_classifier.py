@@ -26,8 +26,8 @@ class LassoClassifierModel(BaseModel):
         C: float = 1.0,
         fit_intercept: bool = True,
         normalize: bool = True,
-        max_iter: int = 10000,
-        tol: float = 1e-4,
+        max_iter: int = 1000,
+        tol: float = 1e-3,
         **kwargs: Any,
     ) -> None:
         """
@@ -41,10 +41,10 @@ class LassoClassifierModel(BaseModel):
             Whether to calculate the intercept.
         normalize : bool, default=True
             Whether to normalize features before training.
-        max_iter : int, default=10000
-            Maximum iterations for convergence.
-        tol : float, default=1e-4
-            Tolerance for stopping criteria.
+        max_iter : int, default=1000
+            Maximum iterations for convergence (reduced for faster training with SAGA solver).
+        tol : float, default=1e-3
+            Tolerance for stopping criteria (increased for faster convergence with SAGA solver).
         """
         super().__init__(
             name="LassoClassifier",
