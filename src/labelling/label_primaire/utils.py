@@ -217,6 +217,7 @@ def get_dataset_for_model(model_name: str) -> pd.DataFrame:
     if path is None or not path.exists():
         raise FileNotFoundError(f"Dataset not found for {dataset_type}: {path}")
 
+    logger.info(f"Loading dataset for {model_name}: {dataset_type} -> {path.name}")
     return pd.read_parquet(path)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -104,16 +105,19 @@ class LassoClassifierModel(BaseModel):
             X_arr = self.scaler.fit_transform(X_arr)
 
         # Use multinomial for multi-class
-        self.model = LogisticRegression(
-            penalty="l1",
-            C=self.C,
-            fit_intercept=self.fit_intercept,
-            max_iter=self.max_iter,
-            tol=self.tol,
-            solver="saga",  # saga supports L1 and multi-class
-            multi_class="multinomial",
-        )
-        self.model.fit(X_arr, y_arr)
+        # Suppress FutureWarning about multi_class deprecation (needed for L1 + multi-class)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, message=".*multi_class.*")
+            self.model = LogisticRegression(
+                penalty="l1",
+                C=self.C,
+                fit_intercept=self.fit_intercept,
+                max_iter=self.max_iter,
+                tol=self.tol,
+                solver="saga",  # saga supports L1 and multi-class
+                multi_class="multinomial",  # Required for L1 + multi-class
+            )
+            self.model.fit(X_arr, y_arr)
         self.is_fitted = True
         return self
 
