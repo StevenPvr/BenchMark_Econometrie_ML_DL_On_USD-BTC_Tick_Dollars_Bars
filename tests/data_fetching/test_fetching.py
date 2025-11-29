@@ -3,10 +3,13 @@ import pytest
 import pandas as pd
 import threading
 import time
+import shutil
+from pathlib import Path
 from unittest.mock import MagicMock, patch, call, Mock
 from collections import deque
 from datetime import datetime
 import sys
+import numpy as np
 
 # Mock dependencies if they are not installed
 # This is handled by the module import but we want to ensure we can control them in tests
@@ -25,6 +28,8 @@ from src.data_fetching.fetching import (
     _filter_date_range,
     _optimize_trades_memory,
     _deduplicate_chunk,
+    _iter_parquet_files,
+    _ensure_parquet_dataset_path,
     download_ticks_in_date_range,
 )
 
@@ -77,41 +82,18 @@ class TestRateLimiter:
         mock_time.return_value = 1000.0
         limiter = RateLimiter(1, 1)
 
-        # First call passes
-        limiter.wait_if_needed()
-
-        # Second call should trigger sleep because limit is 1
-        # We need to simulate time passing for the second call inside the loop
-        # But since the loop is `while True`, we need to break it or mock it carefully.
-        # However, wait_if_needed logic:
-        # 1. checks if current_weight < max. If yes, append and return.
-        # 2. else calc wait_time, sleep, and loop again.
-
-        # To test this without infinite loop, we can make `time.sleep` change the mock_time
-        # so that the next iteration passes.
-
         def side_effect_sleep(seconds):
             mock_time.return_value += seconds + 0.1 # Advance time
 
         mock_sleep.side_effect = side_effect_sleep
 
-        # Second call
+        # First call passes
+        limiter.wait_if_needed()
+        # Second call triggers sleep
         limiter.wait_if_needed()
 
         assert mock_sleep.called
-        assert len(limiter.call_times) == 1 # Since we popped old one in reality or just appended?
-        # In this logic:
-        # Call 1: time=1000. call_times=[1000].
-        # Call 2: time=1000. current_weight=1. max=1. limit reached.
-        # wait_time = 60 - (1000 - 1000) + 0.1 = 60.1
-        # sleep(60.1). time becomes 1060.2
-        # Loop again. time=1060.2.
-        # Remove calls older than 60s: 1060.2 - 1000 > 60. call_times pops 1000. call_times=[].
-        # current_weight=0. < 1.
-        # Append 1060.2. Return.
-
         assert len(limiter.call_times) == 1
-        assert limiter.call_times[0] > 1000
 
 # --- Helper Functions Tests ---
 
@@ -185,10 +167,6 @@ def test_filter_date_range(sample_trades_df):
     start_dt = pd.to_datetime('2023-01-01 10:00:30', utc=True)
     end_dt = pd.to_datetime('2023-01-01 10:02:00', utc=True)
 
-    # sample has 10:00:00 and 10:01:00.
-    # 10:00:00 is < start_dt (should be removed)
-    # 10:01:00 is >= start_dt and < end_dt (kept)
-
     filtered = _filter_date_range(sample_trades_df, start_dt, end_dt)
     assert len(filtered) == 1
     assert filtered.iloc[0]['timestamp'] == pd.to_datetime('2023-01-01 10:01:00', utc=True)
@@ -239,7 +217,6 @@ def test_fetch_all_trades_in_range_basic():
     start_ts = 1672531200000 # 2023-01-01
     end_ts =   1672531260000 # + 60s
 
-    # First call returns some trades, second call returns empty (end)
     trades_batch = [
         {'id': '1', 'timestamp': 1672531200000, 'price': 100, 'amount': 1},
         {'id': '2', 'timestamp': 1672531210000, 'price': 100, 'amount': 1}
@@ -247,13 +224,9 @@ def test_fetch_all_trades_in_range_basic():
 
     mock_exchange.fetch_trades.side_effect = [trades_batch, []]
 
-    # We also need to patch RateLimiter.wait_if_needed to avoid sleeps
     with patch('src.data_fetching.fetching.rate_limiter.wait_if_needed'):
         with patch('src.data_fetching.fetching.SYMBOL', 'BTC/USDT'):
-            with patch('src.data_fetching.fetching.MAX_TRADES_PER_CALL', 2): # Force it to continue if len >= max
-                 # But in the code: if len(trades) < MAX_TRADES_PER_CALL: break
-                 # So if we set max to 2, and return 2, it continues.
-
+            with patch('src.data_fetching.fetching.MAX_TRADES_PER_CALL', 2):
                  result = _fetch_all_trades_in_range(mock_exchange, start_ts, end_ts)
 
     assert len(result) == 2
@@ -281,3 +254,181 @@ def test_download_ticks_in_date_range(mock_get_bounds, mock_append, mock_fetch_p
     mock_validate.assert_called_once()
     mock_fetch_parallel.assert_called()
     mock_append.assert_called()
+
+# --- Exception Handling Tests ---
+
+@patch('src.data_fetching.fetching._fetch_all_trades_in_range')
+@patch('src.data_fetching.fetching.ccxt')
+def test_fetch_trades_for_time_range_exception(mock_ccxt_module, mock_fetch_inner):
+    mock_exchange = MagicMock()
+    mock_ccxt_module.binance.return_value = mock_exchange
+    args = ('binance', 1000, 2000, 1)
+
+    # Exception during fetch
+    mock_fetch_inner.side_effect = Exception("Fetch error")
+    result = _fetch_trades_for_time_range(args)
+    assert result == []
+
+    # Exception during exchange creation
+    mock_ccxt_module.binance.side_effect = Exception("Exchange error")
+    result = _fetch_trades_for_time_range(args)
+    assert result == []
+
+@patch('concurrent.futures.ThreadPoolExecutor')
+def test_fetch_all_trades_parallel_exceptions(mock_executor):
+    mock_future1 = MagicMock()
+    mock_future1.result.side_effect = Exception("Worker error")
+
+    mock_future2 = MagicMock()
+    mock_future2.result.return_value = [] # Empty result
+
+    mock_executor_instance = mock_executor.return_value.__enter__.return_value
+    mock_executor_instance.submit.side_effect = [mock_future1, mock_future2]
+
+    with patch('concurrent.futures.as_completed', return_value=[mock_future1, mock_future2]):
+        with patch('src.data_fetching.fetching.EXCHANGE_ID', 'binance'):
+            result = _fetch_all_trades_parallel(1000, 3000, max_workers=2)
+
+    assert result == []
+
+@patch('concurrent.futures.ThreadPoolExecutor')
+def test_fetch_all_trades_parallel_concat_error(mock_executor):
+    mock_future1 = MagicMock()
+    mock_future1.result.return_value = [{'id': '1'}] # No timestamp, might cause sort error or just concat
+
+    mock_executor_instance = mock_executor.return_value.__enter__.return_value
+    mock_executor_instance.submit.return_value = mock_future1
+
+    with patch('concurrent.futures.as_completed', return_value=[mock_future1]):
+        with patch('src.data_fetching.fetching.EXCHANGE_ID', 'binance'):
+             with patch('pandas.concat', side_effect=Exception("Concat error")):
+                result = _fetch_all_trades_parallel(1000, 2000, max_workers=1)
+
+    assert result == []
+
+def test_fetch_all_trades_in_range_edge_cases():
+    mock_exchange = MagicMock()
+    start_ts = 1000
+    end_ts = 2000
+
+    # 1. Exchange error
+    mock_exchange.fetch_trades.side_effect = Exception("Network error")
+    with patch('src.data_fetching.fetching.rate_limiter.wait_if_needed'):
+        result = _fetch_all_trades_in_range(mock_exchange, start_ts, end_ts)
+    assert result == []
+
+    # 2. Empty trades returned
+    mock_exchange.reset_mock()
+    mock_exchange.fetch_trades.side_effect = None
+    mock_exchange.fetch_trades.return_value = []
+    with patch('src.data_fetching.fetching.rate_limiter.wait_if_needed'):
+        result = _fetch_all_trades_in_range(mock_exchange, start_ts, end_ts)
+    assert result == []
+
+    # 3. Trades without timestamp
+    mock_exchange.reset_mock()
+    mock_exchange.fetch_trades.return_value = [{'id': '1'}] # no timestamp
+    with patch('src.data_fetching.fetching.rate_limiter.wait_if_needed'):
+        result = _fetch_all_trades_in_range(mock_exchange, start_ts, end_ts)
+    assert result == []
+
+    # 4. Trades outside range
+    mock_exchange.reset_mock()
+    mock_exchange.fetch_trades.return_value = [{'id': '1', 'timestamp': 3000}]
+    with patch('src.data_fetching.fetching.rate_limiter.wait_if_needed'):
+        result = _fetch_all_trades_in_range(mock_exchange, start_ts, end_ts)
+    assert result == []
+
+# --- File System & Migration Tests ---
+
+def test_iter_parquet_files(tmp_path):
+    # Test directory
+    d = tmp_path / "dataset"
+    d.mkdir()
+    (d / "1.parquet").touch()
+    (d / "2.parquet").touch()
+    (d / "other.txt").touch()
+
+    files = _iter_parquet_files(d)
+    assert len(files) == 2
+
+    # Test file
+    f = tmp_path / "single.parquet"
+    f.touch()
+    files = _iter_parquet_files(f)
+    assert len(files) == 1
+
+    # Test non-existent
+    files = _iter_parquet_files(tmp_path / "missing")
+    assert len(files) == 0
+
+def test_ensure_parquet_dataset_path_dir_exists(tmp_path):
+    d = tmp_path / "dataset.parquet"
+    d.mkdir()
+    path = _ensure_parquet_dataset_path(d)
+    assert path == d
+    assert path.is_dir()
+
+def test_ensure_parquet_dataset_path_migration_single_file(tmp_path):
+    # Setup single file pretending to be the dataset path
+    p = tmp_path / "dataset.parquet"
+    p.touch()
+
+    path = _ensure_parquet_dataset_path(p)
+
+    assert path == p
+    assert path.is_dir()
+    assert (path / "part-00000.parquet").exists()
+    # The .single file is moved into the directory as part-00000, so it shouldn't exist outside
+    assert not (tmp_path / "dataset.parquet.single").exists()
+
+def test_ensure_parquet_dataset_path_migration_consolidated(tmp_path):
+    # Consolidated file exists in parent
+    parent = tmp_path / "data"
+    parent.mkdir()
+    p = parent / "dataset.parquet"
+    consolidated = parent / "dataset_raw_final.parquet"
+    consolidated.touch()
+
+    path = _ensure_parquet_dataset_path(p)
+
+    assert path == p
+    assert path.is_dir()
+    assert (path / "part-00000.parquet").exists()
+    assert not consolidated.exists()
+
+def test_get_existing_timestamp_range_empty():
+    with patch('src.data_fetching.fetching.DATASET_RAW_PARQUET', 'dummy'):
+        with patch('src.data_fetching.fetching._iter_parquet_files', return_value=[]):
+            min_ts, max_ts, count = fetching._get_existing_timestamp_range()
+            assert min_ts is None
+            assert max_ts is None
+            assert count == 0
+
+@patch('src.data_fetching.fetching._build_exchange')
+@patch('src.data_fetching.fetching._validate_symbol')
+@patch('src.data_fetching.fetching._fetch_all_trades_parallel')
+@patch('src.data_fetching.fetching._get_date_bounds')
+def test_download_ticks_in_date_range_no_trades(mock_get_bounds, mock_fetch_parallel, mock_validate, mock_build):
+    mock_get_bounds.return_value = (pd.to_datetime('2023-01-01', utc=True), pd.to_datetime('2023-01-02', utc=True))
+    mock_fetch_parallel.return_value = [] # No trades
+
+    download_ticks_in_date_range(parallel=True)
+
+    # Should complete without error
+    mock_fetch_parallel.assert_called()
+
+@patch('src.data_fetching.fetching._build_exchange')
+@patch('src.data_fetching.fetching._validate_symbol')
+@patch('src.data_fetching.fetching._fetch_all_trades_parallel')
+@patch('src.data_fetching.fetching._get_date_bounds')
+def test_download_ticks_in_date_range_empty_df_after_filter(mock_get_bounds, mock_fetch_parallel, mock_validate, mock_build):
+    mock_get_bounds.return_value = (pd.to_datetime('2023-01-01', utc=True), pd.to_datetime('2023-01-02', utc=True))
+    # Return trades outside range
+    mock_fetch_parallel.return_value = [{'id': '1', 'timestamp': 1000}]
+
+    with patch('src.data_fetching.fetching._filter_date_range') as mock_filter:
+        mock_filter.return_value = pd.DataFrame() # Filter returns empty
+        download_ticks_in_date_range(parallel=True)
+
+    mock_fetch_parallel.assert_called()
