@@ -109,6 +109,9 @@ def compute_all_technical_indicators(
         df_bars[[open_col, high_col, low_col, close_col, volume_col]].copy(),
     )
 
+    # Capture original columns before modification (ta library modifies in-place)
+    original_cols = set(df_work.columns)
+
     # Suppress warnings from ta library (division by zero, etc.)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -124,7 +127,6 @@ def compute_all_technical_indicators(
         )
 
     # Extract only the new TA columns (exclude original OHLCV)
-    original_cols = set(df_work.columns)
     ta_cols = [c for c in df_with_ta.columns if c not in original_cols]
 
     result = cast(pd.DataFrame, df_with_ta[ta_cols].copy())
