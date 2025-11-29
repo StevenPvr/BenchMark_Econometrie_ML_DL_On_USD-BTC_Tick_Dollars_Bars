@@ -245,7 +245,7 @@ def compute_tsne_embedding(
 
     # Adjust perplexity if needed
     n_features = X_T.shape[0]
-    effective_perplexity = min(perplexity, max(5, n_features // 4))
+    effective_perplexity = int(min(perplexity, max(1, n_features - 1)))
 
     if effective_perplexity != perplexity:
         logger.warning(
