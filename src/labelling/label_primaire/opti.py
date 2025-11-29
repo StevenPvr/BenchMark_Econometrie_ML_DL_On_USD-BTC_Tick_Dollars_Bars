@@ -340,29 +340,77 @@ def _generate_trial_events(
     )
 
 
-def _validate_events(events: pd.DataFrame, config: OptimizationConfig) -> bool:
-    """Validate that events are suitable for training."""
-    if events.empty or len(events) < config.min_train_size:
-        return False
-    if len(events["label"].value_counts()) < 2:
-        return False
-    return True
+def _validate_events(
+    events: pd.DataFrame, 
+    config: OptimizationConfig,
+    trial_number: int | None = None,
+) -> Tuple[bool, str]:
+    """Validate that events are suitable for training.
+    
+    Returns
+    -------
+    Tuple[bool, str]
+        (is_valid, reason) - reason explains why validation failed if not valid.
+    """
+    trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
+    
+    if events.empty:
+        reason = f"{trial_prefix}SKIP: events DataFrame is empty"
+        logger.debug(reason)
+        return False, reason
+    
+    if len(events) < config.min_train_size:
+        reason = (
+            f"{trial_prefix}SKIP: not enough events "
+            f"({len(events)} < {config.min_train_size} min_train_size)"
+        )
+        logger.debug(reason)
+        return False, reason
+    
+    label_counts = events["label"].value_counts()
+    n_classes = len(label_counts)
+    
+    if n_classes < 2:
+        reason = (
+            f"{trial_prefix}SKIP: only {n_classes} class(es) in labels "
+            f"(need 2+). Distribution: {label_counts.to_dict()}"
+        )
+        logger.debug(reason)
+        return False, reason
+    
+    return True, "OK"
 
 
 def _align_features_events(
     features_df: pd.DataFrame,
     events: pd.DataFrame,
     config: OptimizationConfig,
-) -> Tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None]:
-    """Align features with events on common index."""
+    trial_number: int | None = None,
+) -> Tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]:
+    """Align features with events on common index.
+    
+    Returns
+    -------
+    Tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]
+        (X, y, events_aligned, reason) - reason explains failure if any.
+    """
+    trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
+    
     common_idx = events.index.intersection(features_df.index)
+    
     if len(common_idx) < config.min_train_size:
-        return None, None, None
+        reason = (
+            f"{trial_prefix}SKIP: not enough common indices after alignment "
+            f"({len(common_idx)} < {config.min_train_size} min_train_size). "
+            f"Events: {len(events)}, Features: {len(features_df)}"
+        )
+        logger.debug(reason)
+        return None, None, None, reason
 
     X = features_df.loc[common_idx]
     y = events.loc[common_idx, "label"]
     events_aligned = events.loc[common_idx]
-    return X, y, events_aligned
+    return X, y, events_aligned, "OK"
 
 
 def _sample_model_params(
@@ -418,23 +466,53 @@ def _run_cv_scoring(
     model_class: Type[BaseModel],
     model_params: Dict[str, Any],
     config: OptimizationConfig,
-) -> float:
-    """Run walk-forward CV and return mean score."""
+    trial_number: int | None = None,
+) -> Tuple[float, str]:
+    """Run walk-forward CV and return mean score.
+    
+    Returns
+    -------
+    Tuple[float, str]
+        (score, reason) - reason explains the result.
+    """
+    trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
+    
     cv = WalkForwardCV(
         n_splits=config.n_splits,
         min_train_size=config.min_train_size,
         embargo_pct=0.01,
     )
 
+    splits = cv.split(X, events)
+    if len(splits) == 0:
+        reason = f"{trial_prefix}SKIP: no valid CV splits generated"
+        logger.debug(reason)
+        return float("-inf"), reason
+
     cv_scores = []
-    for train_idx, val_idx in cv.split(X, events):
+    failed_folds = 0
+    
+    for fold_idx, (train_idx, val_idx) in enumerate(splits):
         score = _evaluate_fold(X, y, train_idx, val_idx, model_class, model_params)
         if score is not None:
             cv_scores.append(score)
+        else:
+            failed_folds += 1
 
     if len(cv_scores) == 0:
-        return float("-inf")
-    return float(np.mean(cv_scores))
+        reason = (
+            f"{trial_prefix}SKIP: all {len(splits)} CV folds failed evaluation"
+        )
+        logger.debug(reason)
+        return float("-inf"), reason
+    
+    mean_score = float(np.mean(cv_scores))
+    reason = (
+        f"{trial_prefix}OK: MCC={mean_score:.4f} "
+        f"({len(cv_scores)}/{len(splits)} folds, {failed_folds} failed)"
+    )
+    logger.debug(reason)
+    return mean_score, reason
 
 
 def create_objective(
@@ -444,28 +522,68 @@ def create_objective(
     volatility: pd.Series,
     model_class: Type[BaseModel],
     model_search_space: Dict[str, Any],
+    verbose: bool = True,
 ) -> Callable[[optuna.Trial], float]:
-    """Create Optuna objective for joint optimization."""
+    """Create Optuna objective for joint optimization.
+    
+    Parameters
+    ----------
+    config : OptimizationConfig
+        Optimization configuration.
+    features_df : pd.DataFrame
+        Feature DataFrame.
+    close : pd.Series
+        Close prices.
+    volatility : pd.Series
+        Volatility estimates.
+    model_class : Type[BaseModel]
+        Model class to optimize.
+    model_search_space : Dict[str, Any]
+        Model hyperparameter search space.
+    verbose : bool, default=True
+        If True, log trial failures at INFO level (visible).
+        If False, log at DEBUG level only.
+    """
+    log_level = logging.INFO if verbose else logging.DEBUG
 
     def objective(trial: optuna.Trial) -> float:
+        trial_num = trial.number
+        
         # Sample and generate events
         tb_params = _sample_barrier_params(trial)
         events = _generate_trial_events(features_df, close, volatility, tb_params)
 
         # Validate events
-        if not _validate_events(events, config):
+        is_valid, reason = _validate_events(events, config, trial_num)
+        if not is_valid:
+            logger.log(log_level, reason)
             return float("-inf")
 
         # Prepare data
-        X, y, events_aligned = _align_features_events(features_df, events, config)
+        X, y, events_aligned, reason = _align_features_events(
+            features_df, events, config, trial_num
+        )
         if X is None:
+            logger.log(log_level, reason)
             return float("-inf")
 
         # Sample model params and run CV
         model_params = _sample_model_params(trial, model_search_space, config)
         if X is None or y is None or events_aligned is None:
             return float("-inf")
-        return _run_cv_scoring(X, y, events_aligned, model_class, model_params, config)
+        
+        score, reason = _run_cv_scoring(
+            X, y, events_aligned, model_class, model_params, config, trial_num
+        )
+        
+        # Log result
+        if score == float("-inf"):
+            logger.log(log_level, reason)
+        else:
+            # Always log successful trials at INFO
+            logger.info(reason)
+        
+        return score
 
     return objective
 
