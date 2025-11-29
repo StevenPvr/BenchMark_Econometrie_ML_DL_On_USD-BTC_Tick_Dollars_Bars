@@ -39,6 +39,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from src.config_logging import get_logger, setup_logging  # noqa: E402
+from src.constants import DEFAULT_RANDOM_STATE  # noqa: E402
 from src.path import DATASET_FEATURES_PARQUET  # noqa: E402
 
 from src.analyse_features.config import (  # noqa: E402
@@ -51,6 +52,7 @@ from src.analyse_features.config import (  # noqa: E402
     CLUSTERING_RESULTS_JSON,
     TEMPORAL_RESULTS_JSON,
     SUMMARY_JSON,
+    DATASET_SAMPLE_FRACTION,
     ensure_directories,
 )
 from src.analyse_features.correlation import run_correlation_analysis  # noqa: E402
@@ -86,7 +88,10 @@ def _convert_to_serializable(obj: Any) -> Any:
     elif isinstance(obj, pd.Series):
         return obj.to_dict()
     elif isinstance(obj, dict):
-        return {k: _convert_to_serializable(v) for k, v in obj.items()}
+        return {
+            _convert_to_serializable(k): _convert_to_serializable(v)
+            for k, v in obj.items()
+        }
     elif isinstance(obj, list):
         return [_convert_to_serializable(v) for v in obj]
     elif isinstance(obj, Path):
@@ -335,6 +340,20 @@ def load_features(
         df = df.drop(columns=["split"])
         logger.info("Filtered to train split: %d -> %d rows", initial_rows, len(df))
 
+    # Sample fraction of dataset for analysis
+    if DATASET_SAMPLE_FRACTION < 1.0:
+        rows_before_sample = len(df)
+        df = df.sample(
+            frac=DATASET_SAMPLE_FRACTION,
+            random_state=DEFAULT_RANDOM_STATE,
+        ).reset_index(drop=True)
+        logger.info(
+            "Sampled %.1f%% of dataset: %d -> %d rows",
+            DATASET_SAMPLE_FRACTION * 100,
+            rows_before_sample,
+            len(df),
+        )
+
     # Get feature columns (numeric, excluding target and metadata)
     exclude_cols = {TARGET_COLUMN, "split", "index", "timestamp", "datetime", "date"}
     numeric_cols = df.select_dtypes(include=["number"]).columns
@@ -360,7 +379,7 @@ def run_all_analyses(
     Args:
         df: DataFrame with features.
         feature_columns: Feature columns to analyze.
-        compute_dcor: Whether to compute distance correlation (slow).
+        compute_dcor: Whether to compute distance correlation (deprecated, ignored).
         compute_umap: Whether to compute UMAP (requires umap-learn).
         generate_plots: Whether to generate visualizations.
 

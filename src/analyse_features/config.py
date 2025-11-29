@@ -31,7 +31,7 @@ CHUNK_SIZE: int = 50
 JOBLIB_BACKEND: str = "loky"  # 'loky' (default), 'multiprocessing', 'threading'
 
 # Verbosity level for joblib (0=silent, 10=verbose)
-JOBLIB_VERBOSITY: int = 5
+JOBLIB_VERBOSITY: int = 0
 
 # ============================================================================
 # OUTPUT PATHS
@@ -59,14 +59,18 @@ PLOTS_PNG_DIR: Path = ANALYSE_FEATURES_DIR / "plots" / "png"
 CACHE_DIR: Path = ANALYSE_FEATURES_DIR / "cache"
 
 # ============================================================================
+# DATA SAMPLING SETTINGS
+# ============================================================================
+
+# Fraction of dataset to use for analysis (0.2 = 20%)
+DATASET_SAMPLE_FRACTION: float = 0.2
+
+# ============================================================================
 # CORRELATION ANALYSIS SETTINGS
 # ============================================================================
 
 # Spearman correlation threshold for "high correlation"
 SPEARMAN_HIGH_CORR_THRESHOLD: float = 0.7
-
-# Distance correlation sample size (for speed)
-DCOR_SAMPLE_SIZE: int | None = 10000  # None = use all data
 
 # Mutual information settings
 MI_N_NEIGHBORS: int = 5  # k-NN for MI estimation

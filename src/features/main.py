@@ -555,21 +555,18 @@ def get_columns_to_scale(
     return cols_to_scale
 
 
-def create_scaled_datasets(
+def fit_and_save_scalers(
     df_train: pd.DataFrame,
-    df_test: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Create scaled datasets for linear models and LSTM.
+) -> None:
+    """Fit scalers on training data and save them for later use.
 
-    CRITICAL: Scalers are fit on TRAIN only, then applied to both train and test.
-    This prevents data leakage from test to train.
+    NOTE: Scalers are fit here but NOT applied. The actual normalization
+    happens in clear_features after PCA reduction and log transformation.
+
+    CRITICAL: Scalers are fit on TRAIN only to prevent data leakage.
 
     Args:
         df_train: Training DataFrame.
-        df_test: Test DataFrame.
-
-    Returns:
-        Tuple of (train_linear, test_linear, train_lstm, test_lstm).
     """
     SCALERS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -577,7 +574,7 @@ def create_scaled_datasets(
     # Z-SCORE FOR LINEAR MODELS
     # Exclude log_return (target) and its lags
     # =========================================================================
-    logger.info("Creating z-scored dataset for linear models...")
+    logger.info("Fitting z-score scaler for linear models (NOT applying)...")
 
     cols_zscore = get_columns_to_scale(
         df_train,
@@ -589,9 +586,6 @@ def create_scaled_datasets(
     zscore_scaler.fit(df_train, cols_zscore)
     zscore_scaler.save(ZSCORE_SCALER_FILE)
 
-    train_linear = zscore_scaler.transform(df_train)
-    test_linear = zscore_scaler.transform(df_test)
-
     logger.info(
         "Z-score scaler fit on %d columns, saved to %s",
         len(cols_zscore),
@@ -602,7 +596,7 @@ def create_scaled_datasets(
     # MIN-MAX FOR LSTM
     # Include log_return lags (they are features), exclude log_return (target)
     # =========================================================================
-    logger.info("Creating min-max scaled dataset for LSTM...")
+    logger.info("Fitting min-max scaler for LSTM (NOT applying)...")
 
     cols_minmax = get_columns_to_scale(
         df_train,
@@ -614,16 +608,13 @@ def create_scaled_datasets(
     minmax_scaler.fit(df_train, cols_minmax)
     minmax_scaler.save(MINMAX_SCALER_FILE)
 
-    train_lstm = minmax_scaler.transform(df_train)
-    test_lstm = minmax_scaler.transform(df_test)
-
     logger.info(
         "Min-max scaler fit on %d columns, saved to %s",
         len(cols_minmax),
         MINMAX_SCALER_FILE,
     )
 
-    return train_linear, test_linear, train_lstm, test_lstm
+    logger.info("Scalers saved. Normalization will be applied in clear_features module.")
 
 
 def compute_timestamp_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -696,24 +687,22 @@ def drop_timestamp_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_outputs(
     df_features: pd.DataFrame,
-    df_features_linear: pd.DataFrame,
-    df_features_lstm: pd.DataFrame,
 ) -> None:
-    """Save feature datasets to files.
+    """Save feature dataset to files.
+
+    NOTE: Only saves the raw (unscaled) dataset. Linear and LSTM datasets
+    with normalization will be created by clear_features module after
+    PCA reduction and log transformation.
 
     Args:
         df_features: Raw features for ML models.
-        df_features_linear: Z-scored features for linear models.
-        df_features_lstm: Min-max scaled features for LSTM.
     """
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Drop timestamp columns from all datasets before saving
+    # Drop timestamp columns before saving
     df_features = drop_timestamp_columns(df_features)
-    df_features_linear = drop_timestamp_columns(df_features_linear)
-    df_features_lstm = drop_timestamp_columns(df_features_lstm)
 
-    # Save raw ML features
+    # Save raw ML features (tree-based models don't need scaling)
     logger.info("Saving dataset_features to %s", DATASET_FEATURES_PARQUET)
     df_features.to_parquet(DATASET_FEATURES_PARQUET, index=False)
     logger.info(
@@ -722,23 +711,12 @@ def save_outputs(
         len(df_features.columns),
     )
 
-    # Save z-scored linear features
-    logger.info("Saving dataset_features_linear to %s", DATASET_FEATURES_LINEAR_PARQUET)
-    df_features_linear.to_parquet(DATASET_FEATURES_LINEAR_PARQUET, index=False)
-    logger.info(
-        "Saved dataset_features_linear: %d rows, %d columns",
-        len(df_features_linear),
-        len(df_features_linear.columns),
-    )
+    # Also save copies for linear and lstm (will be normalized in clear_features)
+    logger.info("Saving dataset_features_linear to %s (unscaled, will be normalized in clear_features)", DATASET_FEATURES_LINEAR_PARQUET)
+    df_features.to_parquet(DATASET_FEATURES_LINEAR_PARQUET, index=False)
 
-    # Save min-max LSTM features
-    logger.info("Saving dataset_features_lstm to %s", DATASET_FEATURES_LSTM_PARQUET)
-    df_features_lstm.to_parquet(DATASET_FEATURES_LSTM_PARQUET, index=False)
-    logger.info(
-        "Saved dataset_features_lstm: %d rows, %d columns",
-        len(df_features_lstm),
-        len(df_features_lstm.columns),
-    )
+    logger.info("Saving dataset_features_lstm to %s (unscaled, will be normalized in clear_features)", DATASET_FEATURES_LSTM_PARQUET)
+    df_features.to_parquet(DATASET_FEATURES_LSTM_PARQUET, index=False)
 
 
 def _split_dataframe_for_output(
@@ -809,7 +787,18 @@ def save_train_test_splits() -> None:
 
 
 def main() -> None:
-    """Run the complete feature engineering pipeline."""
+    """Run the complete feature engineering pipeline.
+
+    Pipeline flow:
+    1. Load dollar bars
+    2. Compute all features + lags
+    3. Clean NaN rows
+    4. Split train/test
+    5. Fit scalers on train (save for later use in clear_features)
+    6. Save raw datasets (normalization happens in clear_features)
+
+    Next step: Run clear_features to apply PCA, log transform, and scaling.
+    """
     setup_logging()
 
     logger.info("=" * 60)
@@ -844,32 +833,28 @@ def main() -> None:
         df_test["split"] = "test"
         df_features_with_split = pd.concat([df_train, df_test], axis=0)
 
-        # 9. Create scaled datasets (fit on train only!)
-        train_linear, test_linear, train_lstm, test_lstm = create_scaled_datasets(
-            df_train, df_test
-        )
-        train_linear["split"] = "train"
-        test_linear["split"] = "test"
-        train_lstm["split"] = "train"
-        test_lstm["split"] = "test"
+        # 9. Fit and save scalers (NOT applying normalization here)
+        # Normalization will be applied in clear_features after PCA + log transform
+        fit_and_save_scalers(df_train)
 
-        # 10. Concatenate train + test for final datasets
-        df_features_linear = pd.concat([train_linear, test_linear], axis=0)
-        df_features_lstm = pd.concat([train_lstm, test_lstm], axis=0)
-
-        # 11. Save outputs (timestamp columns dropped, cleaned data)
-        save_outputs(df_features_with_split, df_features_linear, df_features_lstm)
+        # 10. Save raw datasets (all 3 copies unscaled)
+        save_outputs(df_features_with_split)
 
         logger.info("=" * 60)
         logger.info("FEATURE ENGINEERING COMPLETE")
         logger.info("=" * 60)
-        logger.info("Output files:")
+        logger.info("Output files (all unscaled):")
         logger.info("  - %s (Raw features for tree-based ML)", DATASET_FEATURES_PARQUET)
-        logger.info("  - %s (Z-scored for Ridge/Lasso)", DATASET_FEATURES_LINEAR_PARQUET)
-        logger.info("  - %s (Min-max [-1,1] for LSTM)", DATASET_FEATURES_LSTM_PARQUET)
-        logger.info("Scalers saved to: %s", SCALERS_DIR)
-        logger.info("  - zscore_scaler.joblib")
-        logger.info("  - minmax_scaler.joblib")
+        logger.info("  - %s (Copy for linear models)", DATASET_FEATURES_LINEAR_PARQUET)
+        logger.info("  - %s (Copy for LSTM)", DATASET_FEATURES_LSTM_PARQUET)
+        logger.info("Scalers fitted and saved to: %s", SCALERS_DIR)
+        logger.info("  - zscore_scaler.joblib (for linear models)")
+        logger.info("  - minmax_scaler.joblib (for LSTM)")
+        logger.info("")
+        logger.info("NEXT STEP: Run clear_features to apply:")
+        logger.info("  1. PCA reduction on correlated features")
+        logger.info("  2. Log transform on non-stationary features")
+        logger.info("  3. Normalization (z-score for linear, minmax for LSTM)")
 
     except FileNotFoundError as e:
         logger.error("File not found: %s", e)

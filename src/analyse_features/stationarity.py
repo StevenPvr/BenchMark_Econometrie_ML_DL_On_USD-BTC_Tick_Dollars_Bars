@@ -272,7 +272,7 @@ def _process_feature_batch(
         series = cast(np.ndarray, df[col].values)
         return test_stationarity_single(series, col)
 
-    batch_results = Parallel(n_jobs=n_jobs, prefer="threads")(
+    batch_results = Parallel(n_jobs=n_jobs, prefer="threads", verbose=0)(
         delayed(_test_single)(col) for col in batch_cols
     )
     return cast(list[dict[str, Any]], batch_results)

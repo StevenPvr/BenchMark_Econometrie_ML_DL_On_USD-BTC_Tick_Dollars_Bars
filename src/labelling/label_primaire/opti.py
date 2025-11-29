@@ -30,10 +30,10 @@ from typing import Any, Callable, Dict, List, Tuple, Type, cast
 
 import numpy as np
 import optuna
-import pandas as pd
-from sklearn.metrics import matthews_corrcoef
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.utils.class_weight import compute_class_weight
+import pandas as pd  # type: ignore[import-untyped]
+from sklearn.metrics import matthews_corrcoef  # type: ignore[import-untyped]
+from sklearn.model_selection import TimeSeriesSplit  # type: ignore[import-untyped]
+from sklearn.utils.class_weight import compute_class_weight  # type: ignore[import-untyped]
 
 from src.constants import TRAIN_SPLIT_LABEL
 from src.model.base import BaseModel

@@ -4,17 +4,13 @@ This module computes various correlation measures that capture both linear
 and non-linear dependencies between features:
 
 1. Spearman correlation: Rank-based, captures monotonic relationships
-2. Distance correlation (dCor): Captures any dependency (dCor=0 iff independent)
-3. Mutual Information: Information-theoretic measure of shared information
+2. Mutual Information: Information-theoretic measure of shared information
 
 Performance optimizations:
 - Spearman: scipy.stats.spearmanr (vectorized C implementation)
-- dCor: dcor library (optimized) or custom Numba fallback
 - MI: sklearn with n_jobs=-1 for parallelization
 
 References:
-- Székely, G. J., et al. (2007). "Measuring and testing dependence by
-  correlation of distances". Annals of Statistics.
 - Kraskov, A., et al. (2004). "Estimating mutual information". Physical Review E.
 """
 
@@ -42,7 +38,6 @@ from sklearn.feature_selection import mutual_info_regression  # type: ignore[imp
 
 from src.analyse_features.config import (
     CORRELATION_RESULTS_JSON,
-    DCOR_SAMPLE_SIZE,
     MI_N_NEIGHBORS,
     MI_RANDOM_STATE,
     SPEARMAN_HIGH_CORR_THRESHOLD,
@@ -130,142 +125,6 @@ def compute_spearman_matrix(
         SPEARMAN_HIGH_CORR_THRESHOLD,
         high_corr_count,
     )
-
-    return result
-
-
-def _compute_dcor_pair(
-    x: np.ndarray,
-    y: np.ndarray,
-    sample_size: int | None = None,
-) -> float:
-    """Compute distance correlation between two arrays.
-
-    Uses dcor library if available, falls back to Numba implementation.
-
-    Args:
-        x: First array.
-        y: Second array.
-        sample_size: Max samples to use (for speed).
-
-    Returns:
-        Distance correlation value in [0, 1].
-    """
-    # Subsample if needed
-    if sample_size is not None and len(x) > sample_size:
-        rng = np.random.default_rng(42)
-        idx = rng.choice(len(x), sample_size, replace=False)
-        x = x[idx]
-        y = y[idx]
-
-    # Remove NaN
-    mask = ~(np.isnan(x) | np.isnan(y))
-    x = x[mask]
-    y = y[mask]
-
-    if len(x) < 5:
-        return np.nan
-
-    # Convert to float64 to avoid dcor warnings about integer arrays
-    x = x.astype(np.float64)
-    y = y.astype(np.float64)
-
-    try:
-        import dcor
-        return float(dcor.distance_correlation(x, y))
-    except ImportError:
-        # Fallback to Numba implementation
-        from src.analyse_features.utils.numba_funcs import fast_distance_correlation
-        return fast_distance_correlation(
-            np.ascontiguousarray(x),
-            np.ascontiguousarray(y),
-        )
-
-
-def compute_dcor_matrix(
-    df: pd.DataFrame,
-    feature_columns: list[str] | None = None,
-    sample_size: int | None = None,
-    n_jobs: int | None = None,
-) -> pd.DataFrame:
-    """Compute distance correlation matrix for features.
-
-    Distance correlation (dCor) captures any type of dependency between
-    variables. dCor = 0 if and only if the variables are independent.
-
-    Note: This is O(n²) per pair, so we use sampling for large datasets.
-
-    Args:
-        df: DataFrame with features.
-        feature_columns: Columns to analyze.
-        sample_size: Max samples per computation (default: DCOR_SAMPLE_SIZE).
-        n_jobs: Number of parallel jobs.
-
-    Returns:
-        DataFrame with distance correlation matrix.
-    """
-    logger.info("Computing distance correlation matrix...")
-
-    if feature_columns is None:
-        feature_columns = df.select_dtypes(include=[np.number]).columns.tolist()
-
-    if TARGET_COLUMN in feature_columns:
-        feature_columns = [c for c in feature_columns if c != TARGET_COLUMN]
-
-    sample_size = sample_size or DCOR_SAMPLE_SIZE
-    n_jobs = get_n_jobs(n_jobs)
-    n_features = len(feature_columns)
-
-    logger.info(
-        "Analyzing %d features (sample_size=%s, n_jobs=%d)",
-        n_features,
-        sample_size,
-        n_jobs,
-    )
-
-    # Extract data
-    data = {col: cast(np.ndarray, df[col].values) for col in feature_columns}
-
-    # Create pairs to compute (upper triangle only)
-    pairs = []
-    for i, col_i in enumerate(feature_columns):
-        for j, col_j in enumerate(feature_columns):
-            if i <= j:
-                pairs.append((i, j, col_i, col_j))
-
-    # Compute dCor for each pair
-    def compute_pair(args):
-        i, j, col_i, col_j = args
-        if i == j:
-            return (i, j, 1.0)
-        dcor_val = _compute_dcor_pair(
-            data[col_i],
-            data[col_j],
-            sample_size=sample_size,
-        )
-        return (i, j, dcor_val)
-
-    logger.info("Computing %d distance correlation pairs...", len(pairs))
-
-    results = parallel_apply(
-        lambda args: compute_pair(args),
-        [(p,) for p in pairs],
-        n_jobs=n_jobs,
-    )
-
-    # Build matrix
-    matrix = np.eye(n_features)
-    for i, j, val in results:
-        matrix[i, j] = val
-        matrix[j, i] = val
-
-    result = pd.DataFrame(matrix)
-    result.index = feature_columns
-    result.columns = feature_columns
-
-    # Log statistics
-    avg_dcor = np.mean(matrix[np.triu_indices(n_features, k=1)])
-    logger.info("Distance correlation matrix computed. Mean dCor: %.4f", avg_dcor)
 
     return result
 
@@ -446,7 +305,7 @@ def run_correlation_analysis(
     Args:
         df: DataFrame with features.
         feature_columns: Columns to analyze.
-        compute_dcor: Whether to compute distance correlation (slow).
+        compute_dcor: Whether to compute distance correlation (deprecated, ignored).
         save_results: Whether to save results to parquet.
 
     Returns:
@@ -464,18 +323,9 @@ def run_correlation_analysis(
     spearman_df = compute_spearman_matrix(df, feature_columns)
     results["spearman"] = spearman_df
 
-    # 2. Distance correlation matrix (optional, slow)
-    if compute_dcor:
-        logger.info("=" * 60)
-        logger.info("STEP 2: Distance Correlation Matrix")
-        logger.info("=" * 60)
-
-        dcor_df = compute_dcor_matrix(df, feature_columns)
-        results["dcor"] = dcor_df
-
-    # 3. Mutual information with target
+    # 2. Mutual information with target
     logger.info("=" * 60)
-    logger.info("STEP 3: Mutual Information with Target")
+    logger.info("STEP 2: Mutual Information with Target")
     logger.info("=" * 60)
 
     if TARGET_COLUMN in df.columns:
@@ -556,6 +406,6 @@ if __name__ == "__main__":
         df = df[df["split"] == "train"].copy()
         df = df.drop(columns=["split"])
 
-    results = run_correlation_analysis(cast(pd.DataFrame, df), compute_dcor=True)
+    results = run_correlation_analysis(cast(pd.DataFrame, df), compute_dcor=False)
 
     logger.info("Results keys: %s", list(results.keys()))
