@@ -467,9 +467,29 @@ def _evaluate_fold(
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
+        # Check if model predicts only one class (degenerate case)
+        unique_preds = np.unique(y_pred)
+        if len(unique_preds) < 2:
+            reason = (
+                f"{model_prefix}{fold_prefix}SKIP: model predicts only 1 class "
+                f"(predicted: {unique_preds.tolist()}, true classes: {np.unique(y_val).tolist()})"
+            )
+            logger.debug(reason)
+            return None, reason
+
         # Weighted MCC
         sample_weights = np.array([weight_map.get(c, 1.0) for c in y_val])
         score = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
+        
+        # Handle NaN MCC (can happen with degenerate predictions)
+        if np.isnan(score):
+            reason = (
+                f"{model_prefix}{fold_prefix}SKIP: MCC is NaN "
+                f"(likely degenerate predictions or labels)"
+            )
+            logger.debug(reason)
+            return None, reason
+        
         return score, "OK"
 
     except Exception as e:
@@ -625,6 +645,83 @@ def create_objective(
 # =============================================================================
 
 
+def _handle_missing_values(
+    features_df: pd.DataFrame,
+    model_name: str,
+) -> pd.DataFrame:
+    """Handle missing values by filling with median and logging statistics.
+    
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        DataFrame with features (may contain NaN values).
+    model_name : str
+        Name of the model (for logging context).
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with NaN values filled with median.
+    """
+    # Identify feature columns (exclude non-feature columns)
+    non_feature_cols = [
+        "bar_id", "timestamp_open", "timestamp_close",
+        "datetime_open", "datetime_close",
+        "threshold_used", "log_return", "split", "label",
+    ]
+    feature_cols = [c for c in features_df.columns if c not in non_feature_cols]
+    
+    if len(feature_cols) == 0:
+        return features_df
+    
+    # Count missing values before filling
+    missing_before = features_df[feature_cols].isna().sum()
+    total_missing = missing_before.sum()
+    features_with_missing = (missing_before > 0).sum()
+    
+    if total_missing > 0:
+        logger.info(
+            f"[{model_name.upper()}] Missing values: {total_missing:,} total "
+            f"across {features_with_missing}/{len(feature_cols)} features"
+        )
+        
+        # Fill with median
+        features_df = features_df.copy()
+        for col in feature_cols:
+            col_series = features_df[col]
+            n_missing = int(col_series.isna().sum())
+            
+            if n_missing > 0:
+                median_val = float(col_series.median())
+                
+                # If median is NaN (all values are NaN), use 0 as fallback
+                if pd.isna(median_val) or np.isnan(median_val):
+                    logger.warning(
+                        f"[{model_name.upper()}] Column '{col}' is entirely NaN, "
+                        f"filling {n_missing:,} values with 0"
+                    )
+                    features_df[col] = col_series.fillna(0.0)
+                else:
+                    features_df[col] = col_series.fillna(median_val)
+                    logger.debug(
+                        f"[{model_name.upper()}] Filled {n_missing:,} NaN in '{col}' "
+                        f"with median={median_val:.6f}"
+                    )
+        
+        # Verify no NaN remaining
+        missing_after = features_df[feature_cols].isna().sum().sum()
+        if missing_after > 0:
+            logger.warning(
+                f"[{model_name.upper()}] {missing_after:,} NaN values remain "
+                "after median filling (likely all-NaN columns)"
+            )
+    else:
+        logger.info(f"[{model_name.upper()}] No missing values found in {len(feature_cols)} features")
+    
+    assert isinstance(features_df, pd.DataFrame), "features_df must be a DataFrame"
+    return cast(pd.DataFrame, features_df)
+
+
 def _load_and_filter_features(
     model_name: str,
     config: OptimizationConfig,
@@ -645,8 +742,13 @@ def _load_and_filter_features(
     # Remove duplicates
     if features_df.index.has_duplicates:
         features_df = features_df[~features_df.index.duplicated(keep="first")]
-
+    
     assert isinstance(features_df, pd.DataFrame), "features_df must be a DataFrame"
+    features_df = cast(pd.DataFrame, features_df)
+
+    # Handle missing values (fill with median)
+    features_df = _handle_missing_values(features_df, model_name)
+
     return features_df
 
 
