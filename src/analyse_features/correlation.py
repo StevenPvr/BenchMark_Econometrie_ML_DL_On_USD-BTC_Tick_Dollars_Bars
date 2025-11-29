@@ -277,7 +277,7 @@ def compute_feature_feature_mi(
         return (col_i, col_j, mi)
 
     results = parallel_apply(
-        lambda args: compute_mi_pair(*args),
+        lambda *args: compute_mi_pair(*args),
         pairs,
         n_jobs=n_jobs,
     )

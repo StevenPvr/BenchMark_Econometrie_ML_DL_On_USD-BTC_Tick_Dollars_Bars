@@ -27,7 +27,7 @@ def convert_to_serializable(obj: Any) -> Any:
         return bool(obj)
     elif isinstance(obj, (np.integer, np.int64, np.int32)):
         return int(obj)
-    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+    elif isinstance(obj, (float, np.floating, np.float64, np.float32)):
         if np.isnan(obj) or np.isinf(obj):
             return None
         return float(obj)
