@@ -509,16 +509,23 @@ def _run_cv_scoring(
     config: OptimizationConfig,
     trial_number: int | None = None,
     model_name: str | None = None,
-) -> Tuple[float, str]:
+) -> Tuple[float, int, int, str]:
     """Run walk-forward CV and return mean score.
-    
+
+    Early pruning: raises TrialPruned at the first failed fold.
+
     Returns
     -------
-    Tuple[float, str]
-        (score, reason) - reason explains the result.
+    Tuple[float, int, int, str]
+        (score, n_valid_folds, n_total_folds, reason) - reason explains the result.
+
+    Raises
+    ------
+    optuna.TrialPruned
+        If any fold fails evaluation (early pruning).
     """
     trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
-    
+
     cv = WalkForwardCV(
         n_splits=config.n_splits,
         min_train_size=config.min_train_size,
@@ -529,41 +536,43 @@ def _run_cv_scoring(
     if len(splits) == 0:
         reason = f"{trial_prefix}SKIP: no valid CV splits generated"
         logger.debug(reason)
-        return float("-inf"), reason
+        raise optuna.TrialPruned(reason)
+
+    # Check we have enough splits
+    if len(splits) < config.n_splits:
+        reason = (
+            f"{trial_prefix}PRUNED: only {len(splits)}/{config.n_splits} "
+            f"CV splits generated"
+        )
+        logger.debug(reason)
+        raise optuna.TrialPruned(reason)
 
     cv_scores = []
-    failed_folds = []
-    
+
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
         score, fold_reason = _evaluate_fold(
             X, y, train_idx, val_idx, model_class, model_params,
             model_name=model_name, fold_idx=fold_idx
         )
-        if score is not None:
-            cv_scores.append(score)
-        else:
-            failed_folds.append(fold_reason)
 
-    if len(cv_scores) == 0:
-        # Log all fold failures at INFO level for visibility
-        reason = (
-            f"{trial_prefix}SKIP: all {len(splits)} CV folds failed evaluation"
-        )
-        logger.info(reason)
-        # Log first few failures in detail
-        for i, fail_reason in enumerate(failed_folds[:3]):
-            logger.info(f"  {fail_reason}")
-        if len(failed_folds) > 3:
-            logger.info(f"  ... and {len(failed_folds) - 3} more failures")
-        return float("-inf"), reason
-    
+        # Early pruning: fail fast on first invalid fold
+        if score is None:
+            reason = (
+                f"{trial_prefix}PRUNED at fold {fold_idx + 1}/{config.n_splits}: "
+                f"{fold_reason}"
+            )
+            logger.debug(reason)
+            raise optuna.TrialPruned(reason)
+
+        cv_scores.append(score)
+
     mean_score = float(np.mean(cv_scores))
     reason = (
-        f"{trial_prefix}OK: MCC={mean_score:.4f} "
-        f"({len(cv_scores)}/{len(splits)} folds, {len(failed_folds)} failed)"
+        f"{trial_prefix}MCC={mean_score:.4f} "
+        f"({len(cv_scores)}/{len(splits)} folds)"
     )
     logger.debug(reason)
-    return mean_score, reason
+    return mean_score, len(cv_scores), len(splits), reason
 
 
 def create_objective(
@@ -576,7 +585,7 @@ def create_objective(
     verbose: bool = True,
 ) -> Callable[[optuna.Trial], float]:
     """Create Optuna objective for joint optimization.
-    
+
     Parameters
     ----------
     config : OptimizationConfig
@@ -594,12 +603,18 @@ def create_objective(
     verbose : bool, default=True
         If True, log trial failures at INFO level (visible).
         If False, log at DEBUG level only.
+
+    Notes
+    -----
+    Trials are PRUNED (not just scored -inf) if:
+    - Not all n_splits folds are successfully validated
+    - This ensures only trials with complete CV are considered
     """
     log_level = logging.INFO if verbose else logging.DEBUG
 
     def objective(trial: optuna.Trial) -> float:
         trial_num = trial.number
-        
+
         # Sample and generate events
         tb_params = _sample_barrier_params(trial)
         events = _generate_trial_events(features_df, close, volatility, tb_params)
@@ -608,33 +623,31 @@ def create_objective(
         is_valid, reason = _validate_events(events, config, trial_num)
         if not is_valid:
             logger.log(log_level, reason)
-            return float("-inf")
+            raise optuna.TrialPruned(reason)
 
         # Prepare data
         X, y, events_aligned, reason = _align_features_events(
             features_df, events, config, trial_num
         )
-        if X is None:
+        if X is None or y is None or events_aligned is None:
             logger.log(log_level, reason)
-            return float("-inf")
+            raise optuna.TrialPruned(reason)
 
         # Sample model params and run CV
+        # Note: _run_cv_scoring raises TrialPruned on first failed fold (early pruning)
         model_params = _sample_model_params(trial, model_search_space, config)
-        if X is None or y is None or events_aligned is None:
-            return float("-inf")
-        
-        score, reason = _run_cv_scoring(
+
+        score, n_valid_folds, n_total_folds, reason = _run_cv_scoring(
             X, y, events_aligned, model_class, model_params, config, trial_num,
             model_name=config.model_name
         )
-        
-        # Log result
-        if score == float("-inf"):
-            logger.log(log_level, reason)
-        else:
-            # Always log successful trials at INFO
-            logger.info(reason)
-        
+
+        # Log successful trial (all folds passed)
+        logger.info(
+            f"[Trial {trial_num}] OK: MCC={score:.4f} "
+            f"({n_valid_folds}/{n_total_folds} folds)"
+        )
+
         return score
 
     return objective

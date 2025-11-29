@@ -1,9 +1,23 @@
+from __future__ import annotations
 
-import pytest
-import pandas as pd
+import sys
+from pathlib import Path
+
+# Add project root to Python path for direct execution.
+_script_dir = Path(__file__).parent
+# Find project root by looking for .git, pyproject.toml, or setup.py
+_project_root = _script_dir
+while _project_root != _project_root.parent:
+    if (_project_root / ".git").exists() or (_project_root / "pyproject.toml").exists() or (_project_root / "setup.py").exists():
+        break
+    _project_root = _project_root.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+import pytest  # type: ignore
+import pandas as pd  # type: ignore
 import numpy as np
 from unittest.mock import MagicMock, patch
-from pathlib import Path
 
 from src.data_preparation import preparation
 
@@ -203,27 +217,26 @@ class TestPublicAPI:
                 price_col="wrong_col"
             )
 
-    def test_prepare_dollar_bars_pipeline(self, sample_tick_data, tmp_path, mocker):
+    def test_prepare_dollar_bars_pipeline(self, sample_tick_data, tmp_path):
         # Mock reading parquet
-        mocker.patch("pandas.read_parquet", return_value=sample_tick_data)
+        with patch("pandas.read_parquet", return_value=sample_tick_data):
+            input_path = tmp_path / "ticks.parquet"
+            output_path = tmp_path / "bars.parquet"
 
-        input_path = tmp_path / "ticks.parquet"
-        output_path = tmp_path / "bars.parquet"
+            # Create dummy file to pass existence check
+            input_path.touch()
 
-        # Create dummy file to pass existence check
-        input_path.touch()
+            df_bars = preparation.prepare_dollar_bars(
+                parquet_path=input_path,
+                target_num_bars=5,
+                output_parquet=output_path,
+                timestamp_col="timestamp",
+                price_col="price",
+                volume_col="amount"
+            )
 
-        df_bars = preparation.prepare_dollar_bars(
-            parquet_path=input_path,
-            target_num_bars=5,
-            output_parquet=output_path,
-            timestamp_col="timestamp",
-            price_col="price",
-            volume_col="amount"
-        )
-
-        assert not df_bars.empty
-        assert output_path.exists()
+            assert not df_bars.empty
+            assert output_path.exists()
 
     def test_add_log_returns(self, tmp_path):
         # Create a dummy bars file
@@ -313,3 +326,8 @@ class TestLogic:
         # Let's just check that thresholds vary.
         if len(thresholds) > 1:
             assert np.std(thresholds) > 0.0
+
+if __name__ == "__main__":
+    # Allow running individual test file with pytest and colored output
+    import pytest  # type: ignore
+    pytest.main([__file__, "-v", "--color=yes"])

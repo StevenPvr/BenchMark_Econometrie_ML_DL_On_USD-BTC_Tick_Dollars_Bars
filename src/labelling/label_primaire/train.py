@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 
 from src.constants import (
     DEFAULT_RANDOM_STATE,

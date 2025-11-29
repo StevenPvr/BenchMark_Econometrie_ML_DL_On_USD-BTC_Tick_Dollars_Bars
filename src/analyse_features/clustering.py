@@ -319,6 +319,19 @@ def compute_umap_embedding(
 
     # Adjust n_neighbors if needed
     n_features = X_T.shape[0]
+    
+    # UMAP requires at least 4 features to work properly (k < N constraint)
+    if n_features < 4:
+        logger.warning(
+            "UMAP requires at least 4 features, but only %d provided. Skipping UMAP embedding.",
+            n_features
+        )
+        return pd.DataFrame({
+            "feature": feature_columns,
+            "umap_1": np.nan,
+            "umap_2": np.nan,
+        })
+    
     effective_n_neighbors = min(n_neighbors, max(2, n_features - 1))
 
     if effective_n_neighbors != n_neighbors:

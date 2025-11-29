@@ -9,10 +9,9 @@ import pandas as pd  # type: ignore
 import lightgbm as lgb  # type: ignore
 
 from src.model.base import BaseModel  # type: ignore[import-untyped]
-from src.training.trainer import TrainableModel  # type: ignore[import-untyped]
 
 
-class LightGBMModel(BaseModel, TrainableModel):
+class LightGBMModel(BaseModel):
     """
     LightGBM (Light Gradient Boosting Machine) classifier.
 

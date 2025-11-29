@@ -189,15 +189,19 @@ def compute_volume_imbalance_bars(
         logger.info("Using direct side classification")
         signs = classify_trades_direct(df_ticks, side_col).values
 
-    # Get tick timestamps as int64
+    # Get tick timestamps as int64 (milliseconds)
     if pd.api.types.is_datetime64_any_dtype(df_ticks[timestamp_col]):
         tick_ts = (df_ticks[timestamp_col].astype("int64") // 10**6).values
     else:
         tick_ts = df_ticks[timestamp_col].values.astype(np.int64)
 
-    # Get bar boundaries
-    bar_open = df_bars[bar_timestamp_open].values.astype(np.int64)
-    bar_close = df_bars[bar_timestamp_close].values.astype(np.int64)
+    # Get bar boundaries (convert to milliseconds to match tick_ts)
+    if pd.api.types.is_datetime64_any_dtype(df_bars[bar_timestamp_open]):
+        bar_open = (df_bars[bar_timestamp_open].astype("int64") // 10**6).values
+        bar_close = (df_bars[bar_timestamp_close].astype("int64") // 10**6).values
+    else:
+        bar_open = df_bars[bar_timestamp_open].values.astype(np.int64)
+        bar_close = df_bars[bar_timestamp_close].values.astype(np.int64)
 
     # Assign each tick to a bar using searchsorted
     bar_ids = np.searchsorted(bar_close, tick_ts, side="left")

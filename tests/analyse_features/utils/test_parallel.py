@@ -1,4 +1,20 @@
-import pytest
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Add project root to Python path for direct execution.
+_script_dir = Path(__file__).parent
+# Find project root by looking for .git, pyproject.toml, or setup.py
+_project_root = _script_dir
+while _project_root != _project_root.parent:
+    if (_project_root / ".git").exists() or (_project_root / "pyproject.toml").exists() or (_project_root / "setup.py").exists():
+        break
+    _project_root = _project_root.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+import pytest  # type: ignore
 from src.analyse_features.utils.parallel import (
     get_n_jobs,
     parallel_map,
@@ -48,3 +64,8 @@ class TestParallel:
         items = [1, 2, 3]
         results = parallel_map(square, items, n_jobs=1)
         assert results == [1, 4, 9]
+
+if __name__ == "__main__":
+    # Allow running individual test file with pytest and colored output
+    import pytest  # type: ignore
+    pytest.main([__file__, "-v", "--color=yes"])

@@ -1,5 +1,21 @@
-import pytest
-import pandas as pd
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Add project root to Python path for direct execution.
+_script_dir = Path(__file__).parent
+# Find project root by looking for .git, pyproject.toml, or setup.py
+_project_root = _script_dir
+while _project_root != _project_root.parent:
+    if (_project_root / ".git").exists() or (_project_root / "pyproject.toml").exists() or (_project_root / "setup.py").exists():
+        break
+    _project_root = _project_root.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+import pytest  # type: ignore
+import pandas as pd  # type: ignore
 import numpy as np
 from unittest.mock import patch, MagicMock
 from src.analyse_features.clustering import (
@@ -52,8 +68,8 @@ class TestClustering:
         assert clusters["cluster"].nunique() == 2
 
         # feat_a and feat_b should likely be in same cluster
-        cluster_a = clusters[clusters["feature"] == "feat_a"]["cluster"].values[0]
-        cluster_b = clusters[clusters["feature"] == "feat_b"]["cluster"].values[0]
+        cluster_a = clusters[clusters["feature"] == "feat_a"]["cluster"].iloc[0]  # type: ignore[attr-defined]
+        cluster_b = clusters[clusters["feature"] == "feat_b"]["cluster"].iloc[0]  # type: ignore[attr-defined]
         assert cluster_a == cluster_b
 
     def test_compute_tsne_embedding(self, correlated_df):
@@ -72,10 +88,11 @@ class TestClustering:
         cols = ["feat_a", "feat_b", "feat_c"]
         umap_df = compute_umap_embedding(correlated_df, cols)
 
-        if not UMAP_AVAILABLE:
-            assert umap_df["umap_1"].isna().all()
-        else:
-            assert not umap_df["umap_1"].isna().all()
+        # With only 3 features, UMAP will skip (requires at least 4)
+        # So result should be NaN regardless of UMAP availability
+        assert bool(umap_df["umap_1"].isna().all())
+        assert "feature" in umap_df.columns
+        assert len(umap_df) == 3
 
     @patch("src.analyse_features.clustering.save_json")
     @patch("src.analyse_features.clustering.plot_dendrogram")
@@ -90,3 +107,9 @@ class TestClustering:
 
         mock_ensure.assert_called()
         mock_save.assert_called()
+
+
+if __name__ == "__main__":
+    # Allow running individual test file with pytest and colored output
+    import pytest  # type: ignore
+    pytest.main([__file__, "-v", "--color=yes"])
