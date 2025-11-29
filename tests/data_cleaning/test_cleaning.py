@@ -130,6 +130,16 @@ class TestLoadRawTrades:
         with pytest.raises(ValueError, match="Some other error"):
             _load_raw_trades(mock_path)
 
+    def test_load_single_file_oserror_no_timeout(self, mocker):
+        """Test re-raising of OSError that is not a timeout."""
+        mock_path = mocker.Mock(spec=Path)
+        mock_path.is_dir.return_value = False
+
+        mocker.patch("pandas.read_parquet", side_effect=OSError("Disk full"))
+
+        with pytest.raises(OSError, match="Disk full"):
+            _load_raw_trades(mock_path)
+
 
 class TestDropDuplicates:
     """Tests for _drop_duplicates."""
