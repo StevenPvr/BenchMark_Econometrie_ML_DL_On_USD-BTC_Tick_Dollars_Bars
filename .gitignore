@@ -27,3 +27,4 @@ outputs/
 .mypy_cache/
 tick/lib/python3.10/site-packages/pygments/lexers
 tick/lib/python3.10/site-packages/numba/tests
+.coverage
