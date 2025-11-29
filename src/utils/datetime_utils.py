@@ -150,6 +150,13 @@ def parse_date_value(
     if isinstance(value, pd.Timestamp):
         return _parse_timestamp_value(value, context, allow_none)
 
+    # Handle standard datetime
+    if hasattr(value, "timestamp"):  # loose check for datetime-like
+        try:
+            return _parse_timestamp_value(pd.Timestamp(value), context, allow_none)
+        except (ValueError, TypeError):
+            pass
+
     # Handle string, int, float
     if isinstance(value, (int, float, str)):
         return _parse_scalar_value(value, context, allow_none)
