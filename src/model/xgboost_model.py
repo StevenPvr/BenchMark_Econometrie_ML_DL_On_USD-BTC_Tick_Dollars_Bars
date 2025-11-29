@@ -72,6 +72,8 @@ class XGBoostModel(BaseModel):
         self.early_stopping_rounds = early_stopping_rounds
         self.model: xgb.XGBClassifier | None = None
         self.classes_: np.ndarray | None = None
+        self._label_to_xgb: Dict[int, int] = {}
+        self._xgb_to_label: Dict[int, int] = {}
 
     def fit(
         self,
@@ -84,6 +86,14 @@ class XGBoostModel(BaseModel):
         """Entraine le modele XGBoost classifier."""
         y_arr = np.asarray(y).ravel()
         self.classes_ = np.unique(y_arr)
+
+        # XGBoost requires classes to start from 0: map [-1, 0, 1] -> [0, 1, 2]
+        # Create mapping from original labels to XGBoost labels
+        self._label_to_xgb = {label: idx for idx, label in enumerate(self.classes_)}
+        self._xgb_to_label = {idx: label for label, idx in self._label_to_xgb.items()}
+        
+        # Map y to XGBoost format (0-indexed)
+        y_mapped = np.array([self._label_to_xgb[label] for label in y_arr])
 
         # Use early_stopping_rounds from constructor if not provided
         effective_early_stopping = early_stopping_rounds or self.early_stopping_rounds
@@ -100,20 +110,21 @@ class XGBoostModel(BaseModel):
             "n_jobs": self.n_jobs,
         }
 
-        # Try to add early stopping to constructor if supported
-        if effective_early_stopping is not None:
-            try:
-                model_params["early_stopping_rounds"] = effective_early_stopping
-            except (TypeError, ValueError):
-                pass
-
         self.model = xgb.XGBClassifier(**model_params)
 
+        # early_stopping_rounds must be passed to fit(), not constructor
         fit_params: Dict[str, Any] = {"verbose": verbose}
         if eval_set is not None:
-            fit_params["eval_set"] = eval_set
+            # Map eval_set labels too
+            mapped_eval_set = [
+                (X_eval, np.array([self._label_to_xgb[label] for label in np.asarray(y_eval).ravel()]))
+                for X_eval, y_eval in eval_set
+            ]
+            fit_params["eval_set"] = mapped_eval_set
+        if effective_early_stopping is not None:
+            fit_params["early_stopping_rounds"] = effective_early_stopping
 
-        self.model.fit(X, y_arr, **fit_params)
+        self.model.fit(X, y_mapped, **fit_params)
         self.is_fitted = True
         return self
 
@@ -121,7 +132,9 @@ class XGBoostModel(BaseModel):
         """Fait des predictions avec le modele XGBoost."""
         if not self.is_fitted or self.model is None:
             raise ValueError("Model must be fitted before prediction.")
-        return self.model.predict(X)
+        # XGBoost predicts 0-indexed labels, remap to original labels
+        xgb_pred = self.model.predict(X)
+        return np.array([self._xgb_to_label[pred] for pred in xgb_pred])
 
     def predict_proba(self, X: np.ndarray | pd.DataFrame) -> np.ndarray:
         """

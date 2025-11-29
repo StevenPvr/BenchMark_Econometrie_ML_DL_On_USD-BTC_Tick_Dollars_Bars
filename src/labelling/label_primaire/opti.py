@@ -25,7 +25,10 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 import logging
+import multiprocessing
+import os
 import warnings
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Tuple, Type, cast
 
 import numpy as np
@@ -337,29 +340,77 @@ def _generate_trial_events(
     )
 
 
-def _validate_events(events: pd.DataFrame, config: OptimizationConfig) -> bool:
-    """Validate that events are suitable for training."""
-    if events.empty or len(events) < config.min_train_size:
-        return False
-    if len(events["label"].value_counts()) < 2:
-        return False
-    return True
+def _validate_events(
+    events: pd.DataFrame, 
+    config: OptimizationConfig,
+    trial_number: int | None = None,
+) -> Tuple[bool, str]:
+    """Validate that events are suitable for training.
+    
+    Returns
+    -------
+    Tuple[bool, str]
+        (is_valid, reason) - reason explains why validation failed if not valid.
+    """
+    trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
+    
+    if events.empty:
+        reason = f"{trial_prefix}SKIP: events DataFrame is empty"
+        logger.debug(reason)
+        return False, reason
+    
+    if len(events) < config.min_train_size:
+        reason = (
+            f"{trial_prefix}SKIP: not enough events "
+            f"({len(events)} < {config.min_train_size} min_train_size)"
+        )
+        logger.debug(reason)
+        return False, reason
+    
+    label_counts = events["label"].value_counts()
+    n_classes = len(label_counts)
+    
+    if n_classes < 2:
+        reason = (
+            f"{trial_prefix}SKIP: only {n_classes} class(es) in labels "
+            f"(need 2+). Distribution: {label_counts.to_dict()}"
+        )
+        logger.debug(reason)
+        return False, reason
+    
+    return True, "OK"
 
 
 def _align_features_events(
     features_df: pd.DataFrame,
     events: pd.DataFrame,
     config: OptimizationConfig,
-) -> Tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None]:
-    """Align features with events on common index."""
+    trial_number: int | None = None,
+) -> Tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]:
+    """Align features with events on common index.
+    
+    Returns
+    -------
+    Tuple[pd.DataFrame | None, pd.Series | None, pd.DataFrame | None, str]
+        (X, y, events_aligned, reason) - reason explains failure if any.
+    """
+    trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
+    
     common_idx = events.index.intersection(features_df.index)
+    
     if len(common_idx) < config.min_train_size:
-        return None, None, None
+        reason = (
+            f"{trial_prefix}SKIP: not enough common indices after alignment "
+            f"({len(common_idx)} < {config.min_train_size} min_train_size). "
+            f"Events: {len(events)}, Features: {len(features_df)}"
+        )
+        logger.debug(reason)
+        return None, None, None, reason
 
     X = features_df.loc[common_idx]
     y = events.loc[common_idx, "label"]
     events_aligned = events.loc[common_idx]
-    return X, y, events_aligned
+    return X, y, events_aligned, "OK"
 
 
 def _sample_model_params(
@@ -381,14 +432,30 @@ def _evaluate_fold(
     val_idx: np.ndarray,
     model_class: Type[BaseModel],
     model_params: Dict[str, Any],
-) -> float | None:
-    """Evaluate a single CV fold."""
+    model_name: str | None = None,
+    fold_idx: int | None = None,
+) -> Tuple[float | None, str]:
+    """Evaluate a single CV fold.
+    
+    Returns
+    -------
+    Tuple[float | None, str]
+        (score, reason) - score is None if evaluation failed, reason explains why.
+    """
+    model_prefix = f"[{model_name}] " if model_name else ""
+    fold_prefix = f"Fold {fold_idx}: " if fold_idx is not None else ""
+    
     try:
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
 
         if len(y_train.unique()) < 2:
-            return None
+            reason = (
+                f"{model_prefix}{fold_prefix}SKIP: only 1 class in training set "
+                f"(classes: {y_train.unique().tolist()})"
+            )
+            logger.debug(reason)
+            return None, reason
 
         # Compute class weights
         classes = np.unique(y_train)
@@ -400,12 +467,37 @@ def _evaluate_fold(
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
+        # Check if model predicts only one class (degenerate case)
+        unique_preds = np.unique(y_pred)
+        if len(unique_preds) < 2:
+            reason = (
+                f"{model_prefix}{fold_prefix}SKIP: model predicts only 1 class "
+                f"(predicted: {unique_preds.tolist()}, true classes: {np.unique(y_val).tolist()})"
+            )
+            logger.debug(reason)
+            return None, reason
+
         # Weighted MCC
         sample_weights = np.array([weight_map.get(c, 1.0) for c in y_val])
-        return matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
+        score = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
+        
+        # Handle NaN MCC (can happen with degenerate predictions)
+        if np.isnan(score):
+            reason = (
+                f"{model_prefix}{fold_prefix}SKIP: MCC is NaN "
+                f"(likely degenerate predictions or labels)"
+            )
+            logger.debug(reason)
+            return None, reason
+        
+        return score, "OK"
 
-    except Exception:
-        return None
+    except Exception as e:
+        reason = (
+            f"{model_prefix}{fold_prefix}FAILED: {type(e).__name__}: {str(e)}"
+        )
+        logger.debug(reason)
+        return None, reason
 
 
 def _run_cv_scoring(
@@ -415,23 +507,63 @@ def _run_cv_scoring(
     model_class: Type[BaseModel],
     model_params: Dict[str, Any],
     config: OptimizationConfig,
-) -> float:
-    """Run walk-forward CV and return mean score."""
+    trial_number: int | None = None,
+    model_name: str | None = None,
+) -> Tuple[float, str]:
+    """Run walk-forward CV and return mean score.
+    
+    Returns
+    -------
+    Tuple[float, str]
+        (score, reason) - reason explains the result.
+    """
+    trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
+    
     cv = WalkForwardCV(
         n_splits=config.n_splits,
         min_train_size=config.min_train_size,
         embargo_pct=0.01,
     )
 
+    splits = cv.split(X, events)
+    if len(splits) == 0:
+        reason = f"{trial_prefix}SKIP: no valid CV splits generated"
+        logger.debug(reason)
+        return float("-inf"), reason
+
     cv_scores = []
-    for train_idx, val_idx in cv.split(X, events):
-        score = _evaluate_fold(X, y, train_idx, val_idx, model_class, model_params)
+    failed_folds = []
+    
+    for fold_idx, (train_idx, val_idx) in enumerate(splits):
+        score, fold_reason = _evaluate_fold(
+            X, y, train_idx, val_idx, model_class, model_params,
+            model_name=model_name, fold_idx=fold_idx
+        )
         if score is not None:
             cv_scores.append(score)
+        else:
+            failed_folds.append(fold_reason)
 
     if len(cv_scores) == 0:
-        return float("-inf")
-    return float(np.mean(cv_scores))
+        # Log all fold failures at INFO level for visibility
+        reason = (
+            f"{trial_prefix}SKIP: all {len(splits)} CV folds failed evaluation"
+        )
+        logger.info(reason)
+        # Log first few failures in detail
+        for i, fail_reason in enumerate(failed_folds[:3]):
+            logger.info(f"  {fail_reason}")
+        if len(failed_folds) > 3:
+            logger.info(f"  ... and {len(failed_folds) - 3} more failures")
+        return float("-inf"), reason
+    
+    mean_score = float(np.mean(cv_scores))
+    reason = (
+        f"{trial_prefix}OK: MCC={mean_score:.4f} "
+        f"({len(cv_scores)}/{len(splits)} folds, {len(failed_folds)} failed)"
+    )
+    logger.debug(reason)
+    return mean_score, reason
 
 
 def create_objective(
@@ -441,28 +573,69 @@ def create_objective(
     volatility: pd.Series,
     model_class: Type[BaseModel],
     model_search_space: Dict[str, Any],
+    verbose: bool = True,
 ) -> Callable[[optuna.Trial], float]:
-    """Create Optuna objective for joint optimization."""
+    """Create Optuna objective for joint optimization.
+    
+    Parameters
+    ----------
+    config : OptimizationConfig
+        Optimization configuration.
+    features_df : pd.DataFrame
+        Feature DataFrame.
+    close : pd.Series
+        Close prices.
+    volatility : pd.Series
+        Volatility estimates.
+    model_class : Type[BaseModel]
+        Model class to optimize.
+    model_search_space : Dict[str, Any]
+        Model hyperparameter search space.
+    verbose : bool, default=True
+        If True, log trial failures at INFO level (visible).
+        If False, log at DEBUG level only.
+    """
+    log_level = logging.INFO if verbose else logging.DEBUG
 
     def objective(trial: optuna.Trial) -> float:
+        trial_num = trial.number
+        
         # Sample and generate events
         tb_params = _sample_barrier_params(trial)
         events = _generate_trial_events(features_df, close, volatility, tb_params)
 
         # Validate events
-        if not _validate_events(events, config):
+        is_valid, reason = _validate_events(events, config, trial_num)
+        if not is_valid:
+            logger.log(log_level, reason)
             return float("-inf")
 
         # Prepare data
-        X, y, events_aligned = _align_features_events(features_df, events, config)
+        X, y, events_aligned, reason = _align_features_events(
+            features_df, events, config, trial_num
+        )
         if X is None:
+            logger.log(log_level, reason)
             return float("-inf")
 
         # Sample model params and run CV
         model_params = _sample_model_params(trial, model_search_space, config)
         if X is None or y is None or events_aligned is None:
             return float("-inf")
-        return _run_cv_scoring(X, y, events_aligned, model_class, model_params, config)
+        
+        score, reason = _run_cv_scoring(
+            X, y, events_aligned, model_class, model_params, config, trial_num,
+            model_name=config.model_name
+        )
+        
+        # Log result
+        if score == float("-inf"):
+            logger.log(log_level, reason)
+        else:
+            # Always log successful trials at INFO
+            logger.info(reason)
+        
+        return score
 
     return objective
 
@@ -470,6 +643,83 @@ def create_objective(
 # =============================================================================
 # OPTIMIZATION HELPERS
 # =============================================================================
+
+
+def _handle_missing_values(
+    features_df: pd.DataFrame,
+    model_name: str,
+) -> pd.DataFrame:
+    """Handle missing values by filling with median and logging statistics.
+    
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        DataFrame with features (may contain NaN values).
+    model_name : str
+        Name of the model (for logging context).
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with NaN values filled with median.
+    """
+    # Identify feature columns (exclude non-feature columns)
+    non_feature_cols = [
+        "bar_id", "timestamp_open", "timestamp_close",
+        "datetime_open", "datetime_close",
+        "threshold_used", "log_return", "split", "label",
+    ]
+    feature_cols = [c for c in features_df.columns if c not in non_feature_cols]
+    
+    if len(feature_cols) == 0:
+        return features_df
+    
+    # Count missing values before filling
+    missing_before = features_df[feature_cols].isna().sum()
+    total_missing = missing_before.sum()
+    features_with_missing = (missing_before > 0).sum()
+    
+    if total_missing > 0:
+        logger.info(
+            f"[{model_name.upper()}] Missing values: {total_missing:,} total "
+            f"across {features_with_missing}/{len(feature_cols)} features"
+        )
+        
+        # Fill with median
+        features_df = features_df.copy()
+        for col in feature_cols:
+            col_series = features_df[col]
+            n_missing = int(col_series.isna().sum())
+            
+            if n_missing > 0:
+                median_val = float(col_series.median())
+                
+                # If median is NaN (all values are NaN), use 0 as fallback
+                if pd.isna(median_val) or np.isnan(median_val):
+                    logger.warning(
+                        f"[{model_name.upper()}] Column '{col}' is entirely NaN, "
+                        f"filling {n_missing:,} values with 0"
+                    )
+                    features_df[col] = col_series.fillna(0.0)
+                else:
+                    features_df[col] = col_series.fillna(median_val)
+                    logger.debug(
+                        f"[{model_name.upper()}] Filled {n_missing:,} NaN in '{col}' "
+                        f"with median={median_val:.6f}"
+                    )
+        
+        # Verify no NaN remaining
+        missing_after = features_df[feature_cols].isna().sum().sum()
+        if missing_after > 0:
+            logger.warning(
+                f"[{model_name.upper()}] {missing_after:,} NaN values remain "
+                "after median filling (likely all-NaN columns)"
+            )
+    else:
+        logger.info(f"[{model_name.upper()}] No missing values found in {len(feature_cols)} features")
+    
+    assert isinstance(features_df, pd.DataFrame), "features_df must be a DataFrame"
+    return cast(pd.DataFrame, features_df)
 
 
 def _load_and_filter_features(
@@ -492,8 +742,13 @@ def _load_and_filter_features(
     # Remove duplicates
     if features_df.index.has_duplicates:
         features_df = features_df[~features_df.index.duplicated(keep="first")]
-
+    
     assert isinstance(features_df, pd.DataFrame), "features_df must be a DataFrame"
+    features_df = cast(pd.DataFrame, features_df)
+
+    # Handle missing values (fill with median)
+    features_df = _handle_missing_values(features_df, model_name)
+
     return features_df
 
 
@@ -645,8 +900,14 @@ def optimize_model(
 # =============================================================================
 
 
-def select_model_interactive() -> str:
-    """Interactive model selection."""
+def select_models_interactive() -> List[str]:
+    """Interactive model selection (supports multiple models).
+    
+    Returns
+    -------
+    List[str]
+        List of selected model names.
+    """
     models = list(MODEL_REGISTRY.keys())
 
     print("\n" + "=" * 60)
@@ -661,20 +922,188 @@ def select_model_interactive() -> str:
         print(f"  {i}. {model:<15} ({info['dataset']})")
 
     print("-" * 40)
+    print("  0. ALL (tous les modeles)")
+    print("-" * 40)
+    print("\nPlusieurs choix possibles: separer par virgule ou espace")
+    print("Exemples: '1,2,3' ou '1 2 3' ou 'lightgbm xgboost' ou '0' pour tous")
 
     while True:
         try:
-            choice = input("\nChoisir (numero ou nom): ").strip()
-            if choice.isdigit():
-                idx = int(choice) - 1
-                if 0 <= idx < len(models):
-                    return models[idx]
-            elif choice.lower() in models:
-                return choice.lower()
-            print("Choix invalide.")
+            choice = input("\nChoisir: ").strip()
+            
+            # Handle "all" selection
+            if choice == "0" or choice.lower() == "all":
+                return models.copy()
+            
+            # Parse multiple selections (comma or space separated)
+            # Remove parentheses and other non-alphanumeric separators, then split
+            cleaned_choice = choice.replace("(", " ").replace(")", " ").replace(",", " ").replace(";", " ")
+            raw_selections = cleaned_choice.split()
+            selected_models: List[str] = []
+            
+            for sel in raw_selections:
+                sel = sel.strip()
+                if not sel:
+                    continue
+                
+                # Remove any remaining non-digit characters for numeric selection
+                numeric_sel = "".join(c for c in sel if c.isdigit())
+                    
+                if numeric_sel and numeric_sel.isdigit():
+                    idx = int(numeric_sel) - 1
+                    if 0 <= idx < len(models):
+                        model_name = models[idx]
+                        if model_name not in selected_models:
+                            selected_models.append(model_name)
+                    else:
+                        print(f"Index invalide: {numeric_sel}")
+                elif sel.lower() in models:
+                    if sel.lower() not in selected_models:
+                        selected_models.append(sel.lower())
+                else:
+                    print(f"Modele inconnu: {sel}")
+            
+            if selected_models:
+                return selected_models
+            print("Aucun modele valide selectionne.")
+            
         except KeyboardInterrupt:
             print("\nAnnule.")
             exit(0)
+
+
+def _run_optimization_worker(
+    model_name: str,
+    n_trials: int,
+    n_splits: int,
+) -> OptimizationResult:
+    """Worker function for parallel optimization.
+    
+    This function is designed to be called in a separate process.
+    It configures logging and runs optimization for a single model.
+    
+    Parameters
+    ----------
+    model_name : str
+        Name of the model to optimize.
+    n_trials : int
+        Number of Optuna trials.
+    n_splits : int
+        Number of CV splits.
+        
+    Returns
+    -------
+    OptimizationResult
+        Optimization result for the model.
+    """
+    # Configure logging for this process
+    logging.basicConfig(
+        level=logging.INFO,
+        format=f"%(asctime)s - [{model_name.upper()}] - %(levelname)s - %(message)s",
+    )
+    
+    config = OptimizationConfig(
+        model_name=model_name,
+        n_trials=n_trials,
+        n_splits=n_splits,
+    )
+    
+    return optimize_model(model_name, config)
+
+
+def _run_sequential(
+    selected_models: List[str],
+    n_trials: int,
+    n_splits: int,
+) -> List[OptimizationResult]:
+    """Run optimization sequentially for all models."""
+    all_results: List[OptimizationResult] = []
+    
+    for i, model_name in enumerate(selected_models, 1):
+        print(f"\n{'#'*60}")
+        print(f"# [{i}/{len(selected_models)}] OPTIMISATION: {model_name.upper()}")
+        print(f"{'#'*60}")
+        
+        result = _run_optimization_worker(model_name, n_trials, n_splits)
+        all_results.append(result)
+        print(f"\n[{model_name}] Score (MCC): {result.best_score:.4f}")
+    
+    return all_results
+
+
+def _run_parallel(
+    selected_models: List[str],
+    n_trials: int,
+    n_splits: int,
+    max_workers: int,
+) -> List[OptimizationResult]:
+    """Run optimization in parallel for all models.
+    
+    Parameters
+    ----------
+    selected_models : List[str]
+        List of model names to optimize.
+    n_trials : int
+        Number of Optuna trials per model.
+    n_splits : int
+        Number of CV splits.
+    max_workers : int
+        Maximum number of parallel workers.
+        
+    Returns
+    -------
+    List[OptimizationResult]
+        List of optimization results.
+    """
+    all_results: List[OptimizationResult] = []
+    
+    print(f"\nLancement de {len(selected_models)} optimisations en parallele "
+          f"({max_workers} workers)...")
+    print("Note: Les logs seront entremeles entre les modeles.\n")
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all jobs
+        future_to_model = {
+            executor.submit(
+                _run_optimization_worker, 
+                model_name, 
+                n_trials, 
+                n_splits
+            ): model_name
+            for model_name in selected_models
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_model):
+            model_name = future_to_model[future]
+            try:
+                result = future.result()
+                all_results.append(result)
+                print(f"\n[TERMINE] {model_name.upper()} - Score (MCC): {result.best_score:.4f}")
+            except Exception as e:
+                print(f"\n[ERREUR] {model_name.upper()}: {e}")
+    
+    return all_results
+
+
+def _print_final_summary(all_results: List[OptimizationResult]) -> None:
+    """Print final summary of all optimization results."""
+    print(f"\n{'='*60}")
+    print(f"RESUME FINAL - {len(all_results)} MODELE(S) OPTIMISE(S)")
+    print(f"{'='*60}")
+    
+    # Sort by score descending
+    sorted_results = sorted(all_results, key=lambda r: r.best_score, reverse=True)
+    
+    for result in sorted_results:
+        print(f"\n{result.model_name.upper()}")
+        print(f"  Score (MCC): {result.best_score:.4f}")
+        print(f"  Triple Barrier:")
+        for k, v in result.best_triple_barrier_params.items():
+            print(f"    {k}: {v}")
+        print(f"  Model params:")
+        for k, v in result.best_params.items():
+            print(f"    {k}: {v}")
 
 
 def main() -> None:
@@ -684,39 +1113,52 @@ def main() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 
-    model_name = select_model_interactive()
-    print(f"\nModele: {model_name}")
+    selected_models = select_models_interactive()
+    
+    print(f"\nModeles selectionnes ({len(selected_models)}):")
+    for m in selected_models:
+        print(f"  - {m}")
 
-    n_trials = int(input("Nombre de trials [50]: ").strip() or "50")
+    n_trials = int(input("\nNombre de trials [50]: ").strip() or "50")
     n_splits = int(input("Nombre de splits CV [5]: ").strip() or "5")
+    
+    # Ask for parallel execution if multiple models selected
+    parallel = False
+    max_workers = 1
+    cpu_count = os.cpu_count() or 4
+    
+    if len(selected_models) > 1:
+        parallel_input = input(f"Execution parallele? (O/n) [O]: ").strip().lower()
+        parallel = parallel_input != "n"
+        
+        if parallel:
+            default_workers = min(len(selected_models), cpu_count)
+            workers_input = input(
+                f"Nombre de workers [{default_workers}] (max CPU: {cpu_count}): "
+            ).strip()
+            max_workers = int(workers_input) if workers_input else default_workers
+            max_workers = min(max_workers, len(selected_models), cpu_count)
 
-    print(f"\n{'='*40}")
-    print(f"Modele: {model_name}")
+    print(f"\n{'='*60}")
+    print(f"CONFIGURATION")
+    print(f"{'='*60}")
+    print(f"Modeles: {', '.join(selected_models)}")
     print(f"Trials: {n_trials}, CV: {n_splits}")
-    print(f"{'='*40}")
+    print(f"Execution: {'PARALLELE (' + str(max_workers) + ' workers)' if parallel else 'SEQUENTIELLE'}")
+    print(f"{'='*60}")
 
     if input("\nLancer? (O/n): ").strip().lower() == "n":
         print("Annule.")
         return
 
-    config = OptimizationConfig(
-        model_name=model_name,
-        n_trials=n_trials,
-        n_splits=n_splits,
-    )
-
-    result = optimize_model(model_name, config)
-
-    print(f"\n{'='*60}")
-    print(f"OPTIMISATION TERMINEE: {model_name.upper()}")
-    print(f"{'='*60}")
-    print(f"Score (MCC): {result.best_score:.4f}")
-    print(f"\nTriple Barrier:")
-    for k, v in result.best_triple_barrier_params.items():
-        print(f"  {k}: {v}")
-    print(f"\nModel params:")
-    for k, v in result.best_params.items():
-        print(f"  {k}: {v}")
+    # Run optimization
+    if parallel and len(selected_models) > 1:
+        all_results = _run_parallel(selected_models, n_trials, n_splits, max_workers)
+    else:
+        all_results = _run_sequential(selected_models, n_trials, n_splits)
+    
+    # Final summary
+    _print_final_summary(all_results)
 
 
 if __name__ == "__main__":
