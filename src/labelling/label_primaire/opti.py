@@ -49,6 +49,7 @@ from src.labelling.label_primaire.utils import (
     FOCAL_LOSS_SEARCH_SPACE,
     FOCAL_LOSS_SUPPORTED_MODELS,
     CLASS_WEIGHT_SUPPORTED_MODELS,
+    MIN_MINORITY_PREDICTION_RATIO,
     # Dataclasses
     OptimizationConfig,
     OptimizationResult,
@@ -521,6 +522,7 @@ def _evaluate_fold(
     use_focal_loss: bool = False,
     focal_gamma: float = 2.0,
     use_class_weights: bool = True,
+    minority_weight_boost: float = 1.0,
 ) -> Tuple[float | None, float | None, str]:
     """Evaluate a single CV fold with focal loss and class weight support.
 
@@ -548,6 +550,9 @@ def _evaluate_fold(
         Focal loss gamma parameter.
     use_class_weights : bool, default=True
         Whether to use balanced class weights.
+    minority_weight_boost : float, default=1.0
+        Multiplier for minority class weights (-1, +1) in MCC scoring.
+        1.0 = balanced, >1.0 = penalize minority class errors more.
 
     Returns
     -------
@@ -617,8 +622,15 @@ def _evaluate_fold(
             logger.debug(reason)
             return None, None, reason
 
-        # Weighted MCC (always use class weights for fair evaluation)
-        sample_weights = np.array([weight_map.get(c, 1.0) for c in y_val])
+        # Apply minority_weight_boost to scoring weights
+        # Boost weights for minority classes (-1 and +1), keep neutral (0) unchanged
+        scoring_weight_map = weight_map.copy()
+        for cls in [-1, 1]:
+            if cls in scoring_weight_map:
+                scoring_weight_map[cls] *= minority_weight_boost
+
+        # Weighted MCC with boosted minority weights
+        sample_weights = np.array([scoring_weight_map.get(c, 1.0) for c in y_val])
         score_mcc = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
         score_f1w = f1_score(y_val, y_pred, average="weighted", zero_division="warn")
 
@@ -630,6 +642,23 @@ def _evaluate_fold(
             )
             logger.debug(reason)
             return None, None, reason
+
+        # Guard against degenerate models that predict too few minority classes
+        # If model predicts less than MIN_MINORITY_PREDICTION_RATIO of long/short,
+        # apply a penalty to discourage this behavior
+        n_minority_preds = np.sum((y_pred == -1) | (y_pred == 1))
+        minority_pred_ratio = n_minority_preds / len(y_pred)
+
+        if minority_pred_ratio < MIN_MINORITY_PREDICTION_RATIO:
+            # Apply penalty: reduce scores proportionally to how far below threshold
+            penalty_factor = minority_pred_ratio / MIN_MINORITY_PREDICTION_RATIO
+            score_mcc *= penalty_factor
+            score_f1w *= penalty_factor
+            logger.debug(
+                f"{model_prefix}{fold_prefix}PENALTY: minority predictions "
+                f"{minority_pred_ratio:.1%} < {MIN_MINORITY_PREDICTION_RATIO:.1%}, "
+                f"penalty_factor={penalty_factor:.2f}"
+            )
 
         return score_mcc, score_f1w, "OK"
 
@@ -653,6 +682,7 @@ def _run_cv_scoring(
     use_focal_loss: bool = False,
     focal_gamma: float = 2.0,
     use_class_weights: bool = True,
+    minority_weight_boost: float = 1.0,
 ) -> Tuple[float, float, float, int, int, str]:
     """Run walk-forward CV and return mean scores.
 
@@ -682,6 +712,8 @@ def _run_cv_scoring(
         Focal loss gamma parameter.
     use_class_weights : bool, default=True
         Whether to use balanced class weights.
+    minority_weight_boost : float, default=1.0
+        Multiplier for minority class weights in MCC scoring.
 
     Returns
     -------
@@ -725,6 +757,7 @@ def _run_cv_scoring(
             use_focal_loss=use_focal_loss,
             focal_gamma=focal_gamma,
             use_class_weights=use_class_weights,
+            minority_weight_boost=minority_weight_boost,
         )
 
         # Early pruning: fail fast on first invalid fold
@@ -773,18 +806,31 @@ def _sample_focal_loss_params(
     Returns
     -------
     Dict[str, Any]
-        Focal loss parameters: use_focal_loss, focal_gamma.
+        Focal loss parameters: use_focal_loss, focal_gamma, minority_weight_boost.
     """
     params: Dict[str, Any] = {}
 
-    # Only sample if model supports focal loss and optimization is enabled
+    # Only sample focal-specific params if model supports it
     if config.optimize_focal_params and config.model_name in FOCAL_LOSS_SUPPORTED_MODELS:
-        for name, (_, choices) in FOCAL_LOSS_SEARCH_SPACE.items():
-            params[name] = trial.suggest_categorical(name, choices)
+        params["use_focal_loss"] = trial.suggest_categorical(
+            "use_focal_loss", FOCAL_LOSS_SEARCH_SPACE["use_focal_loss"][1]
+        )
+        params["focal_gamma"] = trial.suggest_categorical(
+            "focal_gamma", FOCAL_LOSS_SEARCH_SPACE["focal_gamma"][1]
+        )
     else:
-        # Use config defaults
+        # Use config defaults for focal loss
         params["use_focal_loss"] = config.use_focal_loss
         params["focal_gamma"] = config.focal_gamma
+
+    # Always sample minority_weight_boost if optimize_focal_params is enabled
+    # (applies to all models for MCC scoring, not just focal loss supported ones)
+    if config.optimize_focal_params:
+        params["minority_weight_boost"] = trial.suggest_categorical(
+            "minority_weight_boost", FOCAL_LOSS_SEARCH_SPACE["minority_weight_boost"][1]
+        )
+    else:
+        params["minority_weight_boost"] = config.minority_weight_boost
 
     return params
 
@@ -876,12 +922,13 @@ def create_objective(
         # Sample model params
         model_params = _sample_model_params(trial, model_search_space, config)
 
-        # Sample focal loss params (for supported models)
+        # Sample focal loss params (for supported models) and minority weight boost
         focal_params = _sample_focal_loss_params(trial, config)
         use_focal_loss = focal_params.get("use_focal_loss", config.use_focal_loss)
         focal_gamma = focal_params.get("focal_gamma", config.focal_gamma)
+        minority_weight_boost = focal_params.get("minority_weight_boost", config.minority_weight_boost)
 
-        # Run CV with focal loss and class weights
+        # Run CV with focal loss, class weights, and minority weight boost
         # Note: _run_cv_scoring raises TrialPruned on first failed fold (early pruning)
         score_obj, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason = _run_cv_scoring(
             X, y, events_aligned, model_class, model_params, config, trial_num,
@@ -889,13 +936,15 @@ def create_objective(
             use_focal_loss=use_focal_loss,
             focal_gamma=focal_gamma,
             use_class_weights=config.use_class_weights,
+            minority_weight_boost=minority_weight_boost,
         )
 
         # Log successful trial (all folds passed)
         focal_info = f", focal={use_focal_loss}, γ={focal_gamma}" if use_focal_loss else ""
+        boost_info = f", boost={minority_weight_boost}" if minority_weight_boost != 1.0 else ""
         logger.info(
             f"[Trial {trial_num}] OK: OBJ={score_obj:.4f} "
-            f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}{focal_info}; "
+            f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}{focal_info}{boost_info}; "
             f"{n_valid_folds}/{n_total_folds} folds)"
         )
 

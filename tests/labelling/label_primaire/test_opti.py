@@ -393,13 +393,15 @@ def test_sample_focal_loss_params_supported_model(mocker):
     )
 
     trial = mocker.Mock(spec=optuna.trial.Trial)
-    trial.suggest_categorical.side_effect = [True, 2.0]  # use_focal_loss, focal_gamma
+    # use_focal_loss, focal_gamma, minority_weight_boost
+    trial.suggest_categorical.side_effect = [True, 2.0, 1.5]
 
     params = _sample_focal_loss_params(trial, config)
 
     assert "use_focal_loss" in params
     assert "focal_gamma" in params
-    assert trial.suggest_categorical.call_count == 2
+    assert "minority_weight_boost" in params
+    assert trial.suggest_categorical.call_count == 3
 
 
 def test_sample_focal_loss_params_unsupported_model(mocker):
@@ -412,13 +414,17 @@ def test_sample_focal_loss_params_unsupported_model(mocker):
     )
 
     trial = mocker.Mock(spec=optuna.trial.Trial)
+    # minority_weight_boost is still sampled for all models
+    trial.suggest_categorical.side_effect = [1.5]
 
     params = _sample_focal_loss_params(trial, config)
 
-    # Should use config defaults, not sample
+    # Focal loss params should use config defaults
     assert params["use_focal_loss"] == True
     assert params["focal_gamma"] == 3.0
-    trial.suggest_categorical.assert_not_called()
+    # But minority_weight_boost should still be sampled
+    assert params["minority_weight_boost"] == 1.5
+    assert trial.suggest_categorical.call_count == 1
 
 
 def test_sample_focal_loss_params_disabled(mocker):
@@ -428,6 +434,7 @@ def test_sample_focal_loss_params_disabled(mocker):
         optimize_focal_params=False,
         use_focal_loss=False,
         focal_gamma=1.0,
+        minority_weight_boost=1.5,
     )
 
     trial = mocker.Mock(spec=optuna.trial.Trial)
@@ -437,6 +444,7 @@ def test_sample_focal_loss_params_disabled(mocker):
     # Should use config defaults
     assert params["use_focal_loss"] == False
     assert params["focal_gamma"] == 1.0
+    assert params["minority_weight_boost"] == 1.5
     trial.suggest_categorical.assert_not_called()
 
 
@@ -535,6 +543,7 @@ def test_optimization_config_focal_defaults():
     assert config.focal_gamma == 2.0
     assert config.optimize_focal_params == True
     assert config.use_class_weights == True
+    assert config.minority_weight_boost == 1.25  # Conservative default
 
 
 def test_optimization_result_includes_focal_params():
@@ -543,7 +552,7 @@ def test_optimization_result_includes_focal_params():
         model_name="lightgbm",
         best_params={"n_estimators": 100},
         best_triple_barrier_params={"pt_mult": 1.0},
-        best_focal_loss_params={"use_focal_loss": True, "focal_gamma": 2.0},
+        best_focal_loss_params={"use_focal_loss": True, "focal_gamma": 2.0, "minority_weight_boost": 1.5},
         best_score=0.8,
         metric="mcc",
         n_trials=10,
@@ -553,3 +562,49 @@ def test_optimization_result_includes_focal_params():
     assert "best_focal_loss_params" in d
     assert d["best_focal_loss_params"]["use_focal_loss"] == True
     assert d["best_focal_loss_params"]["focal_gamma"] == 2.0
+    assert d["best_focal_loss_params"]["minority_weight_boost"] == 1.5
+
+
+def test_minority_weight_boost_in_search_space():
+    """Test that minority_weight_boost is in the search space."""
+    assert "minority_weight_boost" in FOCAL_LOSS_SEARCH_SPACE
+    _, choices = FOCAL_LOSS_SEARCH_SPACE["minority_weight_boost"]
+    assert 1.0 in choices  # Balanced
+    assert 1.5 in choices  # Moderate boost
+    assert 2.0 in choices  # Strong boost
+
+
+def test_evaluate_fold_with_minority_boost(sample_data):
+    """Test _evaluate_fold with minority_weight_boost."""
+    _, features, _ = sample_data
+    y = pd.Series(np.random.choice([-1, 0, 1], len(features)), index=features.index)
+
+    mock_model_cls = MagicMock()
+    mock_instance = MagicMock()
+    mock_model_cls.return_value = mock_instance
+    # Predict a mix of classes to avoid degenerate penalty
+    mock_instance.predict.return_value = np.array([-1, 0, 1, 0, 0, -1, 1, 0, 0, 1])
+
+    train_idx = np.arange(50)
+    val_idx = np.arange(50, 60)
+
+    # Test with boost = 1.0 (no boost)
+    mcc_no_boost, _, _ = _evaluate_fold(
+        features, y, train_idx, val_idx,
+        mock_model_cls, {},
+        model_name="lightgbm",
+        fold_idx=0,
+        minority_weight_boost=1.0,
+    )
+
+    # Test with boost = 1.5
+    mcc_with_boost, _, _ = _evaluate_fold(
+        features, y, train_idx, val_idx,
+        mock_model_cls, {},
+        model_name="lightgbm",
+        fold_idx=0,
+        minority_weight_boost=1.5,
+    )
+
+    # Both should complete without error
+    assert mcc_no_boost is not None or mcc_with_boost is not None

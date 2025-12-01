@@ -147,7 +147,16 @@ FOCAL_LOSS_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
     "focal_gamma": ("categorical", [0.0, 1.0, 2.0, 3.0, 5.0]),
     # Whether to use focal loss (False = standard loss with class weights)
     "use_focal_loss": ("categorical", [True, False]),
+    # Boost factor for minority class weights in MCC scoring
+    # 1.0 = standard balanced weights
+    # 1.25-1.5 = moderate boost (recommended)
+    # 2.0 = strong boost (risk of model predicting only neutral to avoid penalties)
+    "minority_weight_boost": ("categorical", [1.0, 1.25, 1.5, 1.75, 2.0]),
 }
+
+# Minimum prediction ratio for minority classes (guard against degenerate models)
+# If model predicts less than this fraction of long+short, apply penalty
+MIN_MINORITY_PREDICTION_RATIO: float = 0.10  # At least 10% of predictions should be long/short
 
 # Models that support focal loss (gradient boosting with custom objectives)
 FOCAL_LOSS_SUPPORTED_MODELS: List[str] = ["lightgbm"]
@@ -188,6 +197,8 @@ class OptimizationConfig:
     optimize_focal_params: bool = True  # Include focal params in Optuna search
     # Class weight configuration
     use_class_weights: bool = True  # Use balanced class weights
+    # Minority class weight boost for MCC scoring (1.0 = balanced, >1 = penalize minority errors more)
+    minority_weight_boost: float = 1.25  # Conservative default to avoid degenerate predictions
 
 
 @dataclass
