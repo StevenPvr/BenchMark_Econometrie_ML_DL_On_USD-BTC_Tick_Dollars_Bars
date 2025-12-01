@@ -59,7 +59,6 @@ class LSTMModel(BaseModel):
         epochs: int = 100,
         batch_size: int = 32,
         patience: int = 10,
-        device: str = "auto",
         **kwargs: Any,
     ) -> None:
         """
@@ -85,8 +84,6 @@ class LSTMModel(BaseModel):
             Taille des batchs.
         patience : int, default=10
             Patience pour early stopping.
-        device : str, default="auto"
-            Device ("cpu", "cuda", "mps", "auto").
         """
         super().__init__(name="LSTM", **kwargs)
         self.input_size = input_size
@@ -98,7 +95,6 @@ class LSTMModel(BaseModel):
         self.epochs = epochs
         self.batch_size = batch_size
         self.patience = patience
-        self.device_str = device
 
         self.model: Any = None
         self.scaler: Any = None
@@ -109,22 +105,16 @@ class LSTMModel(BaseModel):
         self._idx_to_label: dict | None = None
 
     def _get_device(self) -> Any:
-        """Determine le meilleur device disponible."""
+        """Determine le device a utiliser.
+
+        Note: On force CPU car MPS (Mac GPU) est plus lent que CPU pour
+        les petits modeles LSTM a cause de l'overhead de transfert.
+        """
         import torch  # type: ignore
 
-        # Force CPU for testing to avoid memory issues
-        import os
-        import sys
-        if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.argv[0]:
-            return torch.device("cpu")
-
-        if self.device_str == "auto":
-            if torch.cuda.is_available():
-                return torch.device("cuda")
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return torch.device("mps")
-            return torch.device("cpu")
-        return torch.device(self.device_str)
+        # Force CPU - MPS is slower than CPU for small LSTM models
+        # due to data transfer overhead between CPU and GPU
+        return torch.device("cpu")
 
     def _build_model(self, num_classes: int) -> Any:
         """Construit le modele LSTM PyTorch."""

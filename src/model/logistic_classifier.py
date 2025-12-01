@@ -33,7 +33,7 @@ class LogisticClassifierModel(BaseModel):
         C: float = 1.0,
         fit_intercept: bool = True,
         normalize: bool = True,
-        max_iter: int = 1000,
+        max_iter: int = 300,
         tol: float = 1e-4,
         class_weight: str | dict | None = "balanced",
         **kwargs: Any,
@@ -51,8 +51,9 @@ class LogisticClassifierModel(BaseModel):
         normalize : bool, default=True
             Whether to normalize features before training.
             Critical for financial features with different scales.
-        max_iter : int, default=1000
-            Maximum iterations for convergence.
+        max_iter : int, default=300
+            Maximum iterations for convergence. 300 is sufficient for
+            normalized dense data with lbfgs solver.
         tol : float, default=1e-4
             Tolerance for stopping criteria.
         class_weight : str or dict, default="balanced"
@@ -123,7 +124,8 @@ class LogisticClassifierModel(BaseModel):
             self.scaler = StandardScaler()
             X_arr = self.scaler.fit_transform(X_arr)
 
-        # Use saga solver for large datasets (faster than lbfgs for n_samples > 10k)
+        # Use lbfgs solver (quasi-Newton) - faster convergence on dense normalized data
+        # saga is better for sparse data, but our features are dense after StandardScaler
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             self.model = LogisticRegression(
@@ -132,7 +134,7 @@ class LogisticClassifierModel(BaseModel):
                 fit_intercept=self.fit_intercept,
                 max_iter=self.max_iter,
                 tol=self.tol,
-                solver="saga",  # Much faster for large datasets
+                solver="lbfgs",  # Quasi-Newton, faster on dense data
                 class_weight=self.class_weight,
                 n_jobs=-1,
             )

@@ -89,6 +89,7 @@ class RidgeClassifierModel(BaseModel):
         self.model = RidgeClassifier(
             alpha=self.alpha,
             fit_intercept=self.fit_intercept,
+            solver="lsqr",  # Iterative solver, optimal for large dense datasets
         )
         self.model.fit(X_arr, y_arr)
         self.is_fitted = True

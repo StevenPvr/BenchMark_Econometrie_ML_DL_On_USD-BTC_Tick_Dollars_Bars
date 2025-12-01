@@ -27,7 +27,6 @@ def test_lstm_fit_predict(data):
         sequence_length=3,
         epochs=1,
         batch_size=4,
-        device="cpu"
     )
 
     model.fit(X, y)
@@ -53,7 +52,6 @@ def test_lstm_fit_with_validation(data):
         hidden_size=5,
         sequence_length=3,
         epochs=1,
-        device="cpu"
     )
     # Split data
     X_train, y_train = X[:15], y[:15]
@@ -73,7 +71,7 @@ def test_lstm_insufficient_data(data):
 
 def test_lstm_predict_insufficient_data(data):
     X, y = data
-    model = LSTMModel(sequence_length=3, epochs=1, device="cpu")
+    model = LSTMModel(sequence_length=3, epochs=1)
     model.fit(X, y)
 
     X_short = X[:2] # less than sequence_length
@@ -86,7 +84,7 @@ def test_lstm_multiclass_structure(data):
     # Only 2 classes
     y_binary = np.random.choice([0, 1], size=20)
 
-    model = LSTMModel(sequence_length=3, epochs=1, device="cpu")
+    model = LSTMModel(sequence_length=3, epochs=1)
     model.fit(X, y_binary)
 
     probs = model.predict_proba(X[:5])

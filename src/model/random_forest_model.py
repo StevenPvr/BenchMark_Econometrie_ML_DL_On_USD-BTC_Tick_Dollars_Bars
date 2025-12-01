@@ -28,6 +28,7 @@ class RandomForestModel(BaseModel):
         max_features: Union[str, float] = "sqrt",
         bootstrap: bool = True,
         oob_score: bool = False,
+        class_weight: str | dict | None = "balanced",
         random_state: int = 42,
         n_jobs: int = -1,
         **kwargs: Any,
@@ -51,6 +52,9 @@ class RandomForestModel(BaseModel):
             Si True, utilise le bootstrap pour les echantillons.
         oob_score : bool, default=False
             Si True, calcule le score out-of-bag.
+        class_weight : str | dict | None, default="balanced"
+            Poids des classes. "balanced" ajuste inversement proportionnel
+            aux frequences (important pour triple-barrier desequilibre).
         random_state : int, default=42
             Seed pour reproductibilite.
         n_jobs : int, default=-1
@@ -64,6 +68,7 @@ class RandomForestModel(BaseModel):
         self.max_features = max_features
         self.bootstrap = bootstrap
         self.oob_score = oob_score
+        self.class_weight = class_weight
         self.random_state = random_state
         self.n_jobs = n_jobs
         self.model: RandomForestClassifier | None = None
@@ -87,6 +92,7 @@ class RandomForestModel(BaseModel):
             max_features=self.max_features,  # type: ignore
             bootstrap=self.bootstrap,
             oob_score=self.oob_score,
+            class_weight=self.class_weight,
             random_state=self.random_state,
             n_jobs=self.n_jobs,
         )
