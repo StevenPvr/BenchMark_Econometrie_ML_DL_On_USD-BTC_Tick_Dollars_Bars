@@ -1097,16 +1097,63 @@ def select_models_interactive() -> List[str]:
             exit(0)
 
 
+def _get_trials_per_model(
+    selected_models: List[str],
+    default_trials: int,
+) -> Dict[str, int]:
+    """Prompt user for number of trials per model.
+
+    Parameters
+    ----------
+    selected_models : List[str]
+        List of selected model names.
+    default_trials : int
+        Default number of trials for all models.
+
+    Returns
+    -------
+    Dict[str, int]
+        Mapping of model name to number of trials.
+    """
+    if len(selected_models) == 1:
+        return {selected_models[0]: default_trials}
+
+    custom_input = input(
+        f"\nNombre de trials different par modele? (o/N) [N]: "
+    ).strip().lower()
+
+    if custom_input != "o":
+        return {model: default_trials for model in selected_models}
+
+    trials_per_model: Dict[str, int] = {}
+    print("\nEntrez le nombre de trials pour chaque modele:")
+    print(f"(Appuyez Entree pour utiliser la valeur par defaut: {default_trials})")
+
+    for model in selected_models:
+        while True:
+            try:
+                model_input = input(f"  {model} [{default_trials}]: ").strip()
+                if not model_input:
+                    trials_per_model[model] = default_trials
+                else:
+                    trials_per_model[model] = int(model_input)
+                break
+            except ValueError:
+                print("    Veuillez entrer un nombre valide.")
+
+    return trials_per_model
+
+
 def _run_optimization_worker(
     model_name: str,
     n_trials: int,
     n_splits: int,
 ) -> OptimizationResult:
     """Worker function for parallel optimization.
-    
+
     This function is designed to be called in a separate process.
     It configures logging and runs optimization for a single model.
-    
+
     Parameters
     ----------
     model_name : str
@@ -1115,7 +1162,7 @@ def _run_optimization_worker(
         Number of Optuna trials.
     n_splits : int
         Number of CV splits.
-        
+
     Returns
     -------
     OptimizationResult
@@ -1126,78 +1173,94 @@ def _run_optimization_worker(
         level=logging.INFO,
         format=f"%(asctime)s - [{model_name.upper()}] - %(levelname)s - %(message)s",
     )
-    
+
     config = OptimizationConfig(
         model_name=model_name,
         n_trials=n_trials,
         n_splits=n_splits,
     )
-    
+
     return optimize_model(model_name, config)
 
 
 def _run_sequential(
     selected_models: List[str],
-    n_trials: int,
+    trials_per_model: Dict[str, int],
     n_splits: int,
 ) -> List[OptimizationResult]:
-    """Run optimization sequentially for all models."""
-    all_results: List[OptimizationResult] = []
-    
-    for i, model_name in enumerate(selected_models, 1):
-        print(f"\n{'#'*60}")
-        print(f"# [{i}/{len(selected_models)}] OPTIMISATION: {model_name.upper()}")
-        print(f"{'#'*60}")
-        
-        result = _run_optimization_worker(model_name, n_trials, n_splits)
-        all_results.append(result)
-        print(f"\n[{model_name}] Score (MCC): {result.best_score:.4f}")
-    
-    return all_results
+    """Run optimization sequentially for all models.
 
-
-def _run_parallel(
-    selected_models: List[str],
-    n_trials: int,
-    n_splits: int,
-    max_workers: int,
-) -> List[OptimizationResult]:
-    """Run optimization in parallel for all models.
-    
     Parameters
     ----------
     selected_models : List[str]
         List of model names to optimize.
-    n_trials : int
-        Number of Optuna trials per model.
+    trials_per_model : Dict[str, int]
+        Mapping of model name to number of trials.
     n_splits : int
         Number of CV splits.
-    max_workers : int
-        Maximum number of parallel workers.
-        
+
     Returns
     -------
     List[OptimizationResult]
         List of optimization results.
     """
     all_results: List[OptimizationResult] = []
-    
+
+    for i, model_name in enumerate(selected_models, 1):
+        n_trials = trials_per_model[model_name]
+        print(f"\n{'#'*60}")
+        print(f"# [{i}/{len(selected_models)}] OPTIMISATION: {model_name.upper()} ({n_trials} trials)")
+        print(f"{'#'*60}")
+
+        result = _run_optimization_worker(model_name, n_trials, n_splits)
+        all_results.append(result)
+        print(f"\n[{model_name}] Score (MCC): {result.best_score:.4f}")
+
+    return all_results
+
+
+def _run_parallel(
+    selected_models: List[str],
+    trials_per_model: Dict[str, int],
+    n_splits: int,
+    max_workers: int,
+) -> List[OptimizationResult]:
+    """Run optimization in parallel for all models.
+
+    Parameters
+    ----------
+    selected_models : List[str]
+        List of model names to optimize.
+    trials_per_model : Dict[str, int]
+        Mapping of model name to number of trials.
+    n_splits : int
+        Number of CV splits.
+    max_workers : int
+        Maximum number of parallel workers.
+
+    Returns
+    -------
+    List[OptimizationResult]
+        List of optimization results.
+    """
+    all_results: List[OptimizationResult] = []
+
     print(f"\nLancement de {len(selected_models)} optimisations en parallele "
           f"({max_workers} workers)...")
     print("Note: Les logs seront entremeles entre les modeles.\n")
-    
+
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all jobs
         future_to_model = {
             executor.submit(
-                _run_optimization_worker, 
-                model_name, 
-                n_trials, 
+                _run_optimization_worker,
+                model_name,
+                trials_per_model[model_name],
                 n_splits
             ): model_name
             for model_name in selected_models
         }
-        
+
         # Collect results as they complete
         for future in as_completed(future_to_model):
             model_name = future_to_model[future]
@@ -1207,7 +1270,7 @@ def _run_parallel(
                 print(f"\n[TERMINE] {model_name.upper()} - Score (MCC): {result.best_score:.4f}")
             except Exception as e:
                 print(f"\n[ERREUR] {model_name.upper()}: {e}")
-    
+
     return all_results
 
 
@@ -1239,23 +1302,26 @@ def main() -> None:
     )
 
     selected_models = select_models_interactive()
-    
+
     print(f"\nModeles selectionnes ({len(selected_models)}):")
     for m in selected_models:
         print(f"  - {m}")
 
-    n_trials = int(input("\nNombre de trials [50]: ").strip() or "50")
+    default_trials = int(input("\nNombre de trials par defaut [50]: ").strip() or "50")
     n_splits = int(input("Nombre de splits CV [5]: ").strip() or "5")
-    
+
+    # Get trials per model (may be customized per model)
+    trials_per_model = _get_trials_per_model(selected_models, default_trials)
+
     # Ask for parallel execution if multiple models selected
     parallel = False
     max_workers = 1
     cpu_count = os.cpu_count() or 4
-    
+
     if len(selected_models) > 1:
         parallel_input = input(f"Execution parallele? (O/n) [O]: ").strip().lower()
         parallel = parallel_input != "n"
-        
+
         if parallel:
             default_workers = min(len(selected_models), cpu_count)
             workers_input = input(
@@ -1264,11 +1330,19 @@ def main() -> None:
             max_workers = int(workers_input) if workers_input else default_workers
             max_workers = min(max_workers, len(selected_models), cpu_count)
 
+    # Build trials summary
+    unique_trials = set(trials_per_model.values())
+    if len(unique_trials) == 1:
+        trials_summary = str(list(unique_trials)[0])
+    else:
+        trials_summary = ", ".join(f"{m}:{t}" for m, t in trials_per_model.items())
+
     print(f"\n{'='*60}")
-    print(f"CONFIGURATION")
+    print("CONFIGURATION")
     print(f"{'='*60}")
     print(f"Modeles: {', '.join(selected_models)}")
-    print(f"Trials: {n_trials}, CV: {n_splits}")
+    print(f"Trials: {trials_summary}")
+    print(f"CV splits: {n_splits}")
     print(f"Execution: {'PARALLELE (' + str(max_workers) + ' workers)' if parallel else 'SEQUENTIELLE'}")
     print(f"{'='*60}")
 
@@ -1278,10 +1352,10 @@ def main() -> None:
 
     # Run optimization
     if parallel and len(selected_models) > 1:
-        all_results = _run_parallel(selected_models, n_trials, n_splits, max_workers)
+        all_results = _run_parallel(selected_models, trials_per_model, n_splits, max_workers)
     else:
-        all_results = _run_sequential(selected_models, n_trials, n_splits)
-    
+        all_results = _run_sequential(selected_models, trials_per_model, n_splits)
+
     # Final summary
     _print_final_summary(all_results)
 
