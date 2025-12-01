@@ -139,6 +139,28 @@ TRIPLE_BARRIER_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
     "max_holding": ("categorical", [15, 30, 50, 80, 120, 180]),
 }
 
+# Focal loss search space for class imbalance handling
+# gamma: focusing parameter (higher = more focus on hard examples)
+# use_focal_loss: whether to use focal loss vs standard cross-entropy
+FOCAL_LOSS_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
+    # Focusing parameter: 0=CE, 1=light, 2=standard, 3-5=aggressive
+    "focal_gamma": ("categorical", [0.0, 1.0, 2.0, 3.0, 5.0]),
+    # Whether to use focal loss (False = standard loss with class weights)
+    "use_focal_loss": ("categorical", [True, False]),
+}
+
+# Models that support focal loss (gradient boosting with custom objectives)
+FOCAL_LOSS_SUPPORTED_MODELS: List[str] = ["lightgbm"]
+
+# Models that support class_weight parameter directly
+# Note: Ridge (sklearn.linear_model.RidgeClassifier) does not support class_weight
+CLASS_WEIGHT_SUPPORTED_MODELS: List[str] = [
+    "lightgbm",
+    "catboost",
+    "random_forest",
+    "logistic",
+]
+
 
 # =============================================================================
 # DATACLASSES
@@ -160,6 +182,12 @@ class OptimizationConfig:
     parallelize_labeling: bool = True
     parallel_min_events: int = 10_000
     n_jobs: int | None = None
+    # Focal loss configuration
+    use_focal_loss: bool = True  # Enable focal loss for supported models
+    focal_gamma: float = 2.0  # Focusing parameter (0=CE, 2=standard, 5=aggressive)
+    optimize_focal_params: bool = True  # Include focal params in Optuna search
+    # Class weight configuration
+    use_class_weights: bool = True  # Use balanced class weights
 
 
 @dataclass
@@ -174,6 +202,7 @@ class OptimizationResult:
     n_trials: int
     cv_scores: List[float] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    best_focal_loss_params: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -181,6 +210,7 @@ class OptimizationResult:
             "model_name": self.model_name,
             "best_params": self.best_params,
             "best_triple_barrier_params": self.best_triple_barrier_params,
+            "best_focal_loss_params": self.best_focal_loss_params,
             "best_score": self.best_score,
             "metric": self.metric,
             "n_trials": self.n_trials,

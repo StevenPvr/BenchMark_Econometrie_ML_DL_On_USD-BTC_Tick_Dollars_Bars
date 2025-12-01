@@ -32,9 +32,15 @@ from src.labelling.label_primaire.opti import (
     _run_parallel,
     _print_final_summary,
     _make_cache_key,
+    _sample_focal_loss_params,
     main,
 )
-from src.labelling.label_primaire.utils import TRIPLE_BARRIER_SEARCH_SPACE
+from src.labelling.label_primaire.utils import (
+    TRIPLE_BARRIER_SEARCH_SPACE,
+    FOCAL_LOSS_SEARCH_SPACE,
+    FOCAL_LOSS_SUPPORTED_MODELS,
+    CLASS_WEIGHT_SUPPORTED_MODELS,
+)
 
 # =============================================================================
 # DATA FIXTURES
@@ -358,7 +364,8 @@ def test_select_models_interactive(mocker):
 
 def test_run_sequential(mocker):
     mocker.patch("src.labelling.label_primaire.opti._run_optimization_worker", return_value=MagicMock(best_score=0.5))
-    res = _run_sequential(["m1", "m2"], 1, 1)
+    trials_per_model = {"m1": 10, "m2": 10}
+    res = _run_sequential(["m1", "m2"], trials_per_model, 5)
     assert len(res) == 2
 
 def test_main_cli(mocker):
@@ -371,3 +378,178 @@ def test_main_cli(mocker):
 
     main()
     mock_run.assert_called_once()
+
+
+# =============================================================================
+# FOCAL LOSS AND CLASS WEIGHT TESTS
+# =============================================================================
+
+
+def test_sample_focal_loss_params_supported_model(mocker):
+    """Test focal loss param sampling for supported model."""
+    config = OptimizationConfig(
+        model_name="lightgbm",
+        optimize_focal_params=True,
+    )
+
+    trial = mocker.Mock(spec=optuna.trial.Trial)
+    trial.suggest_categorical.side_effect = [True, 2.0]  # use_focal_loss, focal_gamma
+
+    params = _sample_focal_loss_params(trial, config)
+
+    assert "use_focal_loss" in params
+    assert "focal_gamma" in params
+    assert trial.suggest_categorical.call_count == 2
+
+
+def test_sample_focal_loss_params_unsupported_model(mocker):
+    """Test focal loss param sampling for unsupported model uses defaults."""
+    config = OptimizationConfig(
+        model_name="random_forest",  # Not in FOCAL_LOSS_SUPPORTED_MODELS
+        use_focal_loss=True,
+        focal_gamma=3.0,
+        optimize_focal_params=True,
+    )
+
+    trial = mocker.Mock(spec=optuna.trial.Trial)
+
+    params = _sample_focal_loss_params(trial, config)
+
+    # Should use config defaults, not sample
+    assert params["use_focal_loss"] == True
+    assert params["focal_gamma"] == 3.0
+    trial.suggest_categorical.assert_not_called()
+
+
+def test_sample_focal_loss_params_disabled(mocker):
+    """Test focal loss param sampling when optimization is disabled."""
+    config = OptimizationConfig(
+        model_name="lightgbm",
+        optimize_focal_params=False,
+        use_focal_loss=False,
+        focal_gamma=1.0,
+    )
+
+    trial = mocker.Mock(spec=optuna.trial.Trial)
+
+    params = _sample_focal_loss_params(trial, config)
+
+    # Should use config defaults
+    assert params["use_focal_loss"] == False
+    assert params["focal_gamma"] == 1.0
+    trial.suggest_categorical.assert_not_called()
+
+
+def test_evaluate_fold_with_focal_loss(sample_data):
+    """Test _evaluate_fold with focal loss enabled."""
+    _, features, _ = sample_data
+    y = pd.Series(np.random.choice([-1, 0, 1], len(features)), index=features.index)
+
+    mock_model_cls = MagicMock()
+    mock_instance = MagicMock()
+    mock_model_cls.return_value = mock_instance
+    mock_instance.predict.return_value = np.random.choice([-1, 0, 1], 10)
+
+    train_idx = np.arange(50)
+    val_idx = np.arange(50, 60)
+
+    mcc, f1_weighted, reason = _evaluate_fold(
+        features, y, train_idx, val_idx,
+        mock_model_cls, {},
+        model_name="lightgbm",
+        fold_idx=0,
+        use_focal_loss=True,
+        focal_gamma=2.0,
+        use_class_weights=True,
+    )
+
+    # Should still complete (mocked model)
+    assert mcc is not None or reason != "OK"
+
+
+def test_evaluate_fold_with_class_weights(sample_data):
+    """Test _evaluate_fold with class weights for different models."""
+    _, features, _ = sample_data
+    y = pd.Series(np.random.choice([-1, 0, 1], len(features)), index=features.index)
+
+    for model_name in CLASS_WEIGHT_SUPPORTED_MODELS:
+        mock_model_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_model_cls.return_value = mock_instance
+        mock_instance.predict.return_value = np.random.choice([-1, 0, 1], 10)
+
+        train_idx = np.arange(50)
+        val_idx = np.arange(50, 60)
+
+        mcc, f1_weighted, reason = _evaluate_fold(
+            features, y, train_idx, val_idx,
+            mock_model_cls, {},
+            model_name=model_name,
+            fold_idx=0,
+            use_focal_loss=False,
+            focal_gamma=2.0,
+            use_class_weights=True,
+        )
+
+        # Should complete without error
+        assert mcc is not None or "SKIP" in reason or "FAILED" in reason
+
+
+def test_focal_loss_search_space():
+    """Test focal loss search space structure."""
+    assert "focal_gamma" in FOCAL_LOSS_SEARCH_SPACE
+    assert "use_focal_loss" in FOCAL_LOSS_SEARCH_SPACE
+
+    _, gamma_choices = FOCAL_LOSS_SEARCH_SPACE["focal_gamma"]
+    assert 0.0 in gamma_choices
+    assert 2.0 in gamma_choices
+
+    _, use_focal_choices = FOCAL_LOSS_SEARCH_SPACE["use_focal_loss"]
+    assert True in use_focal_choices
+    assert False in use_focal_choices
+
+
+def test_focal_loss_supported_models():
+    """Test that focal loss supported models list is correct."""
+    assert "lightgbm" in FOCAL_LOSS_SUPPORTED_MODELS
+    # Models without custom objective support should not be listed
+    assert "random_forest" not in FOCAL_LOSS_SUPPORTED_MODELS
+    assert "ridge" not in FOCAL_LOSS_SUPPORTED_MODELS
+
+
+def test_class_weight_supported_models():
+    """Test that class weight supported models list is correct."""
+    assert "lightgbm" in CLASS_WEIGHT_SUPPORTED_MODELS
+    assert "catboost" in CLASS_WEIGHT_SUPPORTED_MODELS
+    assert "random_forest" in CLASS_WEIGHT_SUPPORTED_MODELS
+    assert "logistic" in CLASS_WEIGHT_SUPPORTED_MODELS
+    # Ridge doesn't support class_weight in sklearn
+    assert "ridge" not in CLASS_WEIGHT_SUPPORTED_MODELS
+
+
+def test_optimization_config_focal_defaults():
+    """Test OptimizationConfig focal loss defaults."""
+    config = OptimizationConfig(model_name="lightgbm")
+
+    assert config.use_focal_loss == True
+    assert config.focal_gamma == 2.0
+    assert config.optimize_focal_params == True
+    assert config.use_class_weights == True
+
+
+def test_optimization_result_includes_focal_params():
+    """Test that OptimizationResult includes focal loss params."""
+    result = OptimizationResult(
+        model_name="lightgbm",
+        best_params={"n_estimators": 100},
+        best_triple_barrier_params={"pt_mult": 1.0},
+        best_focal_loss_params={"use_focal_loss": True, "focal_gamma": 2.0},
+        best_score=0.8,
+        metric="mcc",
+        n_trials=10,
+    )
+
+    d = result.to_dict()
+    assert "best_focal_loss_params" in d
+    assert d["best_focal_loss_params"]["use_focal_loss"] == True
+    assert d["best_focal_loss_params"]["focal_gamma"] == 2.0

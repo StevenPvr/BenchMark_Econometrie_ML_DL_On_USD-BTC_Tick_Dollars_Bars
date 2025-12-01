@@ -30,6 +30,7 @@ class CatBoostModel(BaseModel):
         random_seed: int = 42,
         thread_count: int = -1,
         loss_function: str = "MultiClass",
+        class_weights: List[float] | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -55,6 +56,9 @@ class CatBoostModel(BaseModel):
             Nombre de threads.
         loss_function : str, default="MultiClass"
             Fonction de perte pour l'entrainement.
+        class_weights : List[float], optional
+            Weights for classes in order of sorted class labels.
+            Important for imbalanced triple-barrier labels.
         """
         super().__init__(name="CatBoost", **kwargs)
         self.iterations = iterations
@@ -66,6 +70,7 @@ class CatBoostModel(BaseModel):
         self.random_seed = random_seed
         self.thread_count = thread_count
         self.loss_function = loss_function
+        self.class_weights = class_weights
         self.model: CatBoostClassifier | None = None
         self.classes_: np.ndarray | None = None
 
@@ -102,18 +107,22 @@ class CatBoostModel(BaseModel):
         y_arr = np.asarray(y).ravel()
         self.classes_ = np.unique(y_arr)
 
-        self.model = CatBoostClassifier(
-            iterations=self.iterations,
-            depth=self.depth,
-            learning_rate=self.learning_rate,
-            l2_leaf_reg=self.l2_leaf_reg,
-            random_strength=self.random_strength,
-            bagging_temperature=self.bagging_temperature,
-            random_seed=self.random_seed,
-            thread_count=self.thread_count,
-            loss_function=self.loss_function,
-            verbose=verbose,
-        )
+        model_params = {
+            "iterations": self.iterations,
+            "depth": self.depth,
+            "learning_rate": self.learning_rate,
+            "l2_leaf_reg": self.l2_leaf_reg,
+            "random_strength": self.random_strength,
+            "bagging_temperature": self.bagging_temperature,
+            "random_seed": self.random_seed,
+            "thread_count": self.thread_count,
+            "loss_function": self.loss_function,
+            "verbose": verbose,
+        }
+        if self.class_weights is not None:
+            model_params["class_weights"] = self.class_weights
+
+        self.model = CatBoostClassifier(**model_params)
 
         self.model.fit(
             X,

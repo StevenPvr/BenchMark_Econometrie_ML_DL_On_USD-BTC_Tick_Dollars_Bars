@@ -46,6 +46,9 @@ from src.labelling.label_primaire.utils import (
     # Registry and search spaces
     MODEL_REGISTRY,
     TRIPLE_BARRIER_SEARCH_SPACE,
+    FOCAL_LOSS_SEARCH_SPACE,
+    FOCAL_LOSS_SUPPORTED_MODELS,
+    CLASS_WEIGHT_SUPPORTED_MODELS,
     # Dataclasses
     OptimizationConfig,
     OptimizationResult,
@@ -60,6 +63,10 @@ from src.labelling.label_primaire.utils import (
     find_barrier_touch,
     compute_return_and_label,
     set_vertical_barriers,
+)
+from src.labelling.label_primaire.focal_loss import (
+    create_focal_loss_objective,
+    compute_focal_alpha_from_class_weights,
 )
 
 # Suppress warnings during optimization
@@ -511,9 +518,37 @@ def _evaluate_fold(
     model_params: Dict[str, Any],
     model_name: str | None = None,
     fold_idx: int | None = None,
+    use_focal_loss: bool = False,
+    focal_gamma: float = 2.0,
+    use_class_weights: bool = True,
 ) -> Tuple[float | None, float | None, str]:
-    """Evaluate a single CV fold.
-    
+    """Evaluate a single CV fold with focal loss and class weight support.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Feature matrix.
+    y : pd.Series
+        Labels.
+    train_idx : np.ndarray
+        Training indices.
+    val_idx : np.ndarray
+        Validation indices.
+    model_class : Type[BaseModel]
+        Model class to instantiate.
+    model_params : Dict[str, Any]
+        Model hyperparameters.
+    model_name : str, optional
+        Model name for logging.
+    fold_idx : int, optional
+        Fold index for logging.
+    use_focal_loss : bool, default=False
+        Whether to use focal loss (for LightGBM only).
+    focal_gamma : float, default=2.0
+        Focal loss gamma parameter.
+    use_class_weights : bool, default=True
+        Whether to use balanced class weights.
+
     Returns
     -------
     Tuple[float | None, float | None, str]
@@ -521,7 +556,7 @@ def _evaluate_fold(
     """
     model_prefix = f"[{model_name}] " if model_name else ""
     fold_prefix = f"Fold {fold_idx}: " if fold_idx is not None else ""
-    
+
     try:
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
@@ -534,13 +569,41 @@ def _evaluate_fold(
             logger.debug(reason)
             return None, None, reason
 
-        # Compute class weights
+        # Compute class weights for scoring and model training
         classes = np.unique(y_train)
         cw = compute_class_weight("balanced", classes=classes, y=y_train)
         weight_map = dict(zip(classes, cw))
 
+        # Make a copy of model params to modify
+        final_model_params = model_params.copy()
+
+        # Apply class weights to model if supported
+        if use_class_weights and model_name in CLASS_WEIGHT_SUPPORTED_MODELS:
+            if model_name == "lightgbm":
+                final_model_params["class_weight"] = weight_map
+            elif model_name == "catboost":
+                # CatBoost uses class_weights as list in class order
+                final_model_params["class_weights"] = [weight_map.get(c, 1.0) for c in sorted(classes)]
+            elif model_name == "random_forest":
+                final_model_params["class_weight"] = weight_map
+            elif model_name in ("logistic", "ridge"):
+                final_model_params["class_weight"] = weight_map
+
+        # Apply focal loss for LightGBM if enabled
+        if use_focal_loss and model_name in FOCAL_LOSS_SUPPORTED_MODELS:
+            # Compute alpha weights from class distribution
+            alpha = compute_focal_alpha_from_class_weights(weight_map, classes=tuple(sorted(classes)))
+            focal_objective = create_focal_loss_objective(
+                gamma=focal_gamma,
+                alpha=alpha,
+                n_classes=len(classes),
+            )
+            final_model_params["objective"] = focal_objective
+            # Remove class_weight when using focal loss (alpha handles it)
+            final_model_params.pop("class_weight", None)
+
         # Train and predict
-        model = model_class(**model_params)
+        model = model_class(**final_model_params)
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
@@ -554,11 +617,11 @@ def _evaluate_fold(
             logger.debug(reason)
             return None, None, reason
 
-        # Weighted MCC
+        # Weighted MCC (always use class weights for fair evaluation)
         sample_weights = np.array([weight_map.get(c, 1.0) for c in y_val])
         score_mcc = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
         score_f1w = f1_score(y_val, y_pred, average="weighted", zero_division="warn")
-        
+
         # Handle NaN MCC (can happen with degenerate predictions)
         if np.isnan(score_mcc):
             reason = (
@@ -567,7 +630,7 @@ def _evaluate_fold(
             )
             logger.debug(reason)
             return None, None, reason
-        
+
         return score_mcc, score_f1w, "OK"
 
     except Exception as e:
@@ -587,10 +650,38 @@ def _run_cv_scoring(
     config: OptimizationConfig,
     trial_number: int | None = None,
     model_name: str | None = None,
+    use_focal_loss: bool = False,
+    focal_gamma: float = 2.0,
+    use_class_weights: bool = True,
 ) -> Tuple[float, float, float, int, int, str]:
     """Run walk-forward CV and return mean scores.
 
     Early pruning: raises TrialPruned at the first failed fold.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Feature matrix.
+    y : pd.Series
+        Labels.
+    events : pd.DataFrame
+        Events DataFrame for purging.
+    model_class : Type[BaseModel]
+        Model class to instantiate.
+    model_params : Dict[str, Any]
+        Model hyperparameters.
+    config : OptimizationConfig
+        Optimization configuration.
+    trial_number : int, optional
+        Trial number for logging.
+    model_name : str, optional
+        Model name for logging.
+    use_focal_loss : bool, default=False
+        Whether to use focal loss.
+    focal_gamma : float, default=2.0
+        Focal loss gamma parameter.
+    use_class_weights : bool, default=True
+        Whether to use balanced class weights.
 
     Returns
     -------
@@ -629,7 +720,11 @@ def _run_cv_scoring(
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
         score_mcc, score_f1w, fold_reason = _evaluate_fold(
             X, y, train_idx, val_idx, model_class, model_params,
-            model_name=model_name, fold_idx=fold_idx
+            model_name=model_name,
+            fold_idx=fold_idx,
+            use_focal_loss=use_focal_loss,
+            focal_gamma=focal_gamma,
+            use_class_weights=use_class_weights,
         )
 
         # Early pruning: fail fast on first invalid fold
@@ -660,6 +755,38 @@ def _make_cache_key(tb_params: Dict[str, Any]) -> EventsCacheKey:
         tb_params["min_return"],
         tb_params["max_holding"],
     )
+
+
+def _sample_focal_loss_params(
+    trial: optuna.Trial,
+    config: OptimizationConfig,
+) -> Dict[str, Any]:
+    """Sample focal loss parameters from search space.
+
+    Parameters
+    ----------
+    trial : optuna.Trial
+        Optuna trial.
+    config : OptimizationConfig
+        Optimization configuration.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Focal loss parameters: use_focal_loss, focal_gamma.
+    """
+    params: Dict[str, Any] = {}
+
+    # Only sample if model supports focal loss and optimization is enabled
+    if config.optimize_focal_params and config.model_name in FOCAL_LOSS_SUPPORTED_MODELS:
+        for name, (_, choices) in FOCAL_LOSS_SEARCH_SPACE.items():
+            params[name] = trial.suggest_categorical(name, choices)
+    else:
+        # Use config defaults
+        params["use_focal_loss"] = config.use_focal_loss
+        params["focal_gamma"] = config.focal_gamma
+
+    return params
 
 
 def create_objective(
@@ -698,6 +825,8 @@ def create_objective(
       optimization when n_trials exceeds the number of unique combinations.
     - Trials are PRUNED (not just scored -inf) if not all n_splits folds
       are successfully validated.
+    - Focal loss parameters are optimized for supported models (LightGBM).
+    - Class weights are applied to supported models for imbalanced classes.
     """
     log_level = logging.INFO if verbose else logging.DEBUG
 
@@ -744,19 +873,29 @@ def create_objective(
             logger.log(log_level, reason)
             raise optuna.TrialPruned(reason)
 
-        # Sample model params and run CV
-        # Note: _run_cv_scoring raises TrialPruned on first failed fold (early pruning)
+        # Sample model params
         model_params = _sample_model_params(trial, model_search_space, config)
 
+        # Sample focal loss params (for supported models)
+        focal_params = _sample_focal_loss_params(trial, config)
+        use_focal_loss = focal_params.get("use_focal_loss", config.use_focal_loss)
+        focal_gamma = focal_params.get("focal_gamma", config.focal_gamma)
+
+        # Run CV with focal loss and class weights
+        # Note: _run_cv_scoring raises TrialPruned on first failed fold (early pruning)
         score_obj, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason = _run_cv_scoring(
             X, y, events_aligned, model_class, model_params, config, trial_num,
-            model_name=config.model_name
+            model_name=config.model_name,
+            use_focal_loss=use_focal_loss,
+            focal_gamma=focal_gamma,
+            use_class_weights=config.use_class_weights,
         )
 
         # Log successful trial (all folds passed)
+        focal_info = f", focal={use_focal_loss}, γ={focal_gamma}" if use_focal_loss else ""
         logger.info(
             f"[Trial {trial_num}] OK: OBJ={score_obj:.4f} "
-            f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}; "
+            f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}{focal_info}; "
             f"{n_valid_folds}/{n_total_folds} folds)"
         )
 
@@ -962,14 +1101,27 @@ def _build_result(
     """Build optimization result from study."""
     best_trial = study.best_trial
     tb_keys = set(TRIPLE_BARRIER_SEARCH_SPACE.keys())
+    focal_keys = set(FOCAL_LOSS_SEARCH_SPACE.keys())
 
     best_tb = {k: v for k, v in best_trial.params.items() if k in tb_keys}
-    best_model = {k: v for k, v in best_trial.params.items() if k not in tb_keys}
+    best_focal = {k: v for k, v in best_trial.params.items() if k in focal_keys}
+    best_model = {
+        k: v for k, v in best_trial.params.items()
+        if k not in tb_keys and k not in focal_keys
+    }
+
+    # If focal loss params were not optimized, use config defaults
+    if not best_focal:
+        best_focal = {
+            "use_focal_loss": config.use_focal_loss,
+            "focal_gamma": config.focal_gamma,
+        }
 
     return OptimizationResult(
         model_name=model_name,
         best_params=best_model,
         best_triple_barrier_params=best_tb,
+        best_focal_loss_params=best_focal,
         best_score=best_trial.value if best_trial.value is not None else float("nan"),
         metric="mean_mcc_f1_weighted",
         n_trials=len(study.trials),
@@ -980,6 +1132,7 @@ def _log_result(result: OptimizationResult) -> None:
     """Log optimization results."""
     logger.info(f"Best score: {result.best_score:.4f}")
     logger.info(f"Best TB params: {result.best_triple_barrier_params}")
+    logger.info(f"Best focal loss params: {result.best_focal_loss_params}")
     logger.info(f"Best model params: {result.best_params}")
 
 
@@ -1279,16 +1432,20 @@ def _print_final_summary(all_results: List[OptimizationResult]) -> None:
     print(f"\n{'='*60}")
     print(f"RESUME FINAL - {len(all_results)} MODELE(S) OPTIMISE(S)")
     print(f"{'='*60}")
-    
+
     # Sort by score descending
     sorted_results = sorted(all_results, key=lambda r: r.best_score, reverse=True)
-    
+
     for result in sorted_results:
         print(f"\n{result.model_name.upper()}")
         print(f"  Score (MCC): {result.best_score:.4f}")
         print(f"  Triple Barrier:")
         for k, v in result.best_triple_barrier_params.items():
             print(f"    {k}: {v}")
+        if result.best_focal_loss_params:
+            print(f"  Focal Loss:")
+            for k, v in result.best_focal_loss_params.items():
+                print(f"    {k}: {v}")
         print(f"  Model params:")
         for k, v in result.best_params.items():
             print(f"    {k}: {v}")

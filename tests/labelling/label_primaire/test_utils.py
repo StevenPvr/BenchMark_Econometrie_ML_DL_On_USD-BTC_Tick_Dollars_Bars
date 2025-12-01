@@ -14,6 +14,9 @@ from pytest_mock import MockerFixture
 from src.labelling.label_primaire.utils import (
     MODEL_REGISTRY,
     TRIPLE_BARRIER_SEARCH_SPACE,
+    FOCAL_LOSS_SEARCH_SPACE,
+    FOCAL_LOSS_SUPPORTED_MODELS,
+    CLASS_WEIGHT_SUPPORTED_MODELS,
     OptimizationConfig,
     OptimizationResult,
     compute_barriers,
@@ -279,3 +282,101 @@ def test_set_vertical_barriers():
     # Cap at end
     t1 = set_vertical_barriers(t_events, close_idx, max_holding=20)
     assert t1.iloc[0] == dates[-1]
+
+
+# =============================================================================
+# FOCAL LOSS CONFIG TESTS
+# =============================================================================
+
+
+def test_focal_loss_search_space():
+    """Test focal loss search space is properly defined."""
+    assert "focal_gamma" in FOCAL_LOSS_SEARCH_SPACE
+    assert "use_focal_loss" in FOCAL_LOSS_SEARCH_SPACE
+
+    # Check gamma values include expected range
+    _, gamma_values = FOCAL_LOSS_SEARCH_SPACE["focal_gamma"]
+    assert 0.0 in gamma_values  # CE baseline
+    assert 2.0 in gamma_values  # Standard focal loss
+
+
+def test_focal_loss_supported_models():
+    """Test focal loss supported models list."""
+    # LightGBM supports custom objectives
+    assert "lightgbm" in FOCAL_LOSS_SUPPORTED_MODELS
+    # These don't support custom objectives
+    assert "ridge" not in FOCAL_LOSS_SUPPORTED_MODELS
+    assert "logistic" not in FOCAL_LOSS_SUPPORTED_MODELS
+
+
+def test_class_weight_supported_models():
+    """Test class weight supported models list."""
+    expected_supported = ["lightgbm", "catboost", "random_forest", "logistic"]
+    for model in expected_supported:
+        assert model in CLASS_WEIGHT_SUPPORTED_MODELS
+
+    # Ridge doesn't support class_weight in sklearn
+    assert "ridge" not in CLASS_WEIGHT_SUPPORTED_MODELS
+
+
+def test_optimization_config_focal_params():
+    """Test OptimizationConfig includes focal loss parameters."""
+    config = OptimizationConfig(model_name="lightgbm")
+
+    # Check focal loss defaults
+    assert hasattr(config, "use_focal_loss")
+    assert hasattr(config, "focal_gamma")
+    assert hasattr(config, "optimize_focal_params")
+    assert hasattr(config, "use_class_weights")
+
+    # Check default values
+    assert config.use_focal_loss == True
+    assert config.focal_gamma == 2.0
+    assert config.optimize_focal_params == True
+    assert config.use_class_weights == True
+
+
+def test_optimization_config_custom_focal_params():
+    """Test OptimizationConfig with custom focal loss parameters."""
+    config = OptimizationConfig(
+        model_name="lightgbm",
+        use_focal_loss=False,
+        focal_gamma=5.0,
+        optimize_focal_params=False,
+        use_class_weights=False,
+    )
+
+    assert config.use_focal_loss == False
+    assert config.focal_gamma == 5.0
+    assert config.optimize_focal_params == False
+    assert config.use_class_weights == False
+
+
+def test_optimization_result_focal_params(tmp_path: Path):
+    """Test OptimizationResult includes focal loss params."""
+    result = OptimizationResult(
+        model_name="lightgbm",
+        best_params={"n_estimators": 100},
+        best_triple_barrier_params={"pt_mult": 1.0, "sl_mult": 1.0},
+        best_focal_loss_params={"use_focal_loss": True, "focal_gamma": 2.0},
+        best_score=0.75,
+        metric="mcc",
+        n_trials=50,
+    )
+
+    # Test to_dict includes focal params
+    d = result.to_dict()
+    assert "best_focal_loss_params" in d
+    assert d["best_focal_loss_params"]["use_focal_loss"] == True
+    assert d["best_focal_loss_params"]["focal_gamma"] == 2.0
+
+    # Test save includes focal params
+    save_path = tmp_path / "result_focal.json"
+    result.save(save_path)
+    assert save_path.exists()
+
+    import json
+    with open(save_path) as f:
+        loaded = json.load(f)
+    assert "best_focal_loss_params" in loaded
+    assert loaded["best_focal_loss_params"]["focal_gamma"] == 2.0
