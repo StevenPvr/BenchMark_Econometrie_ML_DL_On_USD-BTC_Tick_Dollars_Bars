@@ -31,6 +31,7 @@ from src.labelling.label_primaire.opti import (
     _run_sequential,
     _run_parallel,
     _print_final_summary,
+    _make_cache_key,
     main,
 )
 from src.labelling.label_primaire.utils import TRIPLE_BARRIER_SEARCH_SPACE
@@ -225,6 +226,22 @@ def test_evaluate_fold(sample_data):
     assert f1_weighted is not None
     assert reason == "OK"
 
+def test_make_cache_key():
+    """Test cache key generation from barrier params."""
+    tb_params = {
+        "pt_mult": 1.0,
+        "sl_mult": 1.5,
+        "min_return": 0.0001,
+        "max_holding": 50,
+    }
+    key = _make_cache_key(tb_params)
+    assert key == (1.0, 1.5, 0.0001, 50)
+    assert isinstance(key, tuple)
+    # Verify key is hashable (can be used in dict)
+    cache = {key: "test"}
+    assert cache[key] == "test"
+
+
 def test_create_objective(sample_data, mocker):
     close, features, volatility = sample_data
     config = OptimizationConfig(model_name="lightgbm", n_trials=1, min_train_size=10)
@@ -250,6 +267,50 @@ def test_create_objective(sample_data, mocker):
 
     score = objective(trial)
     assert score == 0.5
+
+
+def test_create_objective_uses_cache(sample_data, mocker):
+    """Test that create_objective caches events and reuses them."""
+    close, features, volatility = sample_data
+    config = OptimizationConfig(model_name="lightgbm", n_trials=1, min_train_size=10)
+
+    mock_events = pd.DataFrame({"label": [1]*50 + [-1]*50}, index=features.index)
+
+    # Track calls to _generate_trial_events
+    generate_mock = mocker.patch(
+        "src.labelling.label_primaire.opti._generate_trial_events",
+        return_value=mock_events
+    )
+    mocker.patch("src.labelling.label_primaire.opti._validate_events", return_value=(True, "OK"))
+    mocker.patch("src.labelling.label_primaire.opti._align_features_events",
+                 return_value=(features, pd.Series([1]*100, index=features.index),
+                              pd.DataFrame(index=features.index), "OK"))
+    mocker.patch("src.labelling.label_primaire.opti._run_cv_scoring",
+                 return_value=(0.5, 0.5, 0.5, 5, 5, "OK"))
+
+    mock_model_cls = MagicMock()
+    search_space = {"p1": ("categorical", [1])}
+
+    objective = create_objective(
+        config, features, close, volatility, mock_model_cls, search_space
+    )
+
+    # Create trials with SAME barrier params -> should use cache on second call
+    trial1 = mocker.Mock(spec=optuna.trial.Trial)
+    trial1.suggest_categorical.return_value = 1  # Same params
+    trial1.number = 0
+
+    trial2 = mocker.Mock(spec=optuna.trial.Trial)
+    trial2.suggest_categorical.return_value = 1  # Same params
+    trial2.number = 1
+
+    # First call - should compute
+    objective(trial1)
+    assert generate_mock.call_count == 1
+
+    # Second call with same params - should use cache
+    objective(trial2)
+    assert generate_mock.call_count == 1  # Still 1, not 2
 
 def test_optimize_model(mocker):
     # Create proper mock data

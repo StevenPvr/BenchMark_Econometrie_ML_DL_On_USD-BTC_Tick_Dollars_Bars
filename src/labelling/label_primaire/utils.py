@@ -125,12 +125,18 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
 }
 
 # Triple barrier search space for primary model
+# Extended ranges for broader exploration (1764 combinations)
+# Cache mechanism in opti.py prevents redundant label computations
+# Constraints: min 10% neutral, min 15% for +1/-1 (avoid extreme values)
 TRIPLE_BARRIER_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
-    # Narrowed ranges to favor balanced label proportions (-1/0/1)
-    "pt_mult": ("categorical", [0.8, 1.0, 1.5, 2.0]),
-    "sl_mult": ("categorical", [0.8, 1.0, 1.5, 2.0]),
-    "min_return": ("categorical", [0.00005, 0.0001, 0.0002, 0.0003]),
-    "max_holding": ("categorical", [20, 50, 100]),
+    # Profit-taking multiplier: avoid < 0.6 (too tight, imbalanced labels)
+    "pt_mult": ("categorical", [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5]),
+    # Stop-loss multiplier: avoid < 0.6 (too tight, imbalanced labels)
+    "sl_mult": ("categorical", [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5]),
+    # Minimum return threshold: balanced range to ensure ~10-30% neutrals
+    "min_return": ("categorical", [0.00005, 0.0001, 0.00015, 0.0002, 0.00025, 0.0003]),
+    # Maximum holding period in bars: extended range
+    "max_holding": ("categorical", [15, 30, 50, 80, 120, 180]),
 }
 
 

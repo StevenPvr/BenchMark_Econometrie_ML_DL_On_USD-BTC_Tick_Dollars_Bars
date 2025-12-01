@@ -73,9 +73,12 @@ logger = logging.getLogger(__name__)
 # TRIPLE BARRIER LABELING
 # =============================================================================
 
-MIN_LABEL_RATIO_POS_NEG = 0.20  # Require at least 20% for -1 and 1
+MIN_LABEL_RATIO_POS_NEG = 0.15  # Require at least 15% for -1 and 1
 MIN_LABEL_RATIO_NEUTRAL = 0.10  # Require at least 10% for 0
 PARALLEL_MIN_EVENTS = 10_000
+
+# Type alias for events cache key
+EventsCacheKey = Tuple[float, float, float, int]  # (pt_mult, sl_mult, min_return, max_holding)
 
 
 def _resolve_n_jobs(requested: int | None) -> int:
@@ -649,6 +652,16 @@ def _run_cv_scoring(
     return objective_score, mean_mcc, mean_f1w, len(cv_scores_mcc), len(splits), reason
 
 
+def _make_cache_key(tb_params: Dict[str, Any]) -> EventsCacheKey:
+    """Create a hashable cache key from barrier parameters."""
+    return (
+        tb_params["pt_mult"],
+        tb_params["sl_mult"],
+        tb_params["min_return"],
+        tb_params["max_holding"],
+    )
+
+
 def create_objective(
     config: OptimizationConfig,
     features_df: pd.DataFrame,
@@ -680,18 +693,42 @@ def create_objective(
 
     Notes
     -----
-    Trials are PRUNED (not just scored -inf) if:
-    - Not all n_splits folds are successfully validated
-    - This ensures only trials with complete CV are considered
+    - Events are cached by barrier parameters to avoid redundant labeling.
+      With 1764 possible barrier combinations, this significantly speeds up
+      optimization when n_trials exceeds the number of unique combinations.
+    - Trials are PRUNED (not just scored -inf) if not all n_splits folds
+      are successfully validated.
     """
     log_level = logging.INFO if verbose else logging.DEBUG
+
+    # Cache for events: avoids recomputing labels for same barrier params
+    events_cache: Dict[EventsCacheKey, pd.DataFrame] = {}
+    cache_hits = [0]  # Use list to allow mutation in closure
 
     def objective(trial: optuna.Trial) -> float:
         trial_num = trial.number
 
-        # Sample and generate events
+        # Sample barrier parameters
         tb_params = _sample_barrier_params(trial)
-        events = _generate_trial_events(features_df, close, volatility, tb_params, config)
+        cache_key = _make_cache_key(tb_params)
+
+        # Check cache first
+        if cache_key in events_cache:
+            events = events_cache[cache_key]
+            cache_hits[0] += 1
+            logger.debug(
+                f"[Trial {trial_num}] Cache HIT for barrier params "
+                f"(hits: {cache_hits[0]}, cached: {len(events_cache)})"
+            )
+        else:
+            events = _generate_trial_events(
+                features_df, close, volatility, tb_params, config
+            )
+            events_cache[cache_key] = events
+            logger.debug(
+                f"[Trial {trial_num}] Cache MISS - computed and cached "
+                f"(cached: {len(events_cache)})"
+            )
 
         # Validate events
         is_valid, reason = _validate_events(events, config, trial_num)
