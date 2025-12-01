@@ -207,8 +207,8 @@ def compute_shap_values(
     model: Any,
     X: pd.DataFrame,
     model_name: str,
-    max_samples: int = 1000,
-) -> tuple[shap.Explainer | None, np.ndarray | None]:
+    max_samples: int | None = None,
+) -> tuple[shap.Explainer | None, np.ndarray | None, pd.DataFrame | None]:
     """
     Compute SHAP values for a model.
 
@@ -220,30 +220,30 @@ def compute_shap_values(
         Feature data.
     model_name : str
         Name of the model (for explainer selection).
-    max_samples : int, default=1000
-        Maximum samples for SHAP computation (for performance).
+    max_samples : int | None, default=None
+        Maximum samples for SHAP computation (for performance). None means no limit.
 
     Returns
     -------
-    tuple[shap.Explainer | None, np.ndarray | None]
-        (explainer, shap_values) or (None, None) if incompatible.
+    tuple[shap.Explainer | None, np.ndarray | None, pd.DataFrame | None]
+        (explainer, shap_values, X_sampled) or (None, None, None) if incompatible.
     """
     if not is_shap_compatible(model_name):
         logger.warning(f"Model {model_name} is not compatible with SHAP analysis")
-        return None, None
+        return None, None, None
 
-    # Sample data if too large
-    if len(X) > max_samples:
-        X_sample = X.sample(n=max_samples, random_state=42)
+    # Sample data if too large (None means no limit)
+    if max_samples is not None and len(X) > max_samples:
+        X_sample = X.sample(n=max_samples, random_state=42).reset_index(drop=True)
     else:
-        X_sample = X
+        X_sample = X.reset_index(drop=True)
 
     explainer_type = get_shap_explainer_type(model_name)
     underlying_model = getattr(model, "model", None)
 
     if underlying_model is None:
         logger.warning(f"Could not access underlying model for {model_name}")
-        return None, None
+        return None, None, None
 
     try:
         if explainer_type == "tree":
@@ -263,17 +263,17 @@ def compute_shap_values(
             )
             shap_values = explainer.shap_values(X_transformed)
         else:
-            return None, None
+            return None, None, None
 
-        return explainer, shap_values
+        return explainer, shap_values, X_sample
 
     except Exception as e:
         logger.warning(f"Failed to compute SHAP values for {model_name}: {e}")
-        return None, None
+        return None, None, None
 
 
 def save_shap_plots(
-    shap_values: np.ndarray,
+    shap_values: np.ndarray | List[np.ndarray],
     X: pd.DataFrame,
     model_name: str,
     output_dir: Path,
@@ -288,7 +288,7 @@ def save_shap_plots(
     shap_values : np.ndarray
         SHAP values from explainer.
     X : pd.DataFrame
-        Feature data (sampled if needed).
+        Feature data (must match shap_values samples).
     model_name : str
         Name of the model.
     output_dir : Path
@@ -306,27 +306,59 @@ def save_shap_plots(
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: List[Path] = []
 
-    # Sample X if needed to match shap_values
-    if len(X) > len(shap_values) if isinstance(shap_values, np.ndarray) and shap_values.ndim == 2 else len(X) > len(shap_values[0]):
-        X = X.iloc[:len(shap_values) if isinstance(shap_values, np.ndarray) and shap_values.ndim == 2 else len(shap_values[0])]
+    # Normalize SHAP values format
+    # TreeExplainer for multi-class can return:
+    # - List of arrays: [array(n_samples, n_features), ...] one per class
+    # - 3D array: (n_samples, n_features, n_classes) - modern SHAP format
+    # - 3D array: (n_classes, n_samples, n_features) - older format
 
-    # Handle multi-class SHAP values (list of arrays, one per class)
-    is_multiclass = isinstance(shap_values, list) or (
-        isinstance(shap_values, np.ndarray) and shap_values.ndim == 3
-    )
+    n_features = len(X.columns)
+    n_samples = len(X)
+
+    # Convert to list format for consistent handling
+    if isinstance(shap_values, list):
+        # Already a list, verify shape
+        shap_list = shap_values
+        if len(shap_list) > 0 and hasattr(shap_list[0], 'shape'):
+            logger.info(f"SHAP values format: list of {len(shap_list)} arrays, shape {shap_list[0].shape}")
+    elif isinstance(shap_values, np.ndarray):
+        logger.info(f"SHAP values array shape: {shap_values.shape}")
+        if shap_values.ndim == 2:
+            # Binary or single output: (n_samples, n_features)
+            shap_list = [shap_values]
+        elif shap_values.ndim == 3:
+            # Multi-class 3D array - determine orientation
+            # Modern SHAP: (n_samples, n_features, n_classes)
+            # Older SHAP: (n_classes, n_samples, n_features)
+            if shap_values.shape[0] == n_samples and shap_values.shape[1] == n_features:
+                # Shape is (n_samples, n_features, n_classes)
+                n_classes = shap_values.shape[2]
+                shap_list = [shap_values[:, :, i] for i in range(n_classes)]
+                logger.info(f"Detected modern SHAP format: (n_samples, n_features, n_classes)")
+            elif shap_values.shape[1] == n_samples and shap_values.shape[2] == n_features:
+                # Shape is (n_classes, n_samples, n_features)
+                n_classes = shap_values.shape[0]
+                shap_list = [shap_values[i] for i in range(n_classes)]
+                logger.info(f"Detected older SHAP format: (n_classes, n_samples, n_features)")
+            else:
+                logger.warning(f"Unexpected SHAP shape: {shap_values.shape}, expected samples={n_samples}, features={n_features}")
+                return saved_paths
+        else:
+            logger.warning(f"Unexpected SHAP dimensions: {shap_values.ndim}")
+            return saved_paths
+    else:
+        logger.warning(f"Unexpected SHAP values type: {type(shap_values)}")
+        return saved_paths
+
+    is_multiclass = len(shap_list) > 1
 
     if is_multiclass:
-        # For multi-class: shap_values is a list [class0_values, class1_values, ...]
-        # or array of shape (n_classes, n_samples, n_features)
-        if isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
-            shap_values = [shap_values[i] for i in range(shap_values.shape[0])]
-
-        n_classes = len(shap_values)
+        n_classes = len(shap_list)
         if class_names is None:
             class_names = [f"Class {i}" for i in range(n_classes)]
 
         # Summary plot for each class
-        for i, (sv, cn) in enumerate(zip(shap_values, class_names)):
+        for i, (sv, cn) in enumerate(zip(shap_list, class_names)):
             try:
                 plt.figure(figsize=(12, 8))
                 shap.summary_plot(
@@ -348,7 +380,7 @@ def save_shap_plots(
 
         # Global bar plot (mean absolute SHAP across all classes)
         try:
-            mean_abs_shap = np.mean([np.abs(sv).mean(axis=0) for sv in shap_values], axis=0)
+            mean_abs_shap = np.mean([np.abs(sv).mean(axis=0) for sv in shap_list], axis=0)
             plt.figure(figsize=(12, 8))
             feature_importance = pd.Series(mean_abs_shap, index=X.columns)
             feature_importance = feature_importance.nlargest(max_display)
@@ -367,10 +399,11 @@ def save_shap_plots(
 
     else:
         # Binary or regression: single array
+        sv = shap_list[0]
         try:
             plt.figure(figsize=(12, 8))
             shap.summary_plot(
-                shap_values,
+                sv,
                 X,
                 max_display=max_display,
                 show=False,
@@ -390,7 +423,7 @@ def save_shap_plots(
         try:
             plt.figure(figsize=(12, 8))
             shap.summary_plot(
-                shap_values,
+                sv,
                 X,
                 max_display=max_display,
                 show=False,
@@ -633,7 +666,7 @@ def evaluate_model(model_name: str) -> EvaluationResult:
 def run_shap_analysis(
     model_name: str,
     output_dir: Path,
-    max_samples: int = 1000,
+    max_samples: int | None = None,
 ) -> List[str]:
     """
     Run SHAP analysis for a trained model.
@@ -644,8 +677,8 @@ def run_shap_analysis(
         Name of the model.
     output_dir : Path
         Directory to save SHAP plots.
-    max_samples : int, default=1000
-        Maximum samples for SHAP computation.
+    max_samples : int | None, default=None
+        Maximum samples for SHAP computation (2.5% of 400k). None means no limit.
 
     Returns
     -------
@@ -678,32 +711,27 @@ def run_shap_analysis(
     test_valid = test_df[~test_df["label"].isna()].copy()
     X_test = cast(pd.DataFrame, test_valid[feature_cols])
 
-    # Compute SHAP values
+    # Compute SHAP values (returns X_sample that was actually used)
     logger.info(f"Computing SHAP values (max {max_samples} samples)...")
-    explainer, shap_values = compute_shap_values(
+    _, shap_values, X_sampled = compute_shap_values(
         model, X_test, model_name, max_samples=max_samples
     )
 
-    if shap_values is None:
+    if shap_values is None or X_sampled is None:
         logger.warning("Could not compute SHAP values")
         return []
 
     # Get class labels
-    classes = np.unique(test_valid["label"].dropna().astype(int).values)
+    label_values = cast(pd.Series, test_valid["label"]).dropna().astype(int)
+    classes = np.unique(label_values)
     class_names = [f"Class {int(c)}" for c in sorted(classes)]
 
-    # Sample X_test to match shap_values if needed
-    if len(X_test) > max_samples:
-        X_test_sampled = X_test.sample(n=max_samples, random_state=42)
-    else:
-        X_test_sampled = X_test
-
-    # Save SHAP plots
+    # Save SHAP plots (use X_sampled that matches shap_values exactly)
     logger.info("Saving SHAP plots...")
     shap_dir = output_dir / "shap"
     saved_paths = save_shap_plots(
         shap_values,
-        X_test_sampled,
+        X_sampled,
         model_name,
         shap_dir,
         class_names=class_names,
