@@ -40,7 +40,7 @@ if str(_project_root) not in sys.path:
 
 from src.config_logging import get_logger, setup_logging  # noqa: E402
 from src.constants import DEFAULT_RANDOM_STATE  # noqa: E402
-from src.path import DATASET_FEATURES_PARQUET  # noqa: E402
+from src.path import DATASET_FEATURES_PARQUET  # noqa: E402 - legacy, use INPUT_DATASETS
 
 from src.analyse_features.config import (  # noqa: E402
     ANALYSE_FEATURES_DIR,
@@ -53,6 +53,8 @@ from src.analyse_features.config import (  # noqa: E402
     TEMPORAL_RESULTS_JSON,
     SUMMARY_JSON,
     DATASET_SAMPLE_FRACTION,
+    INPUT_DATASETS,
+    OUTPUT_DATASETS,
     ensure_directories,
 )
 from src.analyse_features.correlation import run_correlation_analysis  # noqa: E402
@@ -327,7 +329,8 @@ def load_features(
     Returns:
         Tuple of (DataFrame, list of feature column names).
     """
-    file_path = file_path or DATASET_FEATURES_PARQUET
+    # Default to tree_based _clear dataset
+    file_path = file_path or INPUT_DATASETS["tree_based"]
 
     logger.info("Loading features from %s", file_path)
     df = pd.read_parquet(file_path)
@@ -402,7 +405,6 @@ def run_all_analyses(
     corr_results = run_correlation_analysis(
         df,
         feature_columns,
-        compute_dcor=compute_dcor,
     )
     all_results["correlation"] = corr_results
     save_correlation_results(corr_results)
@@ -610,6 +612,33 @@ def print_summary(results: dict[str, Any]) -> None:
         logger.info("Clustering: %d clusters identified", n_clusters)
 
 
+def copy_datasets_to_final() -> None:
+    """Copy datasets from _clear to _final suffix.
+
+    Since analyse_features only analyzes without modifying data,
+    we simply copy the clear datasets to final datasets.
+    """
+    import shutil
+
+    logger.info("\n" + "=" * 70)
+    logger.info("COPYING DATASETS: _clear -> _final")
+    logger.info("=" * 70)
+
+    for dataset_name in INPUT_DATASETS:
+        input_path = INPUT_DATASETS[dataset_name]
+        output_path = OUTPUT_DATASETS[dataset_name]
+
+        if not input_path.exists():
+            logger.warning("Input not found, skipping: %s", input_path)
+            continue
+
+        logger.info("Copying %s -> %s", input_path.name, output_path.name)
+        shutil.copy2(input_path, output_path)
+        logger.info("  Done: %s", output_path)
+
+    logger.info("All datasets copied to _final suffix")
+
+
 def main() -> None:
     """Main entry point for feature analysis."""
     parser = argparse.ArgumentParser(
@@ -687,7 +716,7 @@ def main() -> None:
 
     elif args.analysis == "correlation":
         ensure_directories()
-        results = run_correlation_analysis(df, feature_columns, compute_dcor=not args.skip_dcor)
+        results = run_correlation_analysis(df, feature_columns)
         save_correlation_results(results)
         if not args.no_plots and "spearman" in results:
             plot_correlation_heatmap(results["spearman"], title="Spearman Correlation", filename="spearman_correlation")
@@ -722,6 +751,9 @@ def main() -> None:
         ensure_directories()
         results = run_temporal_analysis(df, feature_columns)
         save_temporal_results(results)
+
+    # Copy datasets from _clear to _final
+    copy_datasets_to_final()
 
     logger.info("\nAnalysis complete!")
 

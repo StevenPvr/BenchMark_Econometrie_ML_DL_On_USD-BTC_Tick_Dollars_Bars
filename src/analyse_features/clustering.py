@@ -148,9 +148,18 @@ def hierarchical_clustering(
 
     # Compute linkage
     if linkage_method == "ward":
-        # Ward requires Euclidean distance, we'll use 'average' as fallback
-        # or convert correlation distance to Euclidean-like
-        linkage_matrix = hierarchy.linkage(condensed, method="average")
+        # Ward requires Euclidean distance, not correlation distance
+        # Convert correlation distance to Euclidean-compatible distance:
+        # d_eucl = sqrt(2 * (1 - correlation))
+        # Since distance_matrix = 1 - |correlation|, we have:
+        # correlation = 1 - distance_matrix
+        corr_values = 1 - distance_matrix
+        corr_values = np.clip(corr_values, -1, 1)  # Ensure valid range
+        euclidean_distance = np.sqrt(2 * (1 - corr_values))
+        np.fill_diagonal(euclidean_distance, 0)  # Ensure diagonal is exactly 0
+        euclidean_condensed = squareform(euclidean_distance, checks=False)
+        euclidean_condensed = np.nan_to_num(euclidean_condensed, nan=1.0, posinf=1.0, neginf=0.0)
+        linkage_matrix = hierarchy.linkage(euclidean_condensed, method="ward")
     else:
         linkage_matrix = hierarchy.linkage(condensed, method=linkage_method)
 

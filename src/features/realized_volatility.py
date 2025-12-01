@@ -1,18 +1,26 @@
-"""Realized volatility and risk-adjusted return features.
+"""Realized volatility and return-volatility ratio features.
 
 This module computes volatility-based features from past returns:
 
 1. Realized volatility over rolling window:
    σ_t^{(k)} = √(Σ_{j=1}^{k} r_{t-j}²)
 
-2. Local Sharpe ratio (return/vol):
-   R_t^{(k)} / σ_t^{(k)}
+2. Return-volatility ratio (NOT a true Sharpe ratio - no risk-free rate or annualization):
+   RVR_t^{(k)} = R_t^{(k)} / σ_t^{(k)}
+
+3. Realized skewness (third moment):
+   Skew_t^{(k)} = E[(r - μ)³] / σ³
+
+4. Realized kurtosis (fourth moment, excess):
+   Kurt_t^{(k)} = E[(r - μ)⁴] / σ⁴ - 3
 
 Interpretation:
     - High realized vol: Turbulent market regime
     - Low realized vol: Calm market regime
-    - High Sharpe: Strong momentum with low risk
-    - Low Sharpe: Weak momentum or high risk
+    - High RVR: Strong momentum with low risk
+    - Low RVR: Weak momentum or high risk
+    - High skewness: Asymmetric returns (more positive or negative outliers)
+    - High kurtosis: Fat tails, more extreme events
 
 Reference:
     Andersen, T. G., & Bollerslev, T. (1998). Answering the Skeptics:
@@ -37,6 +45,10 @@ logger = get_logger(__name__)
 
 __all__ = [
     "compute_realized_volatility",
+    "compute_return_volatility_ratio",
+    "compute_realized_skewness",
+    "compute_realized_kurtosis",
+    # Deprecated alias for backward compatibility
     "compute_local_sharpe",
 ]
 
@@ -58,8 +70,8 @@ def _rolling_sum_squares(
     """
     # Use pandas rolling sum - numerically stable implementation
     series = pd.Series(returns ** 2)
-    result = series.rolling(window=window, min_periods=window).sum().values
-    return result
+    result = series.rolling(window=window, min_periods=window).sum()
+    return np.asarray(result, dtype=np.float64)
 
 
 def _rolling_sum(
@@ -76,8 +88,8 @@ def _rolling_sum(
         Array of rolling sums.
     """
     series = pd.Series(returns)
-    result = series.rolling(window=window, min_periods=window).sum().values
-    return result
+    result = series.rolling(window=window, min_periods=window).sum()
+    return np.asarray(result, dtype=np.float64)
 
 
 def compute_realized_volatility(
@@ -130,14 +142,18 @@ def compute_realized_volatility(
     return result
 
 
-def compute_local_sharpe(
+def compute_return_volatility_ratio(
     df_bars: pd.DataFrame,
     return_col: str = "log_return",
     horizons: list[int] | None = None,
 ) -> pd.DataFrame:
-    """Compute local Sharpe ratio (return / volatility).
+    """Compute return-volatility ratio (return / volatility).
 
-    Sharpe_t^{(k)} = R_t^{(k)} / σ_t^{(k)}
+    NOTE: This is NOT a true Sharpe ratio as it lacks:
+    - Risk-free rate subtraction
+    - Annualization factor
+
+    RVR_t^{(k)} = R_t^{(k)} / σ_t^{(k)}
 
     Where:
         R_t^{(k)} = Σ_{j=0}^{k-1} r_{t-j} (cumulative return)
@@ -149,11 +165,11 @@ def compute_local_sharpe(
         horizons: List of horizons (default: [5, 10, 20]).
 
     Returns:
-        DataFrame with local Sharpe ratio columns for each horizon.
+        DataFrame with return-volatility ratio columns for each horizon.
 
     Example:
-        >>> df_sharpe = compute_local_sharpe(df_bars)
-        >>> df_bars = pd.concat([df_bars, df_sharpe], axis=1)
+        >>> df_rvr = compute_return_volatility_ratio(df_bars)
+        >>> df_bars = pd.concat([df_bars, df_rvr], axis=1)
     """
     if horizons is None:
         horizons = [5, 10, 20]
@@ -169,27 +185,168 @@ def compute_local_sharpe(
         sum_sq = _rolling_sum_squares(returns, k)
         realized_vol = np.sqrt(sum_sq)
 
-        # Local Sharpe (0 when vol is ~0, as there's no risk-adjusted return)
-        sharpe = np.where(
+        # Return-volatility ratio (0 when vol is ~0)
+        rvr = np.where(
             realized_vol > 1e-10,
             cum_ret / realized_vol,
             0.0,  # No vol = no risk-adjusted return
         )
 
-        col_name = f"local_sharpe_{k}"
-        result[col_name] = sharpe
+        col_name = f"return_vol_ratio_{k}"
+        result[col_name] = rvr
 
         # Log statistics
-        valid = sharpe[~np.isnan(sharpe)]
+        valid = rvr[~np.isnan(rvr)]
         if len(valid) > 0:
             logger.info(
-                "Local Sharpe (k=%d) stats: mean=%.4f, std=%.4f, "
+                "Return-volatility ratio (k=%d) stats: mean=%.4f, std=%.4f, "
                 "min=%.4f, max=%.4f",
                 k,
                 np.mean(valid),
                 np.std(valid),
                 np.min(valid),
                 np.max(valid),
+            )
+
+    return result
+
+
+# Deprecated alias for backward compatibility
+def compute_local_sharpe(
+    df_bars: pd.DataFrame,
+    return_col: str = "log_return",
+    horizons: list[int] | None = None,
+) -> pd.DataFrame:
+    """Deprecated: Use compute_return_volatility_ratio instead.
+
+    This function is kept for backward compatibility but will be removed
+    in a future version. Note that this is NOT a true Sharpe ratio.
+    """
+    import warnings
+    warnings.warn(
+        "compute_local_sharpe is deprecated. Use compute_return_volatility_ratio instead. "
+        "Note: This metric is NOT a true Sharpe ratio (missing rf and annualization).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return compute_return_volatility_ratio(df_bars, return_col, horizons)
+
+
+def compute_realized_skewness(
+    df_bars: pd.DataFrame,
+    return_col: str = "log_return",
+    horizons: list[int] | None = None,
+) -> pd.DataFrame:
+    """Compute realized skewness (third standardized moment) over rolling windows.
+
+    Skew_t^{(k)} = E[(r - μ)³] / σ³
+
+    Where:
+        μ = rolling mean of returns
+        σ = rolling standard deviation
+
+    Interpretation:
+        - Positive skew: More positive outliers (right tail heavier)
+        - Negative skew: More negative outliers (left tail heavier)
+        - Near zero: Symmetric distribution
+
+    Args:
+        df_bars: DataFrame with return data.
+        return_col: Name of return column.
+        horizons: List of horizons (default: [10, 20, 50]).
+
+    Returns:
+        DataFrame with realized skewness columns for each horizon.
+
+    Example:
+        >>> df_skew = compute_realized_skewness(df_bars)
+        >>> df_bars = pd.concat([df_bars, df_skew], axis=1)
+    """
+    if horizons is None:
+        horizons = [10, 20, 50]
+
+    returns = df_bars[return_col]
+    result = pd.DataFrame(index=df_bars.index)
+
+    for k in horizons:
+        # Rolling skewness using pandas (handles edge cases properly)
+        skew = returns.rolling(window=k, min_periods=k).skew()
+
+        col_name = f"realized_skew_{k}"
+        result[col_name] = skew
+
+        # Log statistics
+        valid = skew.dropna()
+        if len(valid) > 0:
+            logger.info(
+                "Realized skewness (k=%d) stats: mean=%.4f, std=%.4f, "
+                "min=%.4f, max=%.4f",
+                k,
+                valid.mean(),
+                valid.std(),
+                valid.min(),
+                valid.max(),
+            )
+
+    return result
+
+
+def compute_realized_kurtosis(
+    df_bars: pd.DataFrame,
+    return_col: str = "log_return",
+    horizons: list[int] | None = None,
+) -> pd.DataFrame:
+    """Compute realized excess kurtosis (fourth standardized moment - 3) over rolling windows.
+
+    Kurt_t^{(k)} = E[(r - μ)⁴] / σ⁴ - 3
+
+    Where:
+        μ = rolling mean of returns
+        σ = rolling standard deviation
+
+    Note: Returns EXCESS kurtosis (normal distribution = 0, not 3).
+
+    Interpretation:
+        - Positive kurtosis: Fat tails, more extreme events (leptokurtic)
+        - Negative kurtosis: Thin tails, fewer extreme events (platykurtic)
+        - Near zero: Normal-like tails (mesokurtic)
+
+    Args:
+        df_bars: DataFrame with return data.
+        return_col: Name of return column.
+        horizons: List of horizons (default: [10, 20, 50]).
+
+    Returns:
+        DataFrame with realized kurtosis columns for each horizon.
+
+    Example:
+        >>> df_kurt = compute_realized_kurtosis(df_bars)
+        >>> df_bars = pd.concat([df_bars, df_kurt], axis=1)
+    """
+    if horizons is None:
+        horizons = [10, 20, 50]
+
+    returns = df_bars[return_col]
+    result = pd.DataFrame(index=df_bars.index)
+
+    for k in horizons:
+        # Rolling kurtosis using pandas (returns excess kurtosis by default)
+        kurt = returns.rolling(window=k, min_periods=k).kurt()
+
+        col_name = f"realized_kurt_{k}"
+        result[col_name] = kurt
+
+        # Log statistics
+        valid = kurt.dropna()
+        if len(valid) > 0:
+            logger.info(
+                "Realized kurtosis (k=%d) stats: mean=%.4f, std=%.4f, "
+                "min=%.4f, max=%.4f",
+                k,
+                valid.mean(),
+                valid.std(),
+                valid.min(),
+                valid.max(),
             )
 
     return result

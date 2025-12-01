@@ -3,12 +3,14 @@
 Implements robust outlier detection methods suitable for financial markets
 and dollar bar construction (De Prado methodology).
 
+All outlier detection methods are CAUSAL (use only past data) to prevent
+temporal data leakage.
+
 Outlier Detection Methods:
-1. MAD (Median Absolute Deviation) - robust to fat-tailed distributions
+1. MAD (Median Absolute Deviation) - robust to fat-tailed distributions (expanding)
 2. Rolling Z-score - adapts to local volatility regimes
-3. Flash crash/spike detection - identifies transient price anomalies
-4. Volume anomaly detection - filters dust trades and manipulation
-5. Dollar value filtering - combined price*volume anomalies
+3. Volume anomaly detection - filters dust trades and manipulation (expanding)
+4. Dollar value filtering - combined price*volume anomalies (expanding)
 
 Reference:
     Huber, P.J. (1981). Robust Statistics.
@@ -16,7 +18,6 @@ Reference:
 """
 
 from __future__ import annotations
-
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,18 +30,17 @@ from src.constants import (
     OUTLIER_DOLLAR_VALUE_MAD_THRESHOLD,
     OUTLIER_MAD_SCALING_FACTOR,
     OUTLIER_MAD_THRESHOLD,
-    OUTLIER_MAX_TICK_RETURN,
     OUTLIER_MIN_PERIODS,
     OUTLIER_MIN_VOLUME,
     OUTLIER_ROLLING_WINDOW,
     OUTLIER_ROLLING_ZSCORE_THRESHOLD,
-    OUTLIER_SPIKE_LOOKBACK,
-    OUTLIER_SPIKE_REVERSION_THRESHOLD,
     OUTLIER_VOLUME_MAD_THRESHOLD,
+    SYMBOL,
 )
 from src.path import (
     DATASET_CLEAN_PARQUET,
     DATASET_RAW_PARQUET,
+    RAW_PARTITIONS_DIR,
 )
 from src.utils import ensure_output_dir, get_logger
 
@@ -54,7 +54,6 @@ class OutlierReport:
     total_ticks: int
     removed_mad_price: int = 0
     removed_rolling_zscore: int = 0
-    removed_flash_spikes: int = 0
     removed_volume_outliers: int = 0
     removed_dollar_value: int = 0
     removed_dust_trades: int = 0
@@ -65,7 +64,6 @@ class OutlierReport:
         total_removed = (
             self.removed_mad_price
             + self.removed_rolling_zscore
-            + self.removed_flash_spikes
             + self.removed_volume_outliers
             + self.removed_dollar_value
             + self.removed_dust_trades
@@ -73,12 +71,11 @@ class OutlierReport:
         pct_removed = (total_removed / self.total_ticks * 100) if self.total_ticks > 0 else 0
 
         logger.info("=" * 60)
-        logger.info("OUTLIER DETECTION SUMMARY")
+        logger.info("OUTLIER DETECTION SUMMARY (Causal Filters)")
         logger.info("=" * 60)
         logger.info(f"  Initial ticks:          {self.total_ticks:>12,}")
         logger.info(f"  MAD price outliers:     {self.removed_mad_price:>12,}")
         logger.info(f"  Rolling Z-score:        {self.removed_rolling_zscore:>12,}")
-        logger.info(f"  Flash spikes:           {self.removed_flash_spikes:>12,}")
         logger.info(f"  Volume outliers:        {self.removed_volume_outliers:>12,}")
         logger.info(f"  Dollar value outliers:  {self.removed_dollar_value:>12,}")
         logger.info(f"  Dust trades (<min vol): {self.removed_dust_trades:>12,}")
@@ -88,59 +85,115 @@ class OutlierReport:
         logger.info("=" * 60)
 
 
-def _load_raw_trades(path: Path = DATASET_RAW_PARQUET) -> pd.DataFrame:
-    """Load raw trades parquet file.
+def _merge_outlier_reports(
+    aggregate: OutlierReport | None,
+    current: OutlierReport,
+) -> OutlierReport:
+    """Accumulate OutlierReport metrics across partitions."""
+    if aggregate is None:
+        return current
 
-    If the path is a directory (partitioned dataset), it consolidates the partitions
-    iteratively into a single DataFrame, saves it as a CSV and a single Parquet file
-    (replacing the directory), and returns the consolidated DataFrame.
+    return OutlierReport(
+        total_ticks=aggregate.total_ticks + current.total_ticks,
+        removed_mad_price=aggregate.removed_mad_price + current.removed_mad_price,
+        removed_rolling_zscore=aggregate.removed_rolling_zscore + current.removed_rolling_zscore,
+        removed_volume_outliers=aggregate.removed_volume_outliers + current.removed_volume_outliers,
+        removed_dollar_value=aggregate.removed_dollar_value + current.removed_dollar_value,
+        removed_dust_trades=aggregate.removed_dust_trades + current.removed_dust_trades,
+        final_ticks=aggregate.final_ticks + current.final_ticks,
+    )
+
+
+def _load_raw_trades(
+    partition_dir: Path | None = None,
+    output_path: Path = DATASET_RAW_PARQUET,
+    use_cache: bool = False,
+) -> pd.DataFrame:
+    """Load raw trades from partitioned parquet files in data/raw/copie_raw.
+
+    The merge is streamed with PyArrow to handle very large datasets efficiently:
+    partitions are read with a Dataset scanner and written with a ParquetWriter,
+    avoiding materializing all Arrow tables in Python before consolidation.
+
+    Args:
+        partition_dir: Directory containing part-*.parquet files. Defaults to
+            RAW_PARTITIONS_DIR (data/raw/copie_raw).
+        output_path: Path where the consolidated parquet should be written.
+
+    Returns:
+        Consolidated DataFrame with all raw trades.
     """
-    if path.is_dir():
-        logger.info("Detected partitioned dataset at %s. Consolidating...", path)
-        parquet_files = sorted(path.glob("*.parquet"))
-        if not parquet_files:
-            raise ValueError(f"No parquet files found in {path}")
+    import pyarrow.dataset as ds  # type: ignore[import-untyped]
+    import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
-        # Load first partition
-        logger.info("Loading partition 1/%d: %s", len(parquet_files), parquet_files[0].name)
-        df = pd.read_parquet(parquet_files[0])
+    partitions_root = Path(partition_dir) if partition_dir is not None else RAW_PARTITIONS_DIR
+    if not partitions_root.is_dir():
+        raise FileNotFoundError(f"Partition directory not found: {partitions_root}")
 
-        # Iteratively merge remaining partitions
-        for i, file_path in enumerate(parquet_files[1:], start=2):
-            logger.info("Merging partition %d/%d: %s", i, len(parquet_files), file_path.name)
-            df_part = pd.read_parquet(file_path)
-            df = pd.concat([df, df_part], ignore_index=True)
+    # Use flexible pattern to catch files with trailing spaces or variations
+    parquet_parts = sorted(
+        p for p in partitions_root.glob("part-*")
+        if ".parquet" in p.name.lower()
+    )
+    if not parquet_parts:
+        raise ValueError(f"No parquet partition files found in {partitions_root}")
 
-        logger.info("Consolidation complete. Total rows: %d", len(df))
+    total_size = sum(f.stat().st_size for f in parquet_parts)
+    logger.info(
+        "Loading %d partition(s) from %s (%.2f GB)",
+        len(parquet_parts),
+        partitions_root,
+        total_size / (1024**3),
+    )
 
-        # Replace directory with single parquet file
-        # We write to a temp file first, then remove dir, then rename
-        temp_parquet = path.with_suffix(".parquet.tmp")
-        logger.info("Saving consolidated raw dataset to temporary file %s", temp_parquet)
-        df.to_parquet(temp_parquet, index=False)
-
-        logger.info("Removing partition directory and renaming temporary file...")
-        shutil.rmtree(path)
-        temp_parquet.rename(path)
-        logger.info("Saved consolidated raw dataset to %s", path)
-
-        return df
-
-    # Normal file loading with error handling for corrupted files
     try:
-        df = pd.read_parquet(path)
-    except (OSError, TimeoutError) as e:
-        if "Operation timed out" in str(e) or "timeout" in str(e).lower():
-            raise RuntimeError(
-                f"Parquet file {path} appears to be corrupted or inaccessible (timeout error). "
-                f"Please remove the file and re-run data fetching to regenerate it. "
-                f"Error: {e}"
-            ) from e
-        else:
-            raise
+        dataset = ds.dataset(parquet_parts, format="parquet")
+    except OSError as exc:
+        if "timed out" in str(exc).lower():
+            raise RuntimeError(f"Parquet partitions in {partitions_root} appear to be corrupted") from exc
+        raise
 
+    latest_partition_mtime = max(f.stat().st_mtime for f in parquet_parts)
+    ensure_output_dir(output_path)
+
+    use_cached = (
+        use_cache
+        and output_path.exists()
+        and output_path.stat().st_mtime >= latest_partition_mtime
+    )
+    if use_cached:
+        logger.info("Using cached consolidated parquet at %s", output_path)
+        df_cached = pd.read_parquet(output_path, engine="pyarrow")
+        if df_cached.empty:
+            raise ValueError("Raw trades dataset is empty")
+        return df_cached
+
+    # Clean any stale output artifacts (directory or file) before writing
+    for stale_path in (output_path, output_path.with_suffix(".tmp.parquet")):
+        if stale_path.exists():
+            if stale_path.is_dir():
+                shutil.rmtree(stale_path)
+            else:
+                stale_path.unlink()
+
+    temp_output = output_path.with_suffix(".tmp.parquet")
+    logger.info("Streaming merge to %s", output_path)
+
+    try:
+        with pq.ParquetWriter(temp_output, dataset.schema, compression="snappy") as writer:
+            for batch in dataset.to_batches(batch_size=262_144, use_threads=True):
+                writer.write_batch(batch)
+        temp_output.replace(output_path)
+    except OSError as exc:
+        if "timed out" in str(exc).lower():
+            raise RuntimeError(f"Parquet partitions in {partitions_root} appear to be corrupted") from exc
+        raise
+
+    df = pd.read_parquet(output_path, engine="pyarrow")
     if df.empty:
         raise ValueError("Raw trades dataset is empty")
+
+    logger.info("Consolidation complete. Total rows: %d", len(df))
     return df
 
 
@@ -199,42 +252,26 @@ def _filter_price_outliers(df: pd.DataFrame, max_pct_change: float = 0.05) -> pd
 # =============================================================================
 
 
-def _compute_mad(series: pd.Series) -> tuple[float, float]:
-    """Compute Median Absolute Deviation (MAD) for robust outlier detection.
-
-    MAD is more robust than standard deviation for fat-tailed distributions
-    typical of financial returns. Uses the consistency factor 1.4826 to
-    make it comparable to standard deviation for normal distributions.
-
-    Reference: Huber, P.J. (1981). Robust Statistics.
-
-    Args:
-        series: Pandas Series of values.
-
-    Returns:
-        Tuple of (median, scaled_mad) where scaled_mad = 1.4826 * MAD.
-    """
-    median = series.median()
-    mad = (series - median).abs().median()
-    scaled_mad = OUTLIER_MAD_SCALING_FACTOR * mad
-    return median, scaled_mad
-
-
 def _filter_mad_price_outliers(
     df: pd.DataFrame,
     price_col: str = "price",
     threshold: float = OUTLIER_MAD_THRESHOLD,
+    min_periods: int = OUTLIER_MIN_PERIODS,
 ) -> tuple[pd.DataFrame, int]:
-    """Filter price outliers using Median Absolute Deviation (MAD).
+    """Filter price outliers using expanding MAD (causal, no look-ahead).
 
-    MAD-based filtering is robust to the fat tails typical of crypto prices.
+    Uses expanding window to compute statistics using only past data,
+    preventing temporal data leakage. MAD-based filtering is robust to
+    the fat tails typical of crypto prices.
+
     A tick is considered an outlier if:
-        |price - median| > threshold * scaled_MAD
+        |price - expanding_median| > threshold * expanding_scaled_MAD
 
     Args:
         df: DataFrame with tick data.
         price_col: Name of price column.
         threshold: Number of MADs from median to consider outlier.
+        min_periods: Minimum periods before applying filter (first ticks kept).
 
     Returns:
         Tuple of (filtered DataFrame, number of outliers removed).
@@ -243,25 +280,30 @@ def _filter_mad_price_outliers(
         return df, 0
 
     prices = df[price_col]
-    median, scaled_mad = _compute_mad(prices)
 
-    if scaled_mad < 1e-10:
-        logger.warning("MAD is near zero, skipping MAD price filter")
-        return df, 0
+    # Expanding statistics (causal - only uses past data)
+    expanding_median = prices.expanding(min_periods=min_periods).median()
+    expanding_mad = (
+        (prices - expanding_median).abs().expanding(min_periods=min_periods).median()
+    )
+    scaled_mad = OUTLIER_MAD_SCALING_FACTOR * expanding_mad
+
+    # Avoid division issues - replace zero with NaN
+    scaled_mad = scaled_mad.replace(0, np.nan)
 
     # Identify outliers: |price - median| > threshold * MAD
-    deviation = (prices - median).abs()
-    mask_valid = deviation <= threshold * scaled_mad
+    # First min_periods ticks are kept (NaN in scaled_mad)
+    deviation = (prices - expanding_median).abs()
+    mask_valid = (deviation <= threshold * scaled_mad) | scaled_mad.isna()
 
-    filtered = df.loc[mask_valid].copy()
+    filtered = df.loc[mask_valid].reset_index(drop=True)
     removed = len(df) - len(filtered)
 
     if removed > 0:
         logger.info(
-            "MAD filter: removed %d price outliers (threshold=%.1f MADs, median=%.2f)",
+            "MAD filter (causal): removed %d price outliers (threshold=%.1f MADs)",
             removed,
             threshold,
-            median,
         )
 
     return filtered, removed
@@ -330,84 +372,18 @@ def _filter_rolling_zscore_outliers(
     return filtered, removed
 
 
-def _filter_flash_spikes(
-    df: pd.DataFrame,
-    price_col: str = "price",
-    max_tick_return: float = OUTLIER_MAX_TICK_RETURN,
-    lookback: int = OUTLIER_SPIKE_LOOKBACK,
-    reversion_threshold: float = OUTLIER_SPIKE_REVERSION_THRESHOLD,
-) -> tuple[pd.DataFrame, int]:
-    """Detect and filter flash crashes/spikes that revert quickly.
-
-    A flash spike is characterized by:
-    1. Large price move exceeding max_tick_return (e.g., 15%)
-    2. Significant reversion within lookback ticks
-
-    These are typically data errors or momentary liquidity gaps.
-
-    Args:
-        df: DataFrame with tick data.
-        price_col: Name of price column.
-        max_tick_return: Maximum allowed log-return between ticks.
-        lookback: Number of ticks to check for reversion.
-        reversion_threshold: Fraction of move that must revert to classify as spike.
-
-    Returns:
-        Tuple of (filtered DataFrame, number of spikes removed).
-    """
-    if price_col not in df.columns or len(df) < lookback + 2:
-        return df, 0
-
-    prices = df[price_col].values
-    n = len(prices)
-    mask_valid = np.ones(n, dtype=bool)
-
-    # Compute log returns
-    log_returns = np.zeros(n)
-    log_returns[1:] = np.log(prices[1:] / prices[:-1])
-
-    for i in range(1, n - lookback):
-        abs_return = abs(log_returns[i])
-
-        if abs_return > max_tick_return:
-            # Check for reversion in next lookback ticks
-            future_prices = prices[i + 1 : i + 1 + lookback]
-            pre_spike_price = prices[i - 1]
-            spike_price = prices[i]
-
-            # Calculate how much the price reverts toward pre-spike level
-            spike_magnitude = spike_price - pre_spike_price
-            if abs(spike_magnitude) > 1e-10:
-                max_reversion = 0.0
-                for future_price in future_prices:
-                    reversion = (spike_price - future_price) / spike_magnitude
-                    max_reversion = max(max_reversion, reversion)
-
-                if max_reversion >= reversion_threshold:
-                    # This is a flash spike - mark the spike tick as invalid
-                    mask_valid[i] = False
-
-    filtered = df.loc[mask_valid].copy()
-    removed = len(df) - len(filtered)
-
-    if removed > 0:
-        logger.info(
-            "Flash spike filter: removed %d spikes (max_return=%.1f%%, lookback=%d)",
-            removed,
-            max_tick_return * 100,
-            lookback,
-        )
-
-    return filtered, removed
-
-
 def _filter_volume_outliers(
     df: pd.DataFrame,
     volume_col: str = "amount",
     threshold: float = OUTLIER_VOLUME_MAD_THRESHOLD,
     min_volume: float = OUTLIER_MIN_VOLUME,
+    min_periods: int = OUTLIER_MIN_PERIODS,
+    apply_mad: bool = True,
 ) -> tuple[pd.DataFrame, int, int]:
-    """Filter volume outliers using MAD and minimum volume threshold.
+    """Filter volume outliers using expanding MAD (causal) and minimum threshold.
+
+    Uses expanding window to compute statistics using only past data,
+    preventing temporal data leakage.
 
     Removes:
     1. Dust trades (volume below minimum threshold)
@@ -418,6 +394,8 @@ def _filter_volume_outliers(
         volume_col: Name of volume column.
         threshold: Number of MADs for outlier detection.
         min_volume: Minimum valid volume.
+        min_periods: Minimum periods before applying MAD filter.
+        apply_mad: If False, only dust trades are removed (no MAD outlier filter).
 
     Returns:
         Tuple of (filtered DataFrame, removed_outliers, removed_dust).
@@ -432,25 +410,43 @@ def _filter_volume_outliers(
     removed_dust = (~mask_min_volume).sum()
 
     # Apply MAD filter on remaining
-    df_no_dust = df.loc[mask_min_volume]
+    df_no_dust = df.loc[mask_min_volume].copy()
     if df_no_dust.empty:
         return df_no_dust, 0, removed_dust
 
-    median, scaled_mad = _compute_mad(df_no_dust[volume_col])
+    if not apply_mad:
+        filtered = df_no_dust.reset_index(drop=True)
+        removed_outliers = 0
+        if removed_dust > 0:
+            logger.info(
+                "Volume filter (dust only): removed %d dust trades, skipped MAD filtering",
+                removed_dust,
+            )
+        return filtered, removed_outliers, removed_dust
 
-    if scaled_mad < 1e-10:
-        return df_no_dust, 0, removed_dust
+    volumes = df_no_dust[volume_col]
+
+    # Expanding MAD (causal - only uses past data)
+    expanding_median = volumes.expanding(min_periods=min_periods).median()
+    expanding_mad = (
+        (volumes - expanding_median).abs().expanding(min_periods=min_periods).median()
+    )
+    scaled_mad = OUTLIER_MAD_SCALING_FACTOR * expanding_mad
+
+    # Avoid division issues - replace zero with NaN
+    scaled_mad = scaled_mad.replace(0, np.nan)
 
     # Only filter extreme high volumes (not low - those are legitimate small trades)
-    deviation = df_no_dust[volume_col] - median
-    mask_valid = deviation <= threshold * scaled_mad
+    # First min_periods ticks are kept (NaN in scaled_mad)
+    deviation = volumes - expanding_median
+    mask_valid = (deviation <= threshold * scaled_mad) | scaled_mad.isna()
 
-    filtered = df_no_dust.loc[mask_valid].copy()
+    filtered = df_no_dust.loc[mask_valid].reset_index(drop=True)
     removed_outliers = len(df_no_dust) - len(filtered)
 
     if removed_dust > 0 or removed_outliers > 0:
         logger.info(
-            "Volume filter: removed %d dust trades, %d outliers (threshold=%.1f MADs)",
+            "Volume filter (causal): removed %d dust trades, %d outliers (threshold=%.1f MADs)",
             removed_dust,
             removed_outliers,
             threshold,
@@ -464,8 +460,13 @@ def _filter_dollar_value_outliers(
     price_col: str = "price",
     volume_col: str = "amount",
     threshold: float = OUTLIER_DOLLAR_VALUE_MAD_THRESHOLD,
+    min_periods: int = OUTLIER_MIN_PERIODS,
+    symbol: str = SYMBOL,
 ) -> tuple[pd.DataFrame, int]:
-    """Filter outliers based on dollar value (price * volume).
+    """Filter outliers based on dollar value using expanding MAD (causal).
+
+    Uses expanding window to compute statistics using only past data,
+    preventing temporal data leakage.
 
     Dollar value outliers often indicate:
     - Fat-finger errors (wrong price or volume)
@@ -477,6 +478,7 @@ def _filter_dollar_value_outliers(
         price_col: Name of price column.
         volume_col: Name of volume column.
         threshold: Number of MADs for outlier detection.
+        min_periods: Minimum periods before applying filter.
 
     Returns:
         Tuple of (filtered DataFrame, number of outliers removed).
@@ -484,25 +486,34 @@ def _filter_dollar_value_outliers(
     if price_col not in df.columns or volume_col not in df.columns or df.empty:
         return df, 0
 
-    dollar_values = df[price_col] * df[volume_col]
-    median, scaled_mad = _compute_mad(dollar_values)
+    dollar_values = _compute_dollar_notional(df, price_col, volume_col, symbol)
 
-    if scaled_mad < 1e-10:
-        return df, 0
+    # Expanding MAD (causal - only uses past data)
+    expanding_median = dollar_values.expanding(min_periods=min_periods).median()
+    expanding_mad = (
+        (dollar_values - expanding_median)
+        .abs()
+        .expanding(min_periods=min_periods)
+        .median()
+    )
+    scaled_mad = OUTLIER_MAD_SCALING_FACTOR * expanding_mad
+
+    # Avoid division issues - replace zero with NaN
+    scaled_mad = scaled_mad.replace(0, np.nan)
 
     # Filter extreme dollar values (both high and low can be problematic)
-    deviation = (dollar_values - median).abs()
-    mask_valid = deviation <= threshold * scaled_mad
+    # First min_periods ticks are kept (NaN in scaled_mad)
+    deviation = (dollar_values - expanding_median).abs()
+    mask_valid = (deviation <= threshold * scaled_mad) | scaled_mad.isna()
 
-    filtered = df.loc[mask_valid].copy()
+    filtered = df.loc[mask_valid].reset_index(drop=True)
     removed = len(df) - len(filtered)
 
     if removed > 0:
         logger.info(
-            "Dollar value filter: removed %d outliers (threshold=%.1f MADs, median=$%.2f)",
+            "Dollar value filter (causal): removed %d outliers (threshold=%.1f MADs)",
             removed,
             threshold,
-            median,
         )
 
     return filtered, removed
@@ -512,21 +523,18 @@ def _filter_outliers_robust(
     df: pd.DataFrame,
     price_col: str = "price",
     volume_col: str = "amount",
+    symbol: str = SYMBOL,
 ) -> tuple[pd.DataFrame, OutlierReport]:
     """Apply all robust outlier detection methods in sequence.
 
-    Order of operations (designed to minimize data loss):
-    1. Dust trades removal (minimum volume)
-    2. MAD-based price outliers (global anomalies)
-    3. Rolling Z-score (local volatility-adjusted)
-    4. Flash spike detection (transient errors)
-    5. Volume outliers (MAD-based)
-    6. Dollar value outliers (combined anomalies)
+    All methods are CAUSAL (use only past data via expanding windows)
+    to prevent temporal data leakage.
 
-    Args:
-        df: DataFrame with tick data.
-        price_col: Name of price column.
-        volume_col: Name of volume column.
+    Minimalist version to reduce over-filtering:
+    1. Volume dust removal only (no MAD filter on volume)
+    2. MAD-based price outliers with higher threshold
+    3. Rolling Z-score skipped
+    4. Dollar value outliers skipped
 
     Returns:
         Tuple of (cleaned DataFrame, OutlierReport with statistics).
@@ -537,28 +545,28 @@ def _filter_outliers_robust(
         report.final_ticks = 0
         return df, report
 
-    # 1. MAD-based price outliers (global)
-    df, removed = _filter_mad_price_outliers(df, price_col=price_col)
-    report.removed_mad_price = removed
+    price_threshold = OUTLIER_MAD_THRESHOLD * 3.0
 
-    # 2. Rolling Z-score (local volatility-adjusted)
-    df, removed = _filter_rolling_zscore_outliers(df, price_col=price_col)
-    report.removed_rolling_zscore = removed
-
-    # 3. Flash spike detection
-    df, removed = _filter_flash_spikes(df, price_col=price_col)
-    report.removed_flash_spikes = removed
-
-    # 4. Volume outliers (including dust trades)
-    df, removed_vol, removed_dust = _filter_volume_outliers(df, volume_col=volume_col)
+    # 1. Volume outliers first (dust-only removal; MAD skipped)
+    df, removed_vol, removed_dust = _filter_volume_outliers(
+        df,
+        volume_col=volume_col,
+        threshold=OUTLIER_VOLUME_MAD_THRESHOLD,
+        apply_mad=False,
+    )
     report.removed_volume_outliers = removed_vol
     report.removed_dust_trades = removed_dust
 
-    # 5. Dollar value outliers
-    df, removed = _filter_dollar_value_outliers(
-        df, price_col=price_col, volume_col=volume_col
+    # 2. MAD-based price outliers (expanding, causal)
+    df, removed = _filter_mad_price_outliers(
+        df,
+        price_col=price_col,
+        threshold=price_threshold,
     )
-    report.removed_dollar_value = removed
+    report.removed_mad_price = removed
+
+    # Rolling Z-score and dollar-value filters are intentionally skipped to
+    # minimize data loss.
 
     report.final_ticks = len(df)
     return df, report
@@ -574,6 +582,24 @@ def _drop_missing_essentials(df: pd.DataFrame, required: Iterable[str]) -> pd.Da
     return df
 
 
+def _validate_numeric_columns(df: pd.DataFrame, columns: list[str]) -> None:
+    """Validate that specified columns exist and are numeric.
+
+    Args:
+        df: DataFrame to validate.
+        columns: List of column names that must be numeric.
+
+    Raises:
+        KeyError: If a required column is not found.
+        TypeError: If a column is not numeric.
+    """
+    for col in columns:
+        if col not in df.columns:
+            raise KeyError(f"Required column '{col}' not found in DataFrame")
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            raise TypeError(f"Column '{col}' must be numeric, got {df[col].dtype}")
+
+
 def _strip_unwanted_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Remove heavyweight or unused columns before saving."""
     unwanted = ["id", "info", "symbol"]
@@ -587,35 +613,165 @@ def _persist_clean_dataset(df: pd.DataFrame) -> None:
     logger.info("Saved cleaned trades to %s", DATASET_CLEAN_PARQUET)
 
 
-def clean_ticks_data(use_robust_outliers: bool = True) -> None:
+def _list_partition_files(partition_dir: Path | None = None) -> list[Path]:
+    """Return sorted parquet partitions from the raw directory.
+
+    Uses a flexible pattern to handle files with trailing spaces or other
+    minor naming variations (e.g., 'part-*.parquet ' with trailing space).
+    """
+    partitions_root = Path(partition_dir) if partition_dir is not None else RAW_PARTITIONS_DIR
+    if not partitions_root.is_dir():
+        raise FileNotFoundError(f"Partition directory not found: {partitions_root}")
+
+    # Use flexible pattern to catch files with trailing spaces or variations
+    partitions = sorted(
+        p for p in partitions_root.glob("part-*")
+        if ".parquet" in p.name.lower()
+    )
+    if not partitions:
+        raise ValueError(f"No parquet partition files found in {partitions_root}")
+
+    return partitions
+
+
+def _clean_partition_dataframe(
+    df: pd.DataFrame,
+    use_robust_outliers: bool,
+    symbol: str,
+) -> tuple[pd.DataFrame, OutlierReport | None]:
+    """Apply the cleaning pipeline to a single partition."""
+    df = _drop_missing_essentials(df, required=("timestamp", "price", "amount"))
+    _validate_numeric_columns(df, ["price", "amount"])
+    df = _drop_duplicates(df)
+
+    report: OutlierReport | None
+    if use_robust_outliers:
+        df, report = _filter_outliers_robust(df, symbol=symbol)
+    else:
+        df = _filter_price_outliers(df, max_pct_change=0.05)
+        report = None
+
+    df = _strip_unwanted_columns(df)
+    if "timestamp" in df.columns:
+        df = df.sort_values("timestamp").reset_index(drop=True)
+
+    return df, report
+
+
+def clean_ticks_data(
+    use_robust_outliers: bool = True,
+    symbol: str | None = None,
+    partition_dir: Path | None = None,
+    output_path: Path | None = None,
+) -> None:
     """End-to-end cleaning for tick data downloaded via ccxt.
+
+    All outlier detection methods are CAUSAL (use only past data via expanding
+    windows) to prevent temporal data leakage.
 
     Args:
         use_robust_outliers: If True (default), use robust MAD-based outlier
             detection suitable for financial markets and dollar bars.
             If False, use legacy simple percentage-change filter.
+        symbol: Trading pair symbol (e.g., "USD/BTC"). Defaults to SYMBOL constant.
+        partition_dir: Optional custom directory containing partitioned parquet files.
+        output_path: Optional path for the cleaned parquet output.
     """
+    import pyarrow as pa  # type: ignore[import-untyped]
+    import pyarrow.parquet as pq  # type: ignore[import-untyped]
+
     logger.info("Starting tick data cleaning")
-    df = _load_raw_trades()
+    symbol = symbol or SYMBOL
+    partitions = _list_partition_files(partition_dir=partition_dir)
+    output_path = output_path or DATASET_CLEAN_PARQUET
 
-    df = _drop_missing_essentials(df, required=("timestamp", "price", "amount"))
-    df = _drop_duplicates(df)
+    ensure_output_dir(output_path)
 
-    if use_robust_outliers:
-        # Robust outlier detection for financial markets / dollar bars
-        df, outlier_report = _filter_outliers_robust(df)
-        outlier_report.log_summary()
-    else:
-        # Legacy simple filter (kept for backward compatibility)
-        df = _filter_price_outliers(df, max_pct_change=0.05)
+    temp_output = output_path.with_suffix(".tmp.parquet")
+    for stale_path in (output_path, temp_output):
+        if stale_path.exists():
+            if stale_path.is_dir():
+                shutil.rmtree(stale_path)
+            else:
+                stale_path.unlink()
 
-    df = _strip_unwanted_columns(df)
+    aggregated_report: OutlierReport | None = None
+    writer: pq.ParquetWriter | None = None
+    total_written = 0
 
-    if "timestamp" in df.columns:
-        df = df.sort_values("timestamp").reset_index(drop=True)
+    try:
+        for idx, partition_file in enumerate(partitions, start=1):
+            logger.info(
+                "Cleaning partition %d/%d: %s",
+                idx,
+                len(partitions),
+                partition_file.name,
+            )
+            df_partition = pd.read_parquet(partition_file, engine="pyarrow")
+            if df_partition.empty:
+                logger.info("Partition %s is empty, skipping", partition_file.name)
+                continue
 
-    if df.empty:
+            df_cleaned, report = _clean_partition_dataframe(
+                df_partition,
+                use_robust_outliers=use_robust_outliers,
+                symbol=symbol,
+            )
+
+            if use_robust_outliers and report is not None:
+                aggregated_report = _merge_outlier_reports(aggregated_report, report)
+
+            if df_cleaned.empty:
+                logger.info("Partition %s yielded no rows after cleaning", partition_file.name)
+                continue
+
+            table = pa.Table.from_pandas(df_cleaned, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(temp_output, table.schema, compression="snappy")
+            writer.write_table(table)
+            total_written += len(df_cleaned)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if total_written == 0:
+        if temp_output.exists():
+            temp_output.unlink()
         raise ValueError("No data remaining after cleaning")
 
-    _persist_clean_dataset(df)
+    temp_output.replace(output_path)
 
+    if use_robust_outliers and aggregated_report is not None:
+        aggregated_report.final_ticks = total_written
+        aggregated_report.log_summary()
+
+    logger.info("Saved cleaned trades to %s", output_path)
+USD_LIKE_CODES = {"USD", "USDT", "USDC", "BUSD", "DAI"}
+
+
+def _compute_dollar_notional(
+    df: pd.DataFrame,
+    price_col: str,
+    volume_col: str,
+    symbol: str,
+) -> pd.Series:
+    """Compute USD-like notional regardless of symbol orientation.
+
+    - If USD-like asset is base (e.g., USD/BTC), notional is the volume column (already USD).
+    - If USD-like asset is quote (e.g., BTC/USDT), notional is price * volume.
+    - Fallback to price * volume for other pairs.
+    """
+    if "/" in symbol:
+        base, quote = symbol.split("/", 1)
+    else:
+        base, quote = symbol, ""
+
+    base_upper = base.upper()
+    quote_upper = quote.upper()
+
+    if base_upper in USD_LIKE_CODES:
+        return pd.Series(df[volume_col])
+    if quote_upper in USD_LIKE_CODES:
+        return pd.Series(df[price_col] * df[volume_col])
+
+    return pd.Series(df[price_col] * df[volume_col])

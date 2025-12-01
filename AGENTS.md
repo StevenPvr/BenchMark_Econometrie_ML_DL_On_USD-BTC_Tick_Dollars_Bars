@@ -2,33 +2,38 @@
 
 ## Project Structure & Module Organization
 
-- `src/` contains the full pipeline: `data_fetching`, `data_cleaning`, and `data_preparation` for ETL; `arima/` and `garch/` econometrics; ML models in `model/`; visualization helpers in `data_visualisation/` and `visualization/`; shared configuration in `path.py` and `constants.py`.
-- Tests live in `tests/`, mirroring the data modules (e.g., `tests/data_preparation/test_preparation.py`); keep new tests alongside the feature you touch.
-- Data is split under `data/raw`, `data/cleaned`, and `data/prepared`; output/result/plot folders are defined in `src/path.py`—extend paths there rather than hard-coding.
-- `venv/` is a local environment; prefer your own `.venv` to avoid polluting it or committing site packages.
+- `src/` holds the pipeline: `data_fetching` (ccxt downloads), `data_cleaning`, `data_preparation`, feature builders (`features/`, `clear_features/`), labeling (`labelling/`), and models (`model/` plus `model/baseline/`). Shared helpers live in `src/utils/`, global constants in `src/constants.py`, paths in `src/path.py`, and logging defaults in `src/config_logging.py`.
+- `tests/` mirrors `src/` with pytest suites for each module; use it as a template for new tests.
+- `scripts/run_data_fetching_daemon.sh` controls the long-running fetcher; data artifacts land in `data/` and logs in `logs/`. Keep generated Parquet files out of commits.
+
+## Environment Setup
+
+- Python 3.10+ with a virtualenv: `python -m venv venv && source venv/bin/activate`.
+- Install dependencies: `pip install -r requirements.txt`.
+- Run commands from the repo root so paths in `src/path.py` resolve correctly.
 
 ## Build, Test, and Development Commands
 
-- Create/activate an env: `python -m venv .venv && source .venv/bin/activate` (or reuse `source venv/bin/activate`).
-- Install Python deps with pip (match imports such as pandas, numpy, statsmodels, lightgbm/xgboost/catboost, torch where used); if you keep a lockfile, use `python -m pip install -r requirements.txt`.
-- Run all tests: `python -m pytest tests -q`. Target a module: `python -m pytest tests/data_preparation/test_preparation.py -k adaptive`.
-- Execute pipeline stages via module entrypoints, e.g., `python -m src.data_fetching.main` → `python -m src.data_cleaning.main` → `python -m src.data_preparation.main`.
+- Run all tests: `python -m pytest tests`; keep the suite green before pushing.
+- Focused runs: `python -m pytest tests/data_preparation/test_preparation.py` or append `-k <pattern>` for quick loops.
+- Lint/format: `ruff check .`, `black src tests`, `mypy src` (prefer fixing types before merge).
+- Data fetch daemon: `./scripts/run_data_fetching_daemon.sh start|status|logs|stop` (details in `README_DATA_FETCHING_DAEMON.md`).
 
 ## Coding Style & Naming Conventions
 
-- Follow PEP 8 with 4-space indentation and type hints (`from __future__ import annotations` is standard here).
-- Use snake_case for modules/functions/variables and PascalCase for classes. Keep functions pure where possible; pass paths or DataFrames explicitly.
-- Centralize file locations in `path.py`/`constants.py`; avoid embedding absolute paths in notebooks or scripts.
-- Add docstrings to public functions and brief inline comments only for non-obvious logic.
+- Follow PEP 8 with 4-space indentation; add type hints to public functions/classes.
+- snake_case for modules/functions/vars, PascalCase for classes, UPPER_SNAKE_CASE for constants (centralize shared values in `constants.py`).
+- Import paths via `src/path.py` instead of hardcoding locations; log through `logging` with `config_logging.py`.
+- Document non-obvious logic with short docstrings; prefer descriptive parameter names.
 
 ## Testing Guidelines
 
-- Tests use pytest with lightweight DataFrames and temp directories; avoid touching real `data/` files in unit tests.
-- When adding features, assert schema details (columns/index types) in addition to counts, mirroring the dollar-bar coverage.
-- Seed randomness for reproducibility, and prefer deterministic fixtures over network/file I/O.
+- Name test files `test_<module>.py` and mirror the structure under `tests/`. Keep tests deterministic; seed randomness when present.
+- Add regression tests with each feature or fix. Reuse fixtures from `tests/conftest.py` instead of duplicating setup.
+- Before a PR, run `python -m pytest tests` plus targeted suites you touched; maintain current coverage.
 
 ## Commit & Pull Request Guidelines
 
-- Keep commits focused with concise, present-tense messages; the existing history is short and descriptive (French or English is fine).
-- PR descriptions should summarize the pipeline step touched, data assumptions, and how to reproduce (commands and expected outputs/plots under `outputs/`).
-- Verify `python -m pytest` before requesting review and call out any skipped/expensive cases. Do not commit large raw data, generated artifacts, or virtualenv directories.
+- Use the existing imperative style (`Add documentation README.md`, `Add data cleaning improvements`); scope commits narrowly.
+- PRs should include a change summary, rationale, linked issue, test commands/results, and notes on data requirements or breaking changes. Add screenshots or log snippets when altering plots, metrics, or daemon behavior.
+- Do not commit large artifacts from `data/` or `logs/`; rely on scripts and instructions to regenerate outputs.

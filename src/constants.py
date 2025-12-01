@@ -18,6 +18,7 @@ from src.path import (  # noqa: F401
 
     # Data directories
     RAW_DATA_DIR,
+    RAW_PARTITIONS_DIR,
     CLEANED_DATA_DIR,
     PREPARED_DATA_DIR,
 
@@ -279,8 +280,8 @@ GARCH_MODEL_PARAMS_COUNT: dict[str, int] = {
 # Crypto tick download defaults (used by ccxt pipeline + tests)
 EXCHANGE_ID: str = "binance"  # Try Binance for potentially more data
 SYMBOL: str = "BTC/USDT"  # Binance uses USDT instead of USD
-START_DATE: str = "2024-01-01"  # 3-month period for more data
-END_DATE: str = "2024-01-05"
+START_DATE: str = "2024-01-26"  # 3-month period for more data
+END_DATE: str = "2024-01-31"
 
 # Data conversion constants
 MAX_ERROR_DATES_DISPLAY: int = 5
@@ -289,6 +290,36 @@ MAX_ERROR_DATES_DISPLAY: int = 5
 TRAIN_RATIO_DEFAULT: float = 0.8
 TIMESERIES_SPLIT_N_SPLITS: int = 2
 STATIONARITY_RESAMPLE_FREQ: str = "W"
+
+# ============================================================================
+# DOLLAR BARS CONFIGURATION (De Prado Methodology)
+# ============================================================================
+
+# Calibration: fraction of dataset (prefix) used to calibrate initial threshold T_0
+# Uses only the first N% of ticks to avoid lookahead bias in threshold estimation
+DOLLAR_BARS_CALIBRATION_FRACTION: float = 0.2
+
+# Target ticks per bar (De Prado methodology)
+# T = Total Dollar Volume / (n_ticks / target_ticks_per_bar)
+# Recommended: 100-500 ticks/bar for robust OHLCV statistics
+DOLLAR_BARS_TARGET_TICKS_PER_BAR: int = 100
+
+# EMA span for adaptive threshold mode (alpha = 2 / (span + 1))
+DOLLAR_BARS_EMA_SPAN: int = 100
+
+# Threshold bounds for adaptive mode: (min_multiplier, max_multiplier)
+# Applied as: T_bounded = clip(T_ema, T_0 * min_mult, T_0 * max_mult)
+DOLLAR_BARS_THRESHOLD_BOUNDS_DEFAULT: tuple[float, float] = (0.5, 2.0)
+
+# Whether to include the final incomplete bar (bar that didn't reach threshold)
+# False = more rigorous (excludes anomalous final bar)
+# True = keeps all data (may include bar with different statistical properties)
+DOLLAR_BARS_INCLUDE_INCOMPLETE_FINAL: bool = False
+
+# Whether to exclude bars generated from the calibration prefix
+# When True, bars from the first calibration_fraction of ticks are removed
+# This prevents using calibration data for both threshold estimation AND bar generation
+DOLLAR_BARS_EXCLUDE_CALIBRATION_PREFIX: bool = False
 
 # Time series analysis defaults
 ACF_PACF_DEFAULT_LAGS: int = 30
@@ -450,6 +481,7 @@ TRIPLE_BARRIER_MAX_HOLDING_MAX: int = 50
 
 # ============================================================================
 # DATA CLEANING - OUTLIER DETECTION (Financial Markets / Dollar Bars)
+# All filters use CAUSAL (expanding) windows to prevent temporal data leakage
 # ============================================================================
 
 # MAD (Median Absolute Deviation) outlier detection
@@ -461,20 +493,14 @@ OUTLIER_MAD_SCALING_FACTOR: float = 1.4826  # Consistency factor for normal dist
 # Rolling Z-score outlier detection (adaptive to local volatility regime)
 OUTLIER_ROLLING_WINDOW: int = 1000  # Window size for rolling statistics
 OUTLIER_ROLLING_ZSCORE_THRESHOLD: float = 6.0  # Z-score threshold (6 sigma = very rare event)
-OUTLIER_MIN_PERIODS: int = 100  # Minimum periods before applying rolling filter
-
-# Price spike detection (consecutive tick comparison)
-# For crypto markets, flash crashes/spikes can exceed 10% in milliseconds
-OUTLIER_MAX_TICK_RETURN: float = 0.15  # Max allowed log-return between consecutive ticks (15%)
-OUTLIER_SPIKE_LOOKBACK: int = 3  # Check if price reverts within N ticks (flash crash detection)
-OUTLIER_SPIKE_REVERSION_THRESHOLD: float = 0.5  # If 50% reverts within lookback, it's a spike
+OUTLIER_MIN_PERIODS: int = 100  # Minimum periods before applying expanding/rolling filters
 
 # Volume outlier detection
-OUTLIER_VOLUME_MAD_THRESHOLD: float = 10.0  # MADs for volume outliers (more lenient)
+OUTLIER_VOLUME_MAD_THRESHOLD: float = 20.0  # MADs for volume outliers (more lenient)
 OUTLIER_MIN_VOLUME: float = 1e-10  # Minimum valid volume (avoid zero/dust trades)
 
 # Dollar value outlier detection (price * volume anomalies)
-OUTLIER_DOLLAR_VALUE_MAD_THRESHOLD: float = 8.0  # MADs for dollar value outliers
+OUTLIER_DOLLAR_VALUE_MAD_THRESHOLD: float = 15.0  # MADs for dollar value outliers
 
 # Winsorization bounds (percentiles) - alternative to removal
 OUTLIER_WINSORIZE_LOWER_PERCENTILE: float = 0.001  # 0.1th percentile

@@ -46,6 +46,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from joblib import Parallel, delayed  # type: ignore[import-untyped]
+from scipy.stats import jarque_bera, shapiro  # type: ignore[import-untyped]
 from statsmodels.tsa.stattools import adfuller, kpss  # type: ignore[import-untyped]
 from tqdm import tqdm  # type: ignore[import-untyped]
 
@@ -215,6 +216,136 @@ def test_stationarity_single(
         result["stationarity_conclusion"] = "uncertain"
 
     return result
+
+
+def check_normality_single(
+    series: np.ndarray,
+    feature_name: str,
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    """Check normality of a single feature using Jarque-Bera and Shapiro-Wilk.
+
+    Jarque-Bera tests whether sample data has skewness and kurtosis
+    matching a normal distribution.
+
+    Shapiro-Wilk tests the null hypothesis that data is drawn from a
+    normal distribution.
+
+    Args:
+        series: Feature values (1D array).
+        feature_name: Name of the feature.
+        alpha: Significance level for tests.
+
+    Returns:
+        Dictionary with test results.
+    """
+    result: dict[str, Any] = {"feature": feature_name}
+
+    # Remove NaN
+    series_clean = series[~np.isnan(series)]
+
+    if len(series_clean) < 20:
+        return {
+            "feature": feature_name,
+            "jb_statistic": np.nan,
+            "jb_pvalue": np.nan,
+            "shapiro_statistic": np.nan,
+            "shapiro_pvalue": np.nan,
+            "is_normal": None,
+            "normality_conclusion": "insufficient_data",
+        }
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # Jarque-Bera (works well for large samples)
+            jb_stat, jb_p = jarque_bera(series_clean)
+            result["jb_statistic"] = float(jb_stat)
+            result["jb_pvalue"] = float(jb_p)
+            result["jb_reject_h0"] = jb_p < alpha
+    except Exception as e:
+        logger.debug("Jarque-Bera test failed for %s: %s", feature_name, e)
+        result["jb_statistic"] = np.nan
+        result["jb_pvalue"] = np.nan
+        result["jb_reject_h0"] = None
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # Shapiro-Wilk (limited to 5000 samples)
+            sample = series_clean[:5000] if len(series_clean) > 5000 else series_clean
+            sw_stat, sw_p = shapiro(sample)
+            result["shapiro_statistic"] = float(sw_stat)
+            result["shapiro_pvalue"] = float(sw_p)
+            result["shapiro_reject_h0"] = sw_p < alpha
+    except Exception as e:
+        logger.debug("Shapiro-Wilk test failed for %s: %s", feature_name, e)
+        result["shapiro_statistic"] = np.nan
+        result["shapiro_pvalue"] = np.nan
+        result["shapiro_reject_h0"] = None
+
+    # Combined conclusion
+    jb_reject = result.get("jb_reject_h0")
+    sw_reject = result.get("shapiro_reject_h0")
+
+    if jb_reject is None and sw_reject is None:
+        result["is_normal"] = None
+        result["normality_conclusion"] = "test_failed"
+    elif jb_reject is False and sw_reject is False:
+        result["is_normal"] = True
+        result["normality_conclusion"] = "normal"
+    elif jb_reject is True and sw_reject is True:
+        result["is_normal"] = False
+        result["normality_conclusion"] = "non_normal"
+    else:
+        # Tests disagree - use Jarque-Bera as primary (better for large samples)
+        result["is_normal"] = not jb_reject if jb_reject is not None else not sw_reject
+        result["normality_conclusion"] = "uncertain"
+
+    return result
+
+
+def check_normality_all(
+    df: pd.DataFrame,
+    feature_columns: list[str] | None = None,
+    n_jobs: int = MAX_PARALLEL_JOBS,
+) -> pd.DataFrame:
+    """Check normality for all features.
+
+    Args:
+        df: DataFrame with features.
+        feature_columns: Columns to test (default: all numeric).
+        n_jobs: Number of parallel jobs.
+
+    Returns:
+        DataFrame with normality test results for each feature.
+    """
+    logger.info("Testing normality (n_jobs=%d)...", n_jobs)
+
+    if feature_columns is None:
+        feature_columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        if TARGET_COLUMN in feature_columns:
+            feature_columns = [c for c in feature_columns if c != TARGET_COLUMN]
+
+    n_features = len(feature_columns)
+    logger.info("Testing %d features", n_features)
+
+    def _test_single(col: str) -> dict[str, Any]:
+        series = cast(np.ndarray, df[col].values)
+        return check_normality_single(series, col)
+
+    results = Parallel(n_jobs=n_jobs, prefer="threads", verbose=0)(
+        delayed(_test_single)(col) for col in tqdm(feature_columns, desc="Normality")
+    )
+
+    result_df = pd.DataFrame(results)
+
+    # Log summary
+    if "normality_conclusion" in result_df.columns:
+        summary = result_df["normality_conclusion"].value_counts()
+        logger.info("Normality summary:\n%s", summary.to_string())
+
+    return result_df
 
 
 def _load_cache() -> dict[str, dict[str, Any]]:

@@ -29,44 +29,53 @@ Module de calcul des features de trading a partir des dollar bars.
 ## Categories de Features
 
 ### 1. Momentum
+
 - Returns cumules sur fenetres multiples
 - Extremes recents (max/min)
 
 ### 2. Volatilite Realisee
+
 - Ecart-type rolling des returns
 - Sharpe ratio local
 
 ### 3. Tendance
+
 - Moyennes mobiles (SMA, EMA)
 - Z-score du prix vs MA
 - Cross MA (signaux)
 - Return streak (sequences)
 
 ### 4. Volatilite Range-Based
+
 - Parkinson : volatilite basee sur High-Low
 - Garman-Klass : inclut Open-Close
 - Rogers-Satchell : drift-independent
 - Yang-Zhang : combine overnight et intraday
 
 ### 5. Acceleration Temporelle
+
 - Vitesse de formation des bars
 - Jerk (derivee seconde)
 
 ### 6. Microstructure / Order Flow
+
 - Volume Imbalance : (buy - sell) / total
 - VPIN : Probabilite de trading informe
 - Kyle's Lambda : Impact de prix
 
 ### 7. Entropie
+
 - Shannon : complexite de la distribution
 - Approximate/Sample : regularite de la serie
 
 ### 8. Calendrier / Regime
+
 - Encodage cyclique (heure, jour, mois)
 - Detection regime de volatilite
 - Drawdown features
 
 ### 9. Differentiation Fractionnaire
+
 - FFD (Fixed-width window Fractionally Differenced)
 - Preserve la memoire longue tout en rendant stationnaire
 
@@ -96,10 +105,12 @@ python -m src.features.main
 ## Sortie
 
 3 datasets generes :
+
 - `dataset_features.parquet` : Raw (tree-based ML)
 - `dataset_features_linear.parquet` : Pour modeles lineaires
 - `dataset_features_lstm.parquet` : Pour LSTM
 
 Scalers sauvegardes dans `SCALERS_DIR` :
+
 - `zscore_scaler.joblib`
 - `minmax_scaler.joblib`

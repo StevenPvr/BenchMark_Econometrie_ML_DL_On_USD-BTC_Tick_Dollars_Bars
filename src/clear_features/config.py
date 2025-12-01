@@ -10,6 +10,9 @@ from src.path import (
     DATASET_FEATURES_PARQUET,
     DATASET_FEATURES_LINEAR_PARQUET,
     DATASET_FEATURES_LSTM_PARQUET,
+    DATASET_FEATURES_CLEAR_PARQUET,
+    DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
+    DATASET_FEATURES_LSTM_CLEAR_PARQUET,
     SCALERS_DIR,
     ZSCORE_SCALER_FILE,
     MINMAX_SCALER_FILE,
@@ -26,18 +29,39 @@ CLEAR_FEATURES_DIR = DATA_DIR / "clear_features"
 PCA_ARTIFACTS_DIR = CLEAR_FEATURES_DIR / "pca_artifacts"
 LOG_TRANSFORM_ARTIFACTS_DIR = CLEAR_FEATURES_DIR / "log_transform_artifacts"
 
-# Datasets (input and output - same files, overwrite)
-DATASETS = {
+# Input datasets (from features/)
+INPUT_DATASETS = {
     "tree_based": DATASET_FEATURES_PARQUET,
     "linear": DATASET_FEATURES_LINEAR_PARQUET,
     "lstm": DATASET_FEATURES_LSTM_PARQUET,
 }
 
+# Output datasets (with '_clear' suffix)
+OUTPUT_DATASETS = {
+    "tree_based": DATASET_FEATURES_CLEAR_PARQUET,
+    "linear": DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
+    "lstm": DATASET_FEATURES_LSTM_CLEAR_PARQUET,
+}
+
+# Legacy alias for backwards compatibility
+DATASETS = INPUT_DATASETS
+
 # Reference dataset (for fitting PCA - use tree_based as it's unscaled)
 REFERENCE_DATASET = "tree_based"
 
 # Metadata columns to exclude from transformations
-META_COLUMNS = ["bar_id", "datetime_close", "split"]
+META_COLUMNS = [
+    "bar_id",
+    "datetime_close",
+    "split",
+    # Technical lag index columns (not features)
+    "bar_id_lag1",
+    "bar_id_lag5",
+    "bar_id_lag10",
+    "bar_id_lag15",
+    "bar_id_lag25",
+    "bar_id_lag50",
+]
 
 # Target column (exclude from transformations)
 TARGET_COLUMN = "log_return"
@@ -65,14 +89,6 @@ PCA_CONFIG = {
 
 # Feature categories file (for group-based PCA)
 FEATURE_CATEGORIES_FILE = FEATURES_DIR / "feature_categories.json"
-
-# Weighting configuration (using mutual information from correlation_results.json)
-WEIGHTING_CONFIG = {
-    # Whether to use MI weighting before PCA
-    "use_mi_weighting": True,
-    # Default MI weight for features not in MI results
-    "default_mi_weight": 0.01,
-}
 
 # Log transform configuration
 LOG_TRANSFORM_CONFIG = {

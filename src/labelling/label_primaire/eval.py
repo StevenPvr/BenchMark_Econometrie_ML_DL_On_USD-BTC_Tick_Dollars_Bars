@@ -1,41 +1,41 @@
 """
 Primary Model Evaluation Module.
 
-Comprehensive evaluation of trained primary models with metrics suitable
-for imbalanced classification (triple-barrier labeling).
+Evaluates trained primary models with comprehensive metrics.
+Loads the model, makes predictions on train/test data, and displays metrics.
 
 Metrics computed:
-- Accuracy
-- Balanced Accuracy (macro-averaged recall)
+- Accuracy, Balanced Accuracy
 - F1-Score (macro, weighted, per-class)
-- Precision (macro, weighted, per-class)
-- Recall (macro, weighted, per-class)
+- Precision, Recall
 - Matthews Correlation Coefficient (MCC)
 - Cohen's Kappa
-- AUC-ROC (One-vs-Rest, macro)
-- Log Loss
+- AUC-ROC, Log Loss
 - Confusion Matrix
-- Classification Report
-
-This module allows comparison between primary and meta models.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Add project root to Python path for direct execution.
+_script_dir = Path(__file__).parent
+_project_root = _script_dir.parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import json
 import logging
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, cast
 
 import numpy as np
-import pandas as pd
-from sklearn.metrics import (
+import pandas as pd  # type: ignore[import-untyped]
+from sklearn.metrics import (  # type: ignore[import-untyped]
     accuracy_score,
     balanced_accuracy_score,
-    classification_report,
     cohen_kappa_score,
     confusion_matrix,
     f1_score,
@@ -46,59 +46,48 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from src.constants import TRAIN_SPLIT_LABEL, TEST_SPLIT_LABEL
 from src.labelling.label_primaire.utils import MODEL_REGISTRY
-from src.path import LABEL_PRIMAIRE_TRAIN_DIR, LABEL_PRIMAIRE_EVAL_DIR
+from src.model.base import BaseModel
+from src.path import (
+    LABEL_PRIMAIRE_TRAIN_DIR,
+    LABEL_PRIMAIRE_EVAL_DIR,
+    DATASET_FEATURES_FINAL_PARQUET,
+    DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+    DATASET_FEATURES_LSTM_FINAL_PARQUET,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# COMPREHENSIVE METRICS
+# METRICS
 # =============================================================================
 
 
 @dataclass
 class ClassificationMetrics:
-    """Comprehensive classification metrics for model evaluation."""
+    """Classification metrics for model evaluation."""
 
-    # Basic metrics
     accuracy: float
     balanced_accuracy: float
-
-    # F1 scores
     f1_macro: float
     f1_weighted: float
     f1_per_class: Dict[str, float]
-
-    # Precision
     precision_macro: float
     precision_weighted: float
-    precision_per_class: Dict[str, float]
-
-    # Recall
     recall_macro: float
     recall_weighted: float
-    recall_per_class: Dict[str, float]
-
-    # Correlation metrics
-    mcc: float  # Matthews Correlation Coefficient
+    mcc: float
     cohen_kappa: float
-
-    # Probabilistic metrics (optional)
     auc_roc_macro: float | None
-    auc_roc_weighted: float | None
     log_loss_value: float | None
-
-    # Confusion matrix
     confusion_matrix: List[List[int]]
     class_labels: List[str]
-
-    # Sample counts
     n_samples: int
-    n_classes: int
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary."""
         return {
             "accuracy": self.accuracy,
             "balanced_accuracy": self.balanced_accuracy,
@@ -107,114 +96,60 @@ class ClassificationMetrics:
             "f1_per_class": self.f1_per_class,
             "precision_macro": self.precision_macro,
             "precision_weighted": self.precision_weighted,
-            "precision_per_class": self.precision_per_class,
             "recall_macro": self.recall_macro,
             "recall_weighted": self.recall_weighted,
-            "recall_per_class": self.recall_per_class,
             "mcc": self.mcc,
             "cohen_kappa": self.cohen_kappa,
             "auc_roc_macro": self.auc_roc_macro,
-            "auc_roc_weighted": self.auc_roc_weighted,
             "log_loss": self.log_loss_value,
             "confusion_matrix": self.confusion_matrix,
             "class_labels": self.class_labels,
             "n_samples": self.n_samples,
-            "n_classes": self.n_classes,
-        }
-
-    def summary(self) -> Dict[str, float]:
-        """Return key metrics for quick comparison."""
-        return {
-            "accuracy": self.accuracy,
-            "balanced_accuracy": self.balanced_accuracy,
-            "f1_macro": self.f1_macro,
-            "f1_weighted": self.f1_weighted,
-            "mcc": self.mcc,
-            "cohen_kappa": self.cohen_kappa,
-            "auc_roc_macro": self.auc_roc_macro,
         }
 
 
-def compute_classification_metrics(
+def compute_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     y_proba: np.ndarray | None = None,
-    class_labels: List[str] | None = None,
 ) -> ClassificationMetrics:
-    """
-    Compute comprehensive classification metrics.
-
-    Parameters
-    ----------
-    y_true : np.ndarray
-        True labels.
-    y_pred : np.ndarray
-        Predicted labels.
-    y_proba : np.ndarray, optional
-        Predicted probabilities (n_samples, n_classes).
-    class_labels : List[str], optional
-        Names for each class. If None, inferred from y_true.
-
-    Returns
-    -------
-    ClassificationMetrics
-        All computed metrics.
-    """
-    # Get unique classes
+    """Compute classification metrics."""
     classes = np.unique(np.concatenate([y_true, y_pred]))
     n_classes = len(classes)
+    class_labels = [str(c) for c in sorted(classes)]
 
-    if class_labels is None:
-        class_labels = [str(c) for c in sorted(classes)]
+    accuracy = float(accuracy_score(y_true, y_pred))
+    balanced_acc = float(balanced_accuracy_score(y_true, y_pred))
 
-    # Basic metrics
-    accuracy = accuracy_score(y_true, y_pred)
-    balanced_acc = balanced_accuracy_score(y_true, y_pred)
-
-    # F1 scores
-    f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
-    f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
-    f1_per_class_arr = f1_score(y_true, y_pred, average=None, zero_division=0, labels=sorted(classes))
+    f1_macro = float(f1_score(y_true, y_pred, average="macro", zero_division="warn"))
+    f1_weighted = float(f1_score(y_true, y_pred, average="weighted", zero_division="warn"))
+    f1_per_class_arr = cast(np.ndarray, f1_score(y_true, y_pred, average=None, zero_division="warn", labels=sorted(classes)))  # type: ignore[call-overload]
     f1_per_class = {str(c): float(f) for c, f in zip(sorted(classes), f1_per_class_arr)}
 
-    # Precision
-    precision_macro = precision_score(y_true, y_pred, average="macro", zero_division=0)
-    precision_weighted = precision_score(y_true, y_pred, average="weighted", zero_division=0)
-    precision_per_class_arr = precision_score(y_true, y_pred, average=None, zero_division=0, labels=sorted(classes))
-    precision_per_class = {str(c): float(p) for c, p in zip(sorted(classes), precision_per_class_arr)}
+    precision_macro = float(precision_score(y_true, y_pred, average="macro", zero_division="warn"))
+    precision_weighted = float(precision_score(y_true, y_pred, average="weighted", zero_division="warn"))
+    recall_macro = float(recall_score(y_true, y_pred, average="macro", zero_division="warn"))
+    recall_weighted = float(recall_score(y_true, y_pred, average="weighted", zero_division="warn"))
 
-    # Recall
-    recall_macro = recall_score(y_true, y_pred, average="macro", zero_division=0)
-    recall_weighted = recall_score(y_true, y_pred, average="weighted", zero_division=0)
-    recall_per_class_arr = recall_score(y_true, y_pred, average=None, zero_division=0, labels=sorted(classes))
-    recall_per_class = {str(c): float(r) for c, r in zip(sorted(classes), recall_per_class_arr)}
+    mcc = float(matthews_corrcoef(y_true, y_pred))
+    kappa = float(cohen_kappa_score(y_true, y_pred))
 
-    # Correlation metrics
-    mcc = matthews_corrcoef(y_true, y_pred)
-    kappa = cohen_kappa_score(y_true, y_pred)
-
-    # Probabilistic metrics
     auc_roc_macro = None
-    auc_roc_weighted = None
     log_loss_val = None
 
     if y_proba is not None and n_classes >= 2:
         try:
-            # Ensure probability matrix has correct shape
-            if y_proba.shape[1] == n_classes:
-                auc_roc_macro = roc_auc_score(
+            if n_classes == 2:
+                auc_roc_macro = float(roc_auc_score(y_true, y_proba[:, 1]))
+            else:
+                auc_roc_macro = float(roc_auc_score(
                     y_true, y_proba, multi_class="ovr", average="macro"
-                )
-                auc_roc_weighted = roc_auc_score(
-                    y_true, y_proba, multi_class="ovr", average="weighted"
-                )
-                log_loss_val = log_loss(y_true, y_proba, labels=sorted(classes))
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Could not compute probabilistic metrics: {e}")
+                ))
+            log_loss_val = float(log_loss(y_true, y_proba, labels=sorted(classes)))
+        except (ValueError, IndexError):
+            pass
 
-    # Confusion matrix
     cm = confusion_matrix(y_true, y_pred, labels=sorted(classes))
-    cm_list = cm.tolist()
 
     return ClassificationMetrics(
         accuracy=accuracy,
@@ -224,30 +159,123 @@ def compute_classification_metrics(
         f1_per_class=f1_per_class,
         precision_macro=precision_macro,
         precision_weighted=precision_weighted,
-        precision_per_class=precision_per_class,
         recall_macro=recall_macro,
         recall_weighted=recall_weighted,
-        recall_per_class=recall_per_class,
         mcc=mcc,
         cohen_kappa=kappa,
         auc_roc_macro=auc_roc_macro,
-        auc_roc_weighted=auc_roc_weighted,
         log_loss_value=log_loss_val,
-        confusion_matrix=cm_list,
+        confusion_matrix=cm.tolist(),
         class_labels=class_labels,
         n_samples=len(y_true),
-        n_classes=n_classes,
     )
 
 
 # =============================================================================
-# EVALUATION RESULT
+# DATA LOADING
+# =============================================================================
+
+
+def get_features_path(model_name: str) -> Path:
+    """Get the base features file path for a model type (without labels)."""
+    dataset_type = MODEL_REGISTRY[model_name]["dataset"]
+    path_map = {
+        "tree": DATASET_FEATURES_FINAL_PARQUET,
+        "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+        "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
+    }
+    return path_map[dataset_type]
+
+
+def get_labeled_features_path(model_name: str) -> Path:
+    """
+    Get the labeled features file path for a specific model.
+
+    Each model has its own labeled features file to avoid conflicts
+    when training multiple models with different triple barrier parameters.
+
+    Example: lightgbm -> data/features/dataset_features_final_lightgbm.parquet
+    """
+    dataset_type = MODEL_REGISTRY[model_name]["dataset"]
+    base_path_map = {
+        "tree": DATASET_FEATURES_FINAL_PARQUET,
+        "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+        "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
+    }
+    base_path = base_path_map[dataset_type]
+    # Insert model name before .parquet extension
+    return base_path.parent / f"{base_path.stem}_{model_name}.parquet"
+
+
+def get_trained_models() -> List[str]:
+    """Get list of models that have been trained."""
+    trained = []
+    for model_name in MODEL_REGISTRY.keys():
+        model_dir = LABEL_PRIMAIRE_TRAIN_DIR / model_name
+        model_file = model_dir / f"{model_name}_model.joblib"
+        if model_file.exists():
+            trained.append(model_name)
+    return trained
+
+
+def load_model(model_name: str) -> BaseModel:
+    """Load a trained model."""
+    model_dir = LABEL_PRIMAIRE_TRAIN_DIR / model_name
+    model_path = model_dir / f"{model_name}_model.joblib"
+
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Trained model not found: {model_path}\n"
+            f"Run training first: python -m src.labelling.label_primaire.train"
+        )
+
+    return BaseModel.load(model_path)
+
+
+def load_data(model_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Load train and test data with labels.
+
+    Loads from the model-specific labeled features file.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        (train_df, test_df) with features and labels
+    """
+    features_path = get_labeled_features_path(model_name)
+
+    if not features_path.exists():
+        raise FileNotFoundError(
+            f"Labeled features file not found: {features_path}\n"
+            f"Run training first: python -m src.labelling.label_primaire.train"
+        )
+
+    df = pd.read_parquet(features_path)
+
+    if "label" not in df.columns:
+        raise ValueError(
+            f"No 'label' column in {features_path}.\n"
+            f"Run training first to generate labels: python -m src.labelling.label_primaire.train"
+        )
+
+    if "split" not in df.columns:
+        raise ValueError(f"No 'split' column in {features_path}")
+
+    train_df = cast(pd.DataFrame, df[df["split"] == TRAIN_SPLIT_LABEL].copy())
+    test_df = cast(pd.DataFrame, df[df["split"] == TEST_SPLIT_LABEL].copy())
+
+    return train_df, test_df
+
+
+# =============================================================================
+# EVALUATION
 # =============================================================================
 
 
 @dataclass
 class EvaluationResult:
-    """Complete evaluation result for a trained model."""
+    """Evaluation result."""
 
     model_name: str
     train_metrics: Dict[str, Any]
@@ -256,13 +284,10 @@ class EvaluationResult:
     test_samples: int
     label_distribution_train: Dict[str, Any]
     label_distribution_test: Dict[str, Any]
-    model_path: str
-    oof_predictions_path: str
-    test_predictions_path: str
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary."""
         return {
             "model_name": self.model_name,
             "train_metrics": self.train_metrics,
@@ -271,9 +296,6 @@ class EvaluationResult:
             "test_samples": self.test_samples,
             "label_distribution_train": self.label_distribution_train,
             "label_distribution_test": self.label_distribution_test,
-            "model_path": self.model_path,
-            "oof_predictions_path": self.oof_predictions_path,
-            "test_predictions_path": self.test_predictions_path,
             "timestamp": self.timestamp,
         }
 
@@ -284,226 +306,110 @@ class EvaluationResult:
             json.dump(self.to_dict(), f, indent=2, default=str)
         logger.info(f"Evaluation results saved to {path}")
 
-    def comparison_summary(self) -> Dict[str, Dict[str, float]]:
-        """Return summary for train/test comparison."""
-        return {
-            "train": {
-                "accuracy": self.train_metrics.get("accuracy", 0),
-                "balanced_accuracy": self.train_metrics.get("balanced_accuracy", 0),
-                "f1_macro": self.train_metrics.get("f1_macro", 0),
-                "f1_weighted": self.train_metrics.get("f1_weighted", 0),
-                "mcc": self.train_metrics.get("mcc", 0),
-            },
-            "test": {
-                "accuracy": self.test_metrics.get("accuracy", 0),
-                "balanced_accuracy": self.test_metrics.get("balanced_accuracy", 0),
-                "f1_macro": self.test_metrics.get("f1_macro", 0),
-                "f1_weighted": self.test_metrics.get("f1_weighted", 0),
-                "mcc": self.test_metrics.get("mcc", 0),
-            },
-        }
-
-
-# =============================================================================
-# DATA LOADING
-# =============================================================================
-
-
-def get_trained_models() -> List[str]:
-    """Get list of models that have been trained."""
-    trained = []
-    for model_name in MODEL_REGISTRY.keys():
-        model_dir = LABEL_PRIMAIRE_TRAIN_DIR / model_name
-        model_file = model_dir / f"{model_name}_final_model.joblib"
-        if model_file.exists():
-            trained.append(model_name)
-    return trained
-
-
-def load_predictions(model_name: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Load OOF and test predictions for a trained model.
-
-    Returns
-    -------
-    Tuple[pd.DataFrame, pd.DataFrame]
-        (oof_predictions, test_predictions)
-    """
-    model_dir = LABEL_PRIMAIRE_TRAIN_DIR / model_name
-
-    oof_path = model_dir / f"{model_name}_oof_predictions.parquet"
-    test_path = model_dir / f"{model_name}_test_predictions.parquet"
-
-    if not oof_path.exists():
-        raise FileNotFoundError(f"OOF predictions not found: {oof_path}")
-    if not test_path.exists():
-        raise FileNotFoundError(f"Test predictions not found: {test_path}")
-
-    oof_df = pd.read_parquet(oof_path)
-    test_df = pd.read_parquet(test_path)
-
-    return oof_df, test_df
-
-
-def load_trained_model(model_name: str):
-    """Load a trained model from disk."""
-    from src.model.base import BaseModel
-
-    model_dir = LABEL_PRIMAIRE_TRAIN_DIR / model_name
-    model_path = model_dir / f"{model_name}_final_model.joblib"
-
-    if not model_path.exists():
-        raise FileNotFoundError(
-            f"Trained model not found: {model_path}\n"
-            f"Run training first: python -m src.labelling.label_primaire.main"
-        )
-
-    return BaseModel.load(model_path)
-
-
-# =============================================================================
-# EVALUATION FUNCTIONS
-# =============================================================================
-
-
-def extract_probabilities(df: pd.DataFrame) -> np.ndarray | None:
-    """Extract probability columns from predictions DataFrame."""
-    proba_cols = [c for c in df.columns if c.startswith("proba_class_")]
-
-    if not proba_cols:
-        return None
-
-    # Sort by class index
-    proba_cols = sorted(proba_cols, key=lambda x: int(x.split("_")[-1]))
-    return df[proba_cols].values
-
 
 def evaluate_model(model_name: str) -> EvaluationResult:
     """
     Evaluate a trained primary model.
 
-    Parameters
-    ----------
-    model_name : str
-        Name of the model to evaluate.
-
-    Returns
-    -------
-    EvaluationResult
-        Complete evaluation results.
+    Loads the model, makes predictions on train/test data,
+    and computes comprehensive metrics.
     """
     logger.info(f"{'='*60}")
     logger.info(f"EVALUATION: {model_name.upper()}")
     logger.info(f"{'='*60}")
 
-    # Load predictions
-    logger.info("Loading predictions...")
-    oof_df, test_df = load_predictions(model_name)
+    # Load model
+    logger.info("Loading model...")
+    model = load_model(model_name)
 
-    # Get model path
-    model_dir = LABEL_PRIMAIRE_TRAIN_DIR / model_name
-    model_path = model_dir / f"{model_name}_final_model.joblib"
-    oof_path = model_dir / f"{model_name}_oof_predictions.parquet"
-    test_path = model_dir / f"{model_name}_test_predictions.parquet"
+    # Load data
+    logger.info("Loading data...")
+    train_df, test_df = load_data(model_name)
 
-    # Extract data
-    # OOF (train) - filter out NaN predictions
-    oof_valid_mask = ~oof_df["y_pred"].isna()
-    y_train_true = oof_df.loc[oof_valid_mask, "y_true"].values.astype(int)
-    y_train_pred = oof_df.loc[oof_valid_mask, "y_pred"].values.astype(int)
-    y_train_proba = extract_probabilities(oof_df.loc[oof_valid_mask])
+    # Prepare features
+    non_feature_cols = [
+        "bar_id", "timestamp_open", "timestamp_close",
+        "datetime_open", "datetime_close", "threshold_used",
+        "log_return", "split", "label",
+    ]
+    feature_cols = [c for c in train_df.columns if c not in non_feature_cols]
 
-    # Test
-    y_test_true = test_df["y_true"].values.astype(int)
-    y_test_pred = test_df["y_pred"].values.astype(int)
-    y_test_proba = extract_probabilities(test_df)
+    # Filter valid labels
+    train_valid = train_df[~train_df["label"].isna()].copy()
+    test_valid = test_df[~test_df["label"].isna()].copy()
+
+    X_train = cast(pd.DataFrame, train_valid[feature_cols])
+    y_train = cast(np.ndarray, cast(pd.Series, train_valid["label"]).astype(int).values)
+    X_test = cast(pd.DataFrame, test_valid[feature_cols])
+    y_test = cast(np.ndarray, cast(pd.Series, test_valid["label"]).astype(int).values)
+
+    logger.info(f"Train samples: {len(X_train)}, Test samples: {len(X_test)}")
+
+    # Make predictions
+    logger.info("Making predictions...")
+    y_train_pred = cast(np.ndarray, model.predict(X_train))
+    y_test_pred = cast(np.ndarray, model.predict(X_test))
+
+    # Get probabilities if available
+    y_train_proba = None
+    y_test_proba = None
+    try:
+        y_train_proba = cast(Any, model).predict_proba(X_train)
+        y_test_proba = cast(Any, model).predict_proba(X_test)
+    except Exception:
+        pass
 
     # Compute metrics
-    logger.info("Computing train (OOF) metrics...")
-    train_metrics = compute_classification_metrics(
-        y_train_true, y_train_pred, y_train_proba
-    )
-
-    logger.info("Computing test metrics...")
-    test_metrics = compute_classification_metrics(
-        y_test_true, y_test_pred, y_test_proba
-    )
+    logger.info("Computing metrics...")
+    train_metrics = compute_metrics(cast(np.ndarray, y_train), y_train_pred, y_train_proba)
+    test_metrics = compute_metrics(cast(np.ndarray, y_test), y_test_pred, y_test_proba)
 
     # Label distributions
-    train_counts = pd.Series(y_train_true).value_counts().to_dict()
-    test_counts = pd.Series(y_test_true).value_counts().to_dict()
+    train_counts = pd.Series(y_train).value_counts().to_dict()
+    test_counts = pd.Series(y_test).value_counts().to_dict()
 
     train_dist = {
-        "total": len(y_train_true),
+        "total": len(y_train),
         "counts": {str(k): int(v) for k, v in train_counts.items()},
-        "percentages": {str(k): v / len(y_train_true) * 100 for k, v in train_counts.items()},
+        "percentages": {str(k): v / len(y_train) * 100 for k, v in train_counts.items()},
     }
     test_dist = {
-        "total": len(y_test_true),
+        "total": len(y_test),
         "counts": {str(k): int(v) for k, v in test_counts.items()},
-        "percentages": {str(k): v / len(y_test_true) * 100 for k, v in test_counts.items()},
+        "percentages": {str(k): v / len(y_test) * 100 for k, v in test_counts.items()},
     }
 
-    # Build result
-    result = EvaluationResult(
+    return EvaluationResult(
         model_name=model_name,
         train_metrics=train_metrics.to_dict(),
         test_metrics=test_metrics.to_dict(),
-        train_samples=len(y_train_true),
-        test_samples=len(y_test_true),
+        train_samples=len(y_train),
+        test_samples=len(y_test),
         label_distribution_train=train_dist,
         label_distribution_test=test_dist,
-        model_path=str(model_path),
-        oof_predictions_path=str(oof_path),
-        test_predictions_path=str(test_path),
     )
 
-    return result
-
 
 # =============================================================================
-# DISPLAY FUNCTIONS
+# DISPLAY
 # =============================================================================
 
 
-def print_confusion_matrix(cm: List[List[int]], labels: List[str]) -> None:
-    """Print formatted confusion matrix."""
-    print("\nConfusion Matrix:")
-    print("-" * 40)
-
-    # Header
-    header = "True\\Pred"
-    for label in labels:
-        header += f"  {label:>6}"
-    print(header)
-
-    # Rows
-    for i, label in enumerate(labels):
-        row = f"  {label:>6}"
-        for j in range(len(labels)):
-            row += f"  {cm[i][j]:>6}"
-        print(row)
-
-
-def print_metrics_table(metrics: Dict[str, Any], title: str) -> None:
-    """Print metrics in a formatted table."""
+def print_metrics(metrics: Dict[str, Any], title: str) -> None:
+    """Print metrics table."""
     print(f"\n{title}")
     print("=" * 50)
 
-    # Key metrics
     key_metrics = [
         ("Accuracy", "accuracy"),
         ("Balanced Accuracy", "balanced_accuracy"),
         ("F1 Macro", "f1_macro"),
         ("F1 Weighted", "f1_weighted"),
         ("Precision Macro", "precision_macro"),
-        ("Precision Weighted", "precision_weighted"),
         ("Recall Macro", "recall_macro"),
-        ("Recall Weighted", "recall_weighted"),
         ("MCC", "mcc"),
         ("Cohen's Kappa", "cohen_kappa"),
         ("AUC-ROC Macro", "auc_roc_macro"),
-        ("AUC-ROC Weighted", "auc_roc_weighted"),
         ("Log Loss", "log_loss"),
     ]
 
@@ -514,36 +420,46 @@ def print_metrics_table(metrics: Dict[str, Any], title: str) -> None:
         else:
             print(f"  {name:<22}: {'N/A':>8}")
 
-    # Per-class metrics
     if "f1_per_class" in metrics:
         print("\n  Per-Class F1:")
         for cls, f1 in metrics["f1_per_class"].items():
             print(f"    Class {cls}: {f1:.4f}")
 
 
-def print_comparison_table(result: EvaluationResult) -> None:
+def print_confusion_matrix(cm: List[List[int]], labels: List[str]) -> None:
+    """Print confusion matrix."""
+    print("\nConfusion Matrix:")
+    print("-" * 40)
+
+    header = "True\\Pred"
+    for label in labels:
+        header += f"  {label:>6}"
+    print(header)
+
+    for i, label in enumerate(labels):
+        row = f"  {label:>6}"
+        for j in range(len(labels)):
+            row += f"  {cm[i][j]:>6}"
+        print(row)
+
+
+def print_comparison(result: EvaluationResult) -> None:
     """Print train vs test comparison."""
     print("\n" + "=" * 60)
     print("TRAIN vs TEST COMPARISON")
     print("=" * 60)
 
-    summary = result.comparison_summary()
-
-    print(f"\n{'Metric':<25} {'Train (OOF)':>12} {'Test':>12} {'Delta':>10}")
+    print(f"\n{'Metric':<25} {'Train':>12} {'Test':>12} {'Delta':>10}")
     print("-" * 60)
 
     for metric in ["accuracy", "balanced_accuracy", "f1_macro", "f1_weighted", "mcc"]:
-        train_val = summary["train"].get(metric, 0)
-        test_val = summary["test"].get(metric, 0)
+        train_val = result.train_metrics.get(metric, 0)
+        test_val = result.test_metrics.get(metric, 0)
         delta = test_val - train_val
-
-        # Color coding (positive delta = test better)
-        delta_str = f"{delta:+.4f}"
-
-        print(f"{metric:<25} {train_val:>12.4f} {test_val:>12.4f} {delta_str:>10}")
+        print(f"{metric:<25} {train_val:>12.4f} {test_val:>12.4f} {delta:>+10.4f}")
 
 
-def print_evaluation_results(result: EvaluationResult) -> None:
+def print_results(result: EvaluationResult) -> None:
     """Print complete evaluation results."""
     print("\n" + "=" * 70)
     print(f"EVALUATION RESULTS: {result.model_name.upper()}")
@@ -551,7 +467,6 @@ def print_evaluation_results(result: EvaluationResult) -> None:
 
     print(f"\nSamples: Train={result.train_samples}, Test={result.test_samples}")
 
-    # Label distributions
     print("\n--- Label Distribution ---")
     print("Train:")
     for label, count in result.label_distribution_train["counts"].items():
@@ -562,46 +477,37 @@ def print_evaluation_results(result: EvaluationResult) -> None:
         pct = result.label_distribution_test["percentages"][label]
         print(f"  Class {label}: {count:>6} ({pct:>5.1f}%)")
 
-    # Train metrics
-    print_metrics_table(result.train_metrics, "TRAIN (Out-of-Fold) METRICS")
+    print_metrics(result.train_metrics, "TRAIN METRICS")
     print_confusion_matrix(
         result.train_metrics["confusion_matrix"],
         result.train_metrics["class_labels"]
     )
 
-    # Test metrics
-    print_metrics_table(result.test_metrics, "TEST METRICS")
+    print_metrics(result.test_metrics, "TEST METRICS")
     print_confusion_matrix(
         result.test_metrics["confusion_matrix"],
         result.test_metrics["class_labels"]
     )
 
-    # Comparison
-    print_comparison_table(result)
-
+    print_comparison(result)
     print("\n" + "=" * 70)
 
 
 # =============================================================================
-# INTERACTIVE CLI
+# CLI
 # =============================================================================
 
 
 def select_model() -> str:
-    """Interactive model selection for evaluation."""
+    """Interactive model selection."""
     models = list(MODEL_REGISTRY.keys())
     trained = get_trained_models()
 
     print("\n" + "=" * 60)
     print("LABEL PRIMAIRE - EVALUATION")
     print("=" * 60)
-    print("\nThis module evaluates trained primary models with comprehensive metrics:")
-    print("  - F1 (macro, weighted, per-class)")
-    print("  - MCC (Matthews Correlation Coefficient)")
-    print("  - Balanced Accuracy, Cohen's Kappa")
-    print("  - AUC-ROC, Log Loss")
-    print("  - Confusion Matrix")
-    print("\nModels disponibles:")
+    print("\nEvalue le modele primaire seul (avant meta-model).")
+    print("\nModeles disponibles:")
     print("-" * 40)
 
     for i, model in enumerate(models, 1):
@@ -613,8 +519,8 @@ def select_model() -> str:
     print("-" * 40)
 
     if not trained:
-        print("\nAucun modele entraine. Lancer d'abord l'entrainement:")
-        print("  python -m src.labelling.label_primaire.main")
+        print("\nAucun modele entraine. Lancer d'abord:")
+        print("  python -m src.labelling.label_primaire.train")
         sys.exit(1)
 
     while True:
@@ -634,10 +540,9 @@ def select_model() -> str:
                 print(f"Modele inconnu: {choice}")
                 continue
 
-            # Check if trained
             if selected not in trained:
                 print(f"Le modele '{selected}' n'a pas ete entraine.")
-                print("Lancer d'abord: python -m src.labelling.label_primaire.main")
+                print("Lancer d'abord: python -m src.labelling.label_primaire.train")
                 continue
 
             return selected
@@ -654,7 +559,6 @@ def main() -> None:
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
 
-    # Interactive model selection
     model_name = select_model()
     print(f"\nModele selectionne: {model_name}")
 
@@ -665,11 +569,8 @@ def main() -> None:
 
     print("\n")
 
-    # Run evaluation
     result = evaluate_model(model_name)
-
-    # Print results
-    print_evaluation_results(result)
+    print_results(result)
 
     # Save results
     output_dir = LABEL_PRIMAIRE_EVAL_DIR / model_name

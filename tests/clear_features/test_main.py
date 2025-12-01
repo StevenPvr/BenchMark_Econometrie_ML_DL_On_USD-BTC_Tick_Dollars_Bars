@@ -36,23 +36,51 @@ def test_to_scalar_int():
     assert _to_scalar_int(np.array([1, 2])) == 3
 
 def test_clean_nan_values():
+    """Test NaN cleaning with proper split column."""
     df = pd.DataFrame({
-        "feat_1": [1.0, np.nan, 3.0],
-        "target": [1.0, 1.0, np.nan], # Last row should be removed
-        "meta": [1, 2, 3]
+        "feat_1": [1.0, np.nan, 3.0, 4.0],
+        "target": [1.0, 1.0, 1.0, np.nan],  # Last row should be removed
+        "meta": [1, 2, 3, 4],
+        "split": ["train", "train", "train", "test"],  # Required column
     })
 
     cleaned, stats = clean_nan_values(df, meta_columns=["meta"], target_column="target")
 
-    # Check median fill for feat_1 (median of 1, 3 is 2)
+    # Check median fill for feat_1 (median of train: 1, 3 is 2)
     assert cleaned["feat_1"].iloc[1] == 2.0
 
-    # Check row removal
-    assert len(cleaned) == 2
-    assert 2 not in cleaned.index # Index 2 removed
-
+    # Check row removal (row with NaN target)
+    assert len(cleaned) == 3
     assert stats["rows_removed"] == 1
     assert "feat_1" in stats["nan_cols"]
+
+
+def test_clean_nan_values_requires_split_column():
+    """Test that clean_nan_values raises error without split column."""
+    df = pd.DataFrame({
+        "feat_1": [1.0, np.nan, 3.0],
+        "target": [1.0, 1.0, 1.0],
+        "meta": [1, 2, 3],
+        # No split column
+    })
+
+    with pytest.raises(ValueError, match="split"):
+        clean_nan_values(df, meta_columns=["meta"], target_column="target")
+
+
+def test_clean_nan_values_uses_train_median_only():
+    """Test that median is computed from train data only (anti-leakage)."""
+    df = pd.DataFrame({
+        "feat_1": [1.0, np.nan, 3.0, 100.0, 200.0],  # Test has extreme values
+        "target": [1.0, 1.0, 1.0, 1.0, 1.0],
+        "meta": [1, 2, 3, 4, 5],
+        "split": ["train", "train", "train", "test", "test"],
+    })
+
+    cleaned, stats = clean_nan_values(df, meta_columns=["meta"], target_column="target")
+
+    # Median should be 2.0 (from train: [1.0, 3.0]) not affected by test [100.0, 200.0]
+    assert cleaned["feat_1"].iloc[1] == 2.0
 
 def test_load_save_dataset(tmp_path):
     df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})

@@ -284,6 +284,125 @@ def test_transform_before_fit_raises(sample_df, feature_categories_file):
         reducer.transform(sample_df)
 
 
+def test_standardization_before_pca(sample_df, feature_categories_file):
+    """Test that data is standardized before PCA fitting."""
+    reducer = GroupPCAReducer(categories_file=feature_categories_file)
+    reducer.fit(sample_df)
+
+    # Check standardization params exist
+    assert "momentum_lag1" in reducer._standardization_params
+    assert "volatility_lag5" in reducer._standardization_params
+
+    # Check params structure
+    for group_name, params in reducer._standardization_params.items():
+        assert "mean" in params
+        assert "std" in params
+        # Std should never be zero
+        assert all(params["std"] > 0)
+
+
+def test_standardization_params_from_train_only(sample_df, feature_categories_file):
+    """Test that standardization uses train data only."""
+    reducer = GroupPCAReducer(categories_file=feature_categories_file)
+    reducer.fit(sample_df)
+
+    # Get train data
+    train_data = sample_df[sample_df["split"] == "train"]
+    momentum_cols = ["feat_a", "feat_b", "feat_c"]
+
+    # Compute expected params from train only
+    expected_means = train_data[momentum_cols].mean().values
+    expected_stds = train_data[momentum_cols].std(ddof=1).values
+
+    # Compare with stored params
+    stored_means = reducer._standardization_params["momentum_lag1"]["mean"]
+    stored_stds = reducer._standardization_params["momentum_lag1"]["std"]
+
+    np.testing.assert_array_almost_equal(expected_means, stored_means)
+    np.testing.assert_array_almost_equal(expected_stds, stored_stds)
+
+
+def test_standardization_handles_constant_features(feature_categories_file):
+    """Test that constant features don't cause division by zero."""
+    np.random.seed(42)
+    n_train = 80
+    n_test = 20
+    n_total = n_train + n_test
+
+    df = pd.DataFrame({
+        "feat_a": np.ones(n_total),  # Constant feature
+        "feat_b": np.random.randn(n_total),
+        "feat_c": np.random.randn(n_total),
+        "vol_1": np.random.randn(n_total),
+        "vol_2": np.random.randn(n_total),
+        "single_feat": np.random.randn(n_total),
+        "pca_cluster1_c0": np.random.randn(n_total),
+        "pca_cluster2_c0": np.random.randn(n_total),
+        "independent": np.random.randn(n_total),
+        "log_return": np.random.randn(n_total),
+        "split": ["train"] * n_train + ["test"] * n_test,
+    })
+
+    reducer = GroupPCAReducer(categories_file=feature_categories_file)
+    # Should not raise division by zero error
+    reducer.fit(df)
+
+    # Std for constant feature should be 1.0 (safety fallback)
+    assert reducer._standardization_params["momentum_lag1"]["std"][0] == 1.0
+
+
+def test_transform_raises_if_standardization_params_missing(sample_df, feature_categories_file):
+    """Test that transform raises error if standardization params missing."""
+    reducer = GroupPCAReducer(categories_file=feature_categories_file)
+    reducer.fit(sample_df)
+
+    # Manually remove standardization params
+    del reducer._standardization_params["momentum_lag1"]
+
+    with pytest.raises(RuntimeError, match="standardization parameters"):
+        reducer.transform(sample_df)
+
+
+def test_transform_raises_if_medians_missing_with_nan(sample_df, feature_categories_file):
+    """Test that transform raises error if medians missing and NaN present."""
+    reducer = GroupPCAReducer(categories_file=feature_categories_file)
+    reducer.fit(sample_df)
+
+    # Manually remove medians
+    del reducer._imputation_medians["momentum_lag1"]
+
+    # Add NaN to trigger median lookup
+    df_with_nan = sample_df.copy()
+    df_with_nan.loc[0, "feat_a"] = np.nan
+
+    with pytest.raises(RuntimeError, match="No stored medians"):
+        reducer.transform(df_with_nan)
+
+
+def test_save_load_preserves_standardization_params(sample_df, feature_categories_file, tmp_path):
+    """Test that save/load preserves standardization parameters."""
+    reducer = GroupPCAReducer(categories_file=feature_categories_file)
+    reducer.fit(sample_df)
+
+    artifacts_dir = tmp_path / "artifacts"
+    reducer.save_artifacts(output_dir=artifacts_dir)
+
+    # Load into new reducer
+    new_reducer = GroupPCAReducer(categories_file=feature_categories_file)
+    new_reducer.load_artifacts(input_dir=artifacts_dir)
+
+    # Verify standardization params preserved
+    for group_name in reducer._standardization_params:
+        np.testing.assert_array_equal(
+            reducer._standardization_params[group_name]["mean"],
+            new_reducer._standardization_params[group_name]["mean"]
+        )
+        np.testing.assert_array_equal(
+            reducer._standardization_params[group_name]["std"],
+            new_reducer._standardization_params[group_name]["std"]
+        )
+
+
 if __name__ == "__main__":
     # Allow running individual test file with pytest and colored output
     import pytest  # type: ignore

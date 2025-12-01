@@ -12,7 +12,15 @@ import os
 from pathlib import Path
 from typing import Literal
 
-from src.path import DATA_DIR
+from src.path import (
+    DATA_DIR,
+    DATASET_FEATURES_CLEAR_PARQUET,
+    DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
+    DATASET_FEATURES_LSTM_CLEAR_PARQUET,
+    DATASET_FEATURES_FINAL_PARQUET,
+    DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+    DATASET_FEATURES_LSTM_FINAL_PARQUET,
+)
 
 # ============================================================================
 # PARALLELIZATION SETTINGS
@@ -50,6 +58,19 @@ CLUSTERING_RESULTS_JSON: Path = RESULTS_JSON_DIR / "clustering_results.json"
 TEMPORAL_RESULTS_JSON: Path = RESULTS_JSON_DIR / "temporal_results.json"
 SUMMARY_JSON: Path = RESULTS_JSON_DIR / "analysis_summary.json"
 
+# Input datasets (from clear_features/ with '_clear' suffix)
+INPUT_DATASETS = {
+    "tree_based": DATASET_FEATURES_CLEAR_PARQUET,
+    "linear": DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
+    "lstm": DATASET_FEATURES_LSTM_CLEAR_PARQUET,
+}
+
+# Output datasets (with '_final' suffix - ready for labelling)
+OUTPUT_DATASETS = {
+    "tree_based": DATASET_FEATURES_FINAL_PARQUET,
+    "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+    "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
+}
 
 # Plot directories
 PLOTS_HTML_DIR: Path = ANALYSE_FEATURES_DIR / "plots" / "html"
@@ -69,8 +90,15 @@ DATASET_SAMPLE_FRACTION: float = 0.2
 # CORRELATION ANALYSIS SETTINGS
 # ============================================================================
 
-# Spearman correlation threshold for "high correlation"
-SPEARMAN_HIGH_CORR_THRESHOLD: float = 0.8
+# Correlation thresholds (used for summary and filtering)
+# - SIGNIFICANT: minimum correlation to consider relevant
+# - HIGH: threshold for "highly correlated" pairs
+# - VERY_HIGH: threshold for potential redundancy (consider removing)
+CORRELATION_SIGNIFICANT_THRESHOLD: float = 0.5
+CORRELATION_HIGH_THRESHOLD: float = 0.7
+SPEARMAN_HIGH_CORR_THRESHOLD: float = 0.7  # Legacy alias, use CORRELATION_HIGH_THRESHOLD
+# Threshold for dropping one feature from highly correlated groups
+CORRELATION_DROP_THRESHOLD: float = 0.7
 
 # Mutual information settings
 MI_N_NEIGHBORS: int = 5  # k-NN for MI estimation

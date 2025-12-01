@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Tuple, Type, cast
 import numpy as np
 import optuna
 import pandas as pd  # type: ignore[import-untyped]
-from sklearn.metrics import matthews_corrcoef  # type: ignore[import-untyped]
+from sklearn.metrics import f1_score, matthews_corrcoef  # type: ignore[import-untyped]
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore[import-untyped]
 from sklearn.utils.class_weight import compute_class_weight  # type: ignore[import-untyped]
 
@@ -72,6 +72,42 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # TRIPLE BARRIER LABELING
 # =============================================================================
+
+MIN_LABEL_RATIO_POS_NEG = 0.20  # Require at least 20% for -1 and 1
+MIN_LABEL_RATIO_NEUTRAL = 0.10  # Require at least 10% for 0
+PARALLEL_MIN_EVENTS = 10_000
+
+
+def _resolve_n_jobs(requested: int | None) -> int:
+    """Return a valid worker count capped to available CPU cores."""
+    max_cores = multiprocessing.cpu_count()
+    if requested is None or requested <= 0:
+        return max_cores
+    return min(requested, max_cores)
+
+
+def _split_t_events(t_events: pd.DatetimeIndex, n_splits: int) -> List[pd.DatetimeIndex]:
+    """Split events into roughly equal chunks while preserving order."""
+    chunks = np.array_split(t_events, n_splits)
+    return [pd.DatetimeIndex(chunk) for chunk in chunks if len(chunk) > 0]
+
+
+def _generate_events_chunk(
+    close: pd.Series,
+    t_events_chunk: pd.DatetimeIndex,
+    volatility: pd.Series,
+    tb_params: Dict[str, Any],
+) -> pd.DataFrame:
+    """Generate triple-barrier events for a chunk of timestamps."""
+    return get_events_primary(
+        close=close,
+        t_events=t_events_chunk,
+        pt_mult=tb_params["pt_mult"],
+        sl_mult=tb_params["sl_mult"],
+        trgt=volatility,
+        max_holding=tb_params["max_holding"],
+        min_return=tb_params["min_return"],
+    )
 
 
 def _get_path_returns(
@@ -327,17 +363,38 @@ def _generate_trial_events(
     close: pd.Series,
     volatility: pd.Series,
     tb_params: Dict[str, Any],
+    config: OptimizationConfig,
 ) -> pd.DataFrame:
-    """Generate events with given barrier parameters."""
-    return get_events_primary(
-        close=close,
-        t_events=pd.DatetimeIndex(features_df.index),
-        pt_mult=tb_params["pt_mult"],
-        sl_mult=tb_params["sl_mult"],
-        trgt=volatility,
-        max_holding=tb_params["max_holding"],
-        min_return=tb_params["min_return"],
-    )
+    """Generate events with given barrier parameters (optionally in parallel)."""
+    t_events = pd.DatetimeIndex(features_df.index)
+
+    if (not config.parallelize_labeling) or config.parallel_min_events <= 0 or len(t_events) < max(config.parallel_min_events, 1):
+        return _generate_events_chunk(close, t_events, volatility, tb_params)
+
+    n_jobs = _resolve_n_jobs(getattr(config, "n_jobs", None))
+    event_chunks = _split_t_events(t_events, n_jobs)
+
+    if len(event_chunks) <= 1:
+        return _generate_events_chunk(close, t_events, volatility, tb_params)
+
+    with ProcessPoolExecutor(max_workers=len(event_chunks)) as executor:
+        futures = [
+            executor.submit(
+                _generate_events_chunk,
+                close,
+                chunk,
+                volatility,
+                tb_params,
+            )
+            for chunk in event_chunks
+        ]
+        results = [future.result() for future in futures]
+
+    non_empty = [df for df in results if df is not None and not df.empty]
+    if not non_empty:
+        return pd.DataFrame()
+
+    return pd.concat(non_empty).sort_index()
 
 
 def _validate_events(
@@ -355,15 +412,12 @@ def _validate_events(
     trial_prefix = f"[Trial {trial_number}] " if trial_number is not None else ""
     
     if events.empty:
-        reason = f"{trial_prefix}SKIP: events DataFrame is empty"
+        reason = f"{trial_prefix}PRUNED: events DataFrame is empty"
         logger.debug(reason)
         return False, reason
     
     if len(events) < config.min_train_size:
-        reason = (
-            f"{trial_prefix}SKIP: not enough events "
-            f"({len(events)} < {config.min_train_size} min_train_size)"
-        )
+        reason = f"{trial_prefix}PRUNED: not enough events"
         logger.debug(reason)
         return False, reason
     
@@ -371,9 +425,29 @@ def _validate_events(
     n_classes = len(label_counts)
     
     if n_classes < 2:
+        reason = f"{trial_prefix}PRUNED: only {n_classes} class(es)"
+        logger.debug(reason)
+        return False, reason
+
+    # Require all three classes with minimum proportion
+    total_events = len(events)
+    required_labels = [-1, 0, 1]
+    missing = [lbl for lbl in required_labels if lbl not in label_counts.index]
+    if missing:
+        reason = f"{trial_prefix}PRUNED: missing labels {missing}"
+        logger.debug(reason)
+        return False, reason
+
+    proportions = (label_counts / total_events).to_dict()
+    low_props = {}
+    for lbl, prop in proportions.items():
+        if lbl == 0 and prop < MIN_LABEL_RATIO_NEUTRAL:
+            low_props[lbl] = prop
+        if lbl in (-1, 1) and prop < MIN_LABEL_RATIO_POS_NEG:
+            low_props[lbl] = prop
+    if low_props:
         reason = (
-            f"{trial_prefix}SKIP: only {n_classes} class(es) in labels "
-            f"(need 2+). Distribution: {label_counts.to_dict()}"
+            f"{trial_prefix}PRUNED: class proportion(s) below thresholds"
         )
         logger.debug(reason)
         return False, reason
@@ -434,13 +508,13 @@ def _evaluate_fold(
     model_params: Dict[str, Any],
     model_name: str | None = None,
     fold_idx: int | None = None,
-) -> Tuple[float | None, str]:
+) -> Tuple[float | None, float | None, str]:
     """Evaluate a single CV fold.
     
     Returns
     -------
-    Tuple[float | None, str]
-        (score, reason) - score is None if evaluation failed, reason explains why.
+    Tuple[float | None, float | None, str]
+        (mcc, f1_weighted, reason) - None scores mean the fold is invalid.
     """
     model_prefix = f"[{model_name}] " if model_name else ""
     fold_prefix = f"Fold {fold_idx}: " if fold_idx is not None else ""
@@ -455,7 +529,7 @@ def _evaluate_fold(
                 f"(classes: {y_train.unique().tolist()})"
             )
             logger.debug(reason)
-            return None, reason
+            return None, None, reason
 
         # Compute class weights
         classes = np.unique(y_train)
@@ -475,29 +549,30 @@ def _evaluate_fold(
                 f"(predicted: {unique_preds.tolist()}, true classes: {np.unique(y_val).tolist()})"
             )
             logger.debug(reason)
-            return None, reason
+            return None, None, reason
 
         # Weighted MCC
         sample_weights = np.array([weight_map.get(c, 1.0) for c in y_val])
-        score = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
+        score_mcc = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
+        score_f1w = f1_score(y_val, y_pred, average="weighted", zero_division="warn")
         
         # Handle NaN MCC (can happen with degenerate predictions)
-        if np.isnan(score):
+        if np.isnan(score_mcc):
             reason = (
                 f"{model_prefix}{fold_prefix}SKIP: MCC is NaN "
                 f"(likely degenerate predictions or labels)"
             )
             logger.debug(reason)
-            return None, reason
+            return None, None, reason
         
-        return score, "OK"
+        return score_mcc, score_f1w, "OK"
 
     except Exception as e:
         reason = (
             f"{model_prefix}{fold_prefix}FAILED: {type(e).__name__}: {str(e)}"
         )
         logger.debug(reason)
-        return None, reason
+        return None, None, reason
 
 
 def _run_cv_scoring(
@@ -509,15 +584,15 @@ def _run_cv_scoring(
     config: OptimizationConfig,
     trial_number: int | None = None,
     model_name: str | None = None,
-) -> Tuple[float, int, int, str]:
-    """Run walk-forward CV and return mean score.
+) -> Tuple[float, float, float, int, int, str]:
+    """Run walk-forward CV and return mean scores.
 
     Early pruning: raises TrialPruned at the first failed fold.
 
     Returns
     -------
-    Tuple[float, int, int, str]
-        (score, n_valid_folds, n_total_folds, reason) - reason explains the result.
+    Tuple[float, float, float, int, int, str]
+        (objective, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason)
 
     Raises
     ------
@@ -534,45 +609,44 @@ def _run_cv_scoring(
 
     splits = cv.split(X, events)
     if len(splits) == 0:
-        reason = f"{trial_prefix}SKIP: no valid CV splits generated"
-        logger.debug(reason)
-        raise optuna.TrialPruned(reason)
+        logger.debug("%sPRUNED: no valid CV splits generated", trial_prefix)
+        raise optuna.TrialPruned(f"{trial_prefix}PRUNED")
 
     # Check we have enough splits
     if len(splits) < config.n_splits:
-        reason = (
-            f"{trial_prefix}PRUNED: only {len(splits)}/{config.n_splits} "
-            f"CV splits generated"
+        logger.debug(
+            "%sPRUNED: only %d/%d CV splits generated",
+            trial_prefix, len(splits), config.n_splits,
         )
-        logger.debug(reason)
-        raise optuna.TrialPruned(reason)
+        raise optuna.TrialPruned(f"{trial_prefix}PRUNED")
 
-    cv_scores = []
+    cv_scores_mcc: list[float] = []
+    cv_scores_f1w: list[float] = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
-        score, fold_reason = _evaluate_fold(
+        score_mcc, score_f1w, fold_reason = _evaluate_fold(
             X, y, train_idx, val_idx, model_class, model_params,
             model_name=model_name, fold_idx=fold_idx
         )
 
         # Early pruning: fail fast on first invalid fold
-        if score is None:
-            reason = (
-                f"{trial_prefix}PRUNED at fold {fold_idx + 1}/{config.n_splits}: "
-                f"{fold_reason}"
-            )
+        if score_mcc is None or score_f1w is None:
+            reason = f"{trial_prefix}PRUNED at fold {fold_idx + 1}"
             logger.debug(reason)
             raise optuna.TrialPruned(reason)
 
-        cv_scores.append(score)
+        cv_scores_mcc.append(score_mcc)
+        cv_scores_f1w.append(score_f1w)
 
-    mean_score = float(np.mean(cv_scores))
+    mean_mcc = float(np.mean(cv_scores_mcc))
+    mean_f1w = float(np.mean(cv_scores_f1w))
+    objective_score = 0.5 * (mean_mcc + mean_f1w)
     reason = (
-        f"{trial_prefix}MCC={mean_score:.4f} "
-        f"({len(cv_scores)}/{len(splits)} folds)"
+        f"{trial_prefix}OBJ={objective_score:.4f} "
+        f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}; {len(cv_scores_mcc)}/{len(splits)} folds)"
     )
     logger.debug(reason)
-    return mean_score, len(cv_scores), len(splits), reason
+    return objective_score, mean_mcc, mean_f1w, len(cv_scores_mcc), len(splits), reason
 
 
 def create_objective(
@@ -617,7 +691,7 @@ def create_objective(
 
         # Sample and generate events
         tb_params = _sample_barrier_params(trial)
-        events = _generate_trial_events(features_df, close, volatility, tb_params)
+        events = _generate_trial_events(features_df, close, volatility, tb_params, config)
 
         # Validate events
         is_valid, reason = _validate_events(events, config, trial_num)
@@ -637,18 +711,19 @@ def create_objective(
         # Note: _run_cv_scoring raises TrialPruned on first failed fold (early pruning)
         model_params = _sample_model_params(trial, model_search_space, config)
 
-        score, n_valid_folds, n_total_folds, reason = _run_cv_scoring(
+        score_obj, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason = _run_cv_scoring(
             X, y, events_aligned, model_class, model_params, config, trial_num,
             model_name=config.model_name
         )
 
         # Log successful trial (all folds passed)
         logger.info(
-            f"[Trial {trial_num}] OK: MCC={score:.4f} "
-            f"({n_valid_folds}/{n_total_folds} folds)"
+            f"[Trial {trial_num}] OK: OBJ={score_obj:.4f} "
+            f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}; "
+            f"{n_valid_folds}/{n_total_folds} folds)"
         )
 
-        return score
+        return score_obj
 
     return objective
 
@@ -859,7 +934,7 @@ def _build_result(
         best_params=best_model,
         best_triple_barrier_params=best_tb,
         best_score=best_trial.value if best_trial.value is not None else float("nan"),
-        metric="mcc_weighted",
+        metric="mean_mcc_f1_weighted",
         n_trials=len(study.trials),
     )
 

@@ -4,26 +4,32 @@ Le daemon de récupération de données permet de collecter automatiquement les 
 
 ## 🚀 Démarrage Rapide
 
-### Lancer le daemon en arrière-plan :
+### Lancer le daemon en arrière-plan
+
 ```bash
 ./scripts/run_data_fetching_daemon.sh start
 ```
 
-### Vérifier le statut :
+### Vérifier le statut
+
 ```bash
 ./scripts/run_data_fetching_daemon.sh status
 ```
 
-### Consulter les logs en temps réel :
+### Consulter les logs en temps réel
+
 ```bash
 ./scripts/run_data_fetching_daemon.sh logs
 ```
 
-### Arrêter le daemon :
+### Arrêter le daemon
+
 ```bash
 ./scripts/run_data_fetching_daemon.sh stop
 ```
+
 # 2. Pour reprendre avec le fichier consolidé comme base
+
 ```bash
 ./scripts/run_data_fetching_daemon.sh base
 
@@ -60,6 +66,7 @@ Le daemon de récupération de données permet de collecter automatiquement les 
 ## 📁 Fichiers Créés
 
 ```
+
 data/
 ├── fetch_dates_state.json          # État des dates actuelles
 ├── raw/
@@ -71,6 +78,7 @@ data/
 
 logs/
 └── data_fetching_daemon.log        # Logs du daemon
+
 ```
 
 ## 🔧 Configuration
@@ -83,19 +91,22 @@ AUTO_INCREMENT_DAYS: int = 5  # Jours par fenêtre
 delay_seconds: int = 300       # 5 minutes entre itérations
 ```
 
-### Modifier le nombre de workers :
+### Modifier le nombre de workers
+
 ```python
 max_workers: int = 6  # Workers parallèles (défaut: 6)
 ```
 
 ## 📊 Monitoring
 
-### Logs en temps réel :
+### Logs en temps réel
+
 ```bash
 ./scripts/run_data_fetching_daemon.sh logs
 ```
 
-### Vérifier les données collectées :
+### Vérifier les données collectées
+
 ```bash
 # Nombre de fichiers partitionnés
 ls -la data/raw/dataset_raw.parquet/ | wc -l
@@ -116,19 +127,22 @@ print(f'Période: {df.timestamp.min()} → {df.timestamp.max()}')
 
 Le système utilise une approche **zéro consolidation** pour économiser drastiquement la RAM :
 
-### Architecture Intelligente :
+### Architecture Intelligente
+
 1. **Accumulation** : Fichiers parquet partitionnés restent séparés (pas de fusion)
 2. **Traitement individuel** : `data_preparation` traite chaque fichier un par un
 3. **Réduction drastique** : Convertit **millions de trades → milliers de dollar bars**
 4. **Pas de fusion massive** : Évite de charger 72M lignes en mémoire simultanément
 
-### Avantages Mémoire :
+### Avantages Mémoire
+
 - ✅ **Zéro consolidation** des trades bruts (évite 72M lignes en RAM)
 - ✅ **Traitement séquentiel** des fichiers (max 50M lignes à la fois)
 - ✅ **Compression finale** : Dollar bars = ~1/1000ème de la taille originale
 - ✅ **Scalabilité** : Marche avec des datasets de plusieurs milliards de trades
 
-### Comparaison :
+### Comparaison
+
 ```
 ❌ Ancienne approche : Charger 72M trades → 16GB RAM → Consolidation
 ✅ Nouvelle approche : 45M trades → 6M trades → 3M trades → 3M trades → Dollar bars
@@ -137,6 +151,7 @@ Le système utilise une approche **zéro consolidation** pour économiser drasti
 ## 🛑 Arrêt d'Urgence
 
 Si le daemon ne répond plus :
+
 ```bash
 # Trouver le PID
 ps aux | grep "data_fetching"

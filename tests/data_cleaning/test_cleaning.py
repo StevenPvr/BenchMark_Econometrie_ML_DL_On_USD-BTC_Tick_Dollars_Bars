@@ -1,19 +1,26 @@
 """Unit tests for src/data_cleaning/cleaning.py."""
 
-from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest import mock
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from src.data_cleaning.cleaning import (
     _drop_duplicates,
     _drop_missing_essentials,
+    _filter_dollar_value_outliers,
+    _filter_mad_price_outliers,
+    _filter_outliers_robust,
     _filter_price_outliers,
+    _filter_rolling_zscore_outliers,
+    _filter_volume_outliers,
     _load_raw_trades,
     _persist_clean_dataset,
     _strip_unwanted_columns,
+    _validate_numeric_columns,
     clean_ticks_data,
+    OutlierReport,
 )
 
 
@@ -33,112 +40,83 @@ def sample_trades_df():
 class TestLoadRawTrades:
     """Tests for _load_raw_trades."""
 
-    def test_load_partitioned_dataset(self, mocker):
-        """Test loading a partitioned dataset (directory of parquet files)."""
-        mock_path = mocker.Mock(spec=Path)
-        mock_path.is_dir.return_value = True
-
-        # Mock glob to return sorted parquet files
-        p1 = mocker.MagicMock(spec=Path)
-        p1.name = "part1.parquet"
-        p1.__lt__.return_value = True # p1 < p2
-
-        p2 = mocker.MagicMock(spec=Path)
-        p2.name = "part2.parquet"
-        p2.__lt__.return_value = False
-
-        mock_path.glob.return_value = [p1, p2]
-
-        # Mock read_parquet
+    def test_streams_partitions_and_persists(self, tmp_path):
+        """Partitioned parquet files are merged and cached once."""
+        partition_dir = tmp_path / "copie_raw"
+        partition_dir.mkdir()
         df1 = pd.DataFrame({"a": [1, 2]})
         df2 = pd.DataFrame({"a": [3, 4]})
+        df1.to_parquet(partition_dir / "part-0000.parquet", index=False)
+        df2.to_parquet(partition_dir / "part-0001.parquet", index=False)
+        output_path = tmp_path / "dataset_raw_consolidated.parquet"
 
-        mock_read_parquet = mocker.patch("pandas.read_parquet", side_effect=[df1, df2])
+        result_df = _load_raw_trades(partition_dir=partition_dir, output_path=output_path)
 
-        mock_shutil_rmtree = mocker.patch("shutil.rmtree")
-
-        # Mock temp file path
-        mock_temp_path = mocker.Mock(spec=Path)
-        mock_path.with_suffix.return_value = mock_temp_path
-
-        # Mock to_parquet to avoid actual file writing or __fspath__ check
-        mocker.patch("pandas.DataFrame.to_parquet")
-
-        # Call function
-        result_df = _load_raw_trades(mock_path)
-
-        # Verifications
+        assert output_path.exists()
         assert len(result_df) == 4
-        assert result_df["a"].tolist() == [1, 2, 3, 4]
+        cached_df = pd.read_parquet(output_path)
+        pd.testing.assert_frame_equal(result_df, cached_df)
 
-        assert mock_read_parquet.call_count == 2
-        mock_read_parquet.assert_has_calls([call(p1), call(p2)])
-
-        # Check saving
-        mock_temp_path.rename.assert_called_once_with(mock_path)
-        mock_shutil_rmtree.assert_called_once_with(mock_path)
-
-    def test_load_partitioned_dataset_no_files(self, mocker):
-        """Test error when partitioned directory is empty."""
-        mock_path = mocker.Mock(spec=Path)
-        mock_path.is_dir.return_value = True
-        mock_path.glob.return_value = []
-
-        with pytest.raises(ValueError, match="No parquet files found"):
-            _load_raw_trades(mock_path)
-
-    def test_load_single_file_success(self, mocker):
-        """Test loading a single parquet file successfully."""
-        mock_path = mocker.Mock(spec=Path)
-        mock_path.is_dir.return_value = False
-
+    def test_uses_cached_consolidated_file(self, tmp_path):
+        """Existing consolidated parquet is reused when fresher than partitions and use_cache=True."""
+        partition_dir = tmp_path / "copie_raw"
+        partition_dir.mkdir()
         df = pd.DataFrame({"a": [1, 2]})
-        mocker.patch("pandas.read_parquet", return_value=df)
+        df.to_parquet(partition_dir / "part-0000.parquet", index=False)
+        output_path = tmp_path / "dataset_raw_consolidated.parquet"
 
-        result = _load_raw_trades(mock_path)
-        pd.testing.assert_frame_equal(result, df)
+        _load_raw_trades(partition_dir=partition_dir, output_path=output_path)
 
-    def test_load_single_file_empty(self, mocker):
-        """Test error when loaded dataframe is empty."""
-        mock_path = mocker.Mock(spec=Path)
-        mock_path.is_dir.return_value = False
+        with mock.patch("pyarrow.parquet.ParquetWriter") as writer_mock:
+            cached_df = _load_raw_trades(
+                partition_dir=partition_dir,
+                output_path=output_path,
+                use_cache=True,
+            )
 
-        mocker.patch("pandas.read_parquet", return_value=pd.DataFrame())
+        writer_mock.assert_not_called()
+        pd.testing.assert_frame_equal(cached_df, pd.read_parquet(output_path))
 
-        with pytest.raises(ValueError, match="Raw trades dataset is empty"):
-            _load_raw_trades(mock_path)
+    def test_load_partitioned_dataset_no_files(self, tmp_path):
+        """Error when partition directory exists but no partitions are present."""
+        empty_dir = tmp_path / "copie_raw"
+        empty_dir.mkdir()
+        with pytest.raises(ValueError, match="No parquet partition files found"):
+            _load_raw_trades(partition_dir=empty_dir, output_path=tmp_path / "out.parquet")
 
-    def test_load_single_file_corrupted(self, mocker):
-        """Test specific error handling for timeout/corrupted files."""
-        mock_path = mocker.Mock(spec=Path)
-        mock_path.is_dir.return_value = False
-        mock_path.__str__ = lambda x: "dummy_path"
+    def test_missing_partition_directory(self, tmp_path):
+        """Error when partition directory is missing."""
+        missing_dir = tmp_path / "copie_raw"
+        with pytest.raises(FileNotFoundError, match="Partition directory not found"):
+            _load_raw_trades(partition_dir=missing_dir, output_path=tmp_path / "out.parquet")
 
-        # Simulate an OSError with "Operation timed out"
-        mocker.patch("pandas.read_parquet", side_effect=OSError("Operation timed out"))
+    def test_replaces_existing_output_directory(self, tmp_path):
+        """If output path is a directory, it is removed before writing."""
+        partition_dir = tmp_path / "copie_raw"
+        partition_dir.mkdir()
+        df = pd.DataFrame({"a": [1, 2]})
+        df.to_parquet(partition_dir / "part-0000.parquet", index=False)
 
-        with pytest.raises(RuntimeError, match="Parquet file dummy_path appears to be corrupted"):
-            _load_raw_trades(mock_path)
+        output_path = tmp_path / "dataset_raw_consolidated.parquet"
+        output_path.mkdir()
+        (output_path / "stale.txt").write_text("stale")
 
-    def test_load_single_file_other_error(self, mocker):
-        """Test re-raising of unrelated errors."""
-        mock_path = mocker.Mock(spec=Path)
-        mock_path.is_dir.return_value = False
+        result_df = _load_raw_trades(partition_dir=partition_dir, output_path=output_path)
 
-        mocker.patch("pandas.read_parquet", side_effect=ValueError("Some other error"))
+        assert output_path.is_file()
+        assert not (output_path / "stale.txt").exists()
+        assert len(result_df) == 2
 
-        with pytest.raises(ValueError, match="Some other error"):
-            _load_raw_trades(mock_path)
+    def test_corrupted_partitions_raise(self, tmp_path):
+        """Timeout-style errors bubble up as RuntimeError for visibility."""
+        partition_dir = tmp_path / "copie_raw"
+        partition_dir.mkdir()
+        df = pd.DataFrame({"a": [1, 2]})
+        df.to_parquet(partition_dir / "part-0000.parquet", index=False)
+        with mock.patch("pyarrow.dataset.dataset", side_effect=OSError("Operation timed out")):
 
-    def test_load_single_file_oserror_no_timeout(self, mocker):
-        """Test re-raising of OSError that is not a timeout."""
-        mock_path = mocker.Mock(spec=Path)
-        mock_path.is_dir.return_value = False
-
-        mocker.patch("pandas.read_parquet", side_effect=OSError("Disk full"))
-
-        with pytest.raises(OSError, match="Disk full"):
-            _load_raw_trades(mock_path)
+            with pytest.raises(RuntimeError, match="appear to be corrupted"):
+                _load_raw_trades(partition_dir=partition_dir, output_path=tmp_path / "out.parquet")
 
 
 class TestDropDuplicates:
@@ -251,16 +229,13 @@ class TestStripUnwantedColumns:
 class TestPersistCleanDataset:
     """Tests for _persist_clean_dataset."""
 
-    def test_persist(self, mocker, sample_trades_df):
+    def test_persist(self, sample_trades_df):
         """Test saving the dataframe."""
-        mock_ensure = mocker.patch("src.data_cleaning.cleaning.ensure_output_dir")
-        mock_to_parquet = mocker.patch.object(sample_trades_df, "to_parquet")
+        with mock.patch("src.data_cleaning.cleaning.ensure_output_dir") as mock_ensure, \
+             mock.patch.object(sample_trades_df, "to_parquet") as mock_to_parquet:
+            from src.data_cleaning.cleaning import DATASET_CLEAN_PARQUET
 
-        # We also need to check the path constant usage, but it's imported.
-        # We can assume the value is correct or check if ensure_output_dir was called with it.
-        from src.data_cleaning.cleaning import DATASET_CLEAN_PARQUET
-
-        _persist_clean_dataset(sample_trades_df)
+            _persist_clean_dataset(sample_trades_df)
 
         mock_ensure.assert_called_once_with(DATASET_CLEAN_PARQUET)
         mock_to_parquet.assert_called_once_with(DATASET_CLEAN_PARQUET, index=False)
@@ -269,50 +244,357 @@ class TestPersistCleanDataset:
 class TestCleanTicksData:
     """Tests for clean_ticks_data (integration)."""
 
-    def test_clean_ticks_data_flow(self, mocker, sample_trades_df):
-        """Test the full flow of clean_ticks_data."""
-        # Mock all internal steps
-        mocker.patch("src.data_cleaning.cleaning._load_raw_trades", return_value=sample_trades_df)
+    def test_clean_ticks_data_flow(self, sample_trades_df, tmp_path):
+        """Test the full flow of clean_ticks_data on partitioned input."""
+        partition_dir = tmp_path / "copie_raw"
+        partition_dir.mkdir()
+        sample_trades_df.iloc[:2].to_parquet(partition_dir / "part-0000.parquet", index=False)
+        sample_trades_df.iloc[2:].to_parquet(partition_dir / "part-0001.parquet", index=False)
+        output_path = tmp_path / "dataset_clean.parquet"
 
-        # Use side_effect to return modified DFs if needed, or just return the mock object
-        # but the function expects DFs.
+        clean_ticks_data(partition_dir=partition_dir, output_path=output_path)
 
-        # Let's mock the functions to spy on them or ensure they are called
-        # But the function modifies the df returned by previous steps.
-
-        # Easiest is to let the pure functions run (they are tested above) and mock load/persist.
-
-        mock_persist = mocker.patch("src.data_cleaning.cleaning._persist_clean_dataset")
-
-        # We need to ensure unwanted columns are removed so persist receives clean df
-        # The logic inside clean_ticks_data is:
-        # load -> drop missing -> drop dup -> filter outliers -> strip cols -> sort -> persist
-
-        clean_ticks_data()
-
-        # Check persist called
-        assert mock_persist.called
-        # Get the dataframe passed to persist
-        args, _ = mock_persist.call_args
-        df_result = args[0]
-
+        assert output_path.exists()
+        df_result = pd.read_parquet(output_path)
         assert "id" not in df_result.columns
         assert not df_result.empty
 
-    def test_clean_ticks_data_empty_result(self, mocker):
+    def test_clean_ticks_data_empty_result(self, tmp_path):
         """Test error raised if cleaning results in empty dataframe."""
-        df = pd.DataFrame({"timestamp": [], "price": [], "amount": []})
-        mocker.patch("src.data_cleaning.cleaning._load_raw_trades", return_value=df)
-
-        # Even if load returns empty, the check is at the end.
-        # But _load_raw_trades raises if empty. So let's return a non-empty one that gets filtered out completely.
-
+        partition_dir = tmp_path / "copie_raw"
+        partition_dir.mkdir()
         df_bad = pd.DataFrame({
             "timestamp": [1, 2],
-            "price": [None, None], # will be dropped by missing essentials
-            "amount": [1, 1]
+            "price": [np.nan, np.nan],  # NaN values will be dropped by missing essentials
+            "amount": [1.0, 1.0]
         })
-        mocker.patch("src.data_cleaning.cleaning._load_raw_trades", return_value=df_bad)
+        df_bad.to_parquet(partition_dir / "part-0000.parquet", index=False)
 
         with pytest.raises(ValueError, match="No data remaining after cleaning"):
-            clean_ticks_data()
+            clean_ticks_data(partition_dir=partition_dir, output_path=tmp_path / "clean.parquet")
+
+
+# =============================================================================
+# TESTS FOR ROBUST OUTLIER DETECTION METHODS (Causal / Expanding)
+# =============================================================================
+
+
+class TestMadPriceOutliers:
+    """Tests for _filter_mad_price_outliers (causal expanding version)."""
+
+    def test_removes_extreme_outliers(self):
+        """Test that extreme price outliers are removed."""
+        # Need variation in prices so MAD is not zero
+        np.random.seed(42)
+        normal_prices = 100 + np.random.randn(200) * 2  # Prices around 100 with std=2
+        outlier = [10000.0]  # Extreme outlier
+        more_normal = 100 + np.random.randn(100) * 2
+        df = pd.DataFrame({
+            "price": np.concatenate([normal_prices, outlier, more_normal]),
+        })
+        # Use lower threshold to ensure detection
+        result, removed = _filter_mad_price_outliers(df, min_periods=50, threshold=3.0)
+        assert removed >= 1
+        assert 10000.0 not in result["price"].values
+
+    def test_preserves_normal_variation(self):
+        """Test that normal price variation is preserved."""
+        np.random.seed(42)
+        prices = 100 + np.random.randn(500) * 2  # Normal variation
+        df = pd.DataFrame({"price": prices})
+        result, removed = _filter_mad_price_outliers(df, min_periods=50)
+        # Should remove very few if any
+        assert removed < 10
+
+    def test_causal_keeps_first_ticks(self):
+        """Test that first min_periods ticks are kept (causal behavior)."""
+        df = pd.DataFrame({
+            "price": [100.0] * 150 + [200.0] * 150,
+        })
+        result, removed = _filter_mad_price_outliers(df, min_periods=100)
+        # First 100 ticks should always be kept (NaN in expanding stats)
+        assert len(result) >= 100
+
+    def test_empty_dataframe(self):
+        """Test handling of empty DataFrame."""
+        df = pd.DataFrame({"price": pd.Series([], dtype=float)})
+        result, removed = _filter_mad_price_outliers(df)
+        assert len(result) == 0
+        assert removed == 0
+
+    def test_missing_column(self):
+        """Test handling of missing price column."""
+        df = pd.DataFrame({"other": [1, 2, 3]})
+        result, removed = _filter_mad_price_outliers(df)
+        assert len(result) == 3
+        assert removed == 0
+
+
+class TestRollingZscoreOutliers:
+    """Tests for _filter_rolling_zscore_outliers."""
+
+    def test_removes_local_outliers(self):
+        """Test removal of outliers relative to local volatility."""
+        np.random.seed(42)
+        # Low volatility period, then spike, then low vol again
+        prices = np.concatenate([
+            100 + np.random.randn(500) * 0.1,  # Low vol
+            [150.0],  # Spike
+            100 + np.random.randn(500) * 0.1,  # Low vol
+        ])
+        df = pd.DataFrame({"price": prices})
+        result, removed = _filter_rolling_zscore_outliers(df)
+        assert removed >= 1
+
+    def test_adapts_to_volatility_regime(self):
+        """Test that filter adapts to high volatility periods."""
+        np.random.seed(42)
+        # High volatility period - larger moves should be tolerated
+        prices = 100 + np.random.randn(1000) * 5
+        df = pd.DataFrame({"price": np.abs(prices)})  # Ensure positive
+        result, removed = _filter_rolling_zscore_outliers(df)
+        # Most should be kept despite large moves
+        assert len(result) > 900
+
+    def test_empty_dataframe(self):
+        """Test handling of empty DataFrame."""
+        df = pd.DataFrame({"price": pd.Series([], dtype=float)})
+        result, removed = _filter_rolling_zscore_outliers(df)
+        assert len(result) == 0
+        assert removed == 0
+
+    def test_insufficient_data(self):
+        """Test handling of data smaller than min_periods."""
+        df = pd.DataFrame({"price": [100.0] * 50})
+        result, removed = _filter_rolling_zscore_outliers(df, min_periods=100)
+        # Should return unchanged since not enough data
+        assert len(result) == 50
+        assert removed == 0
+
+
+class TestVolumeOutliers:
+    """Tests for _filter_volume_outliers."""
+
+    def test_removes_dust_trades(self):
+        """Test removal of dust trades (below min volume)."""
+        df = pd.DataFrame({
+            "amount": [1.0, 0.5, 1e-15, 0.8, 1e-12],
+        })
+        result, removed_vol, removed_dust = _filter_volume_outliers(df)
+        assert removed_dust == 2  # Two dust trades
+
+    def test_removes_extreme_volumes(self):
+        """Test removal of extreme volume outliers."""
+        # Need variation in volumes so MAD is not zero
+        np.random.seed(42)
+        normal_volumes = 1.0 + np.random.rand(200) * 0.5  # Volumes around 1.0-1.5
+        outlier = [100000.0]  # Extreme outlier
+        more_normal = 1.0 + np.random.rand(100) * 0.5
+        df = pd.DataFrame({
+            "amount": np.concatenate([normal_volumes, outlier, more_normal]),
+        })
+        result, removed_vol, removed_dust = _filter_volume_outliers(df, min_periods=50, threshold=5.0)
+        assert removed_vol >= 1
+
+    def test_empty_dataframe(self):
+        """Test handling of empty DataFrame."""
+        df = pd.DataFrame({"amount": pd.Series([], dtype=float)})
+        result, removed_vol, removed_dust = _filter_volume_outliers(df)
+        assert len(result) == 0
+        assert removed_vol == 0
+        assert removed_dust == 0
+
+    def test_missing_column(self):
+        """Test handling of missing volume column."""
+        df = pd.DataFrame({"other": [1, 2, 3]})
+        result, removed_vol, removed_dust = _filter_volume_outliers(df)
+        assert len(result) == 3
+        assert removed_vol == 0
+        assert removed_dust == 0
+
+
+class TestDollarValueOutliers:
+    """Tests for _filter_dollar_value_outliers."""
+
+    def test_removes_combined_anomalies(self):
+        """Test removal of price*volume anomalies."""
+        # Need variation in dollar values so MAD is not zero
+        np.random.seed(42)
+        normal_prices = 100 + np.random.randn(200) * 2
+        normal_amounts = 1.0 + np.random.rand(200) * 0.5
+        # Outlier with extreme volume
+        outlier_price = [100.0]
+        outlier_amount = [100000.0]
+        more_normal_prices = 100 + np.random.randn(100) * 2
+        more_normal_amounts = 1.0 + np.random.rand(100) * 0.5
+        df = pd.DataFrame({
+            "price": np.concatenate([normal_prices, outlier_price, more_normal_prices]),
+            "amount": np.concatenate([normal_amounts, outlier_amount, more_normal_amounts]),
+        })
+        # Use lower threshold to ensure detection
+        result, removed = _filter_dollar_value_outliers(df, min_periods=50, threshold=5.0)
+        assert removed >= 1
+
+    def test_empty_dataframe(self):
+        """Test handling of empty DataFrame."""
+        df = pd.DataFrame({
+            "price": pd.Series([], dtype=float),
+            "amount": pd.Series([], dtype=float),
+        })
+        result, removed = _filter_dollar_value_outliers(df)
+        assert len(result) == 0
+        assert removed == 0
+
+    def test_missing_column(self):
+        """Test handling of missing columns."""
+        df = pd.DataFrame({"price": [100.0, 101.0]})
+        result, removed = _filter_dollar_value_outliers(df)
+        assert len(result) == 2
+        assert removed == 0
+
+    def test_base_usd_pair_uses_amount_notional(self):
+        """If USD-like asset is base (e.g., USD/BTC), notional should be volume."""
+        df = pd.DataFrame({
+            "price": [0.00002, 0.000021, 0.000019, 0.00002, 0.00002],
+            "amount": [100.0, 110.0, 105.0, 1_200_000.0, 115.0],
+        })
+        result, removed = _filter_dollar_value_outliers(
+            df, symbol="USD/BTC", min_periods=2, threshold=5.0
+        )
+        assert removed == 1
+        assert 1_200_000.0 not in result["amount"].values
+
+
+class TestFilterOutliersRobust:
+    """Tests for _filter_outliers_robust (integration)."""
+
+    def test_pipeline_skips_expensive_filters(self):
+        """Pipeline should skip rolling z-score and dollar value filters."""
+        df = pd.DataFrame({
+            "price": np.linspace(100, 101, 150),
+            "amount": np.ones(150),
+        })
+        with mock.patch("src.data_cleaning.cleaning._filter_rolling_zscore_outliers") as roll_mock, \
+             mock.patch("src.data_cleaning.cleaning._filter_dollar_value_outliers") as dollar_mock:
+            _filter_outliers_robust(df)
+
+        roll_mock.assert_not_called()
+        dollar_mock.assert_not_called()
+
+    def test_full_pipeline(self):
+        """Test complete outlier detection pipeline."""
+        np.random.seed(42)
+        n = 1000
+        df = pd.DataFrame({
+            "price": np.abs(100 + np.random.randn(n) * 2),
+            "amount": np.abs(1 + np.random.rand(n) * 0.5),
+        })
+        # Add some outliers
+        df.loc[500, "price"] = 500  # Price outlier
+        df.loc[600, "amount"] = 1000  # Volume outlier
+        df.loc[700, "amount"] = 1e-15  # Dust trade
+
+        result, report = _filter_outliers_robust(df)
+
+        assert report.total_ticks == n
+        assert report.final_ticks < n
+        assert report.removed_dust_trades >= 1 or report.removed_volume_outliers >= 1
+        assert isinstance(report, OutlierReport)
+
+    def test_returns_valid_report(self):
+        """Test that OutlierReport is properly populated."""
+        df = pd.DataFrame({
+            "price": [100.0] * 500,
+            "amount": [1.0] * 500,
+        })
+        _, report = _filter_outliers_robust(df)
+
+        assert report.total_ticks == 500
+        assert report.final_ticks <= 500
+        # All counts should be non-negative
+        assert report.removed_mad_price >= 0
+        assert report.removed_rolling_zscore >= 0
+        assert report.removed_volume_outliers >= 0
+        assert report.removed_dollar_value >= 0
+        assert report.removed_dust_trades >= 0
+
+    def test_empty_dataframe(self):
+        """Test handling of empty DataFrame."""
+        df = pd.DataFrame({
+            "price": pd.Series([], dtype=float),
+            "amount": pd.Series([], dtype=float),
+        })
+        result, report = _filter_outliers_robust(df)
+        assert len(result) == 0
+        assert report.total_ticks == 0
+        assert report.final_ticks == 0
+
+    def test_order_of_operations(self):
+        """Test that filters are applied in correct order."""
+        # Volume outliers should be removed first
+        df = pd.DataFrame({
+            "price": [100.0] * 200,
+            "amount": [1.0] * 199 + [1e-15],  # One dust trade
+        })
+        result, report = _filter_outliers_robust(df)
+        assert report.removed_dust_trades == 1
+        # Dust trade removal happens first, so other stats are cleaner
+
+
+class TestValidateNumericColumns:
+    """Tests for _validate_numeric_columns."""
+
+    def test_valid_numeric_columns(self):
+        """Test that valid numeric columns pass validation."""
+        df = pd.DataFrame({
+            "price": [100.0, 101.0],
+            "amount": [1, 2],
+        })
+        # Should not raise
+        _validate_numeric_columns(df, ["price", "amount"])
+
+    def test_missing_column_raises(self):
+        """Test that missing column raises KeyError."""
+        df = pd.DataFrame({"price": [100.0]})
+        with pytest.raises(KeyError, match="Required column 'amount'"):
+            _validate_numeric_columns(df, ["price", "amount"])
+
+    def test_non_numeric_column_raises(self):
+        """Test that non-numeric column raises TypeError."""
+        df = pd.DataFrame({
+            "price": ["100", "101"],  # String, not numeric
+        })
+        with pytest.raises(TypeError, match="must be numeric"):
+            _validate_numeric_columns(df, ["price"])
+
+    def test_integer_column_passes(self):
+        """Test that integer columns are considered numeric."""
+        df = pd.DataFrame({
+            "count": [1, 2, 3],
+        })
+        # Should not raise
+        _validate_numeric_columns(df, ["count"])
+
+
+class TestOutlierReport:
+    """Tests for OutlierReport dataclass."""
+
+    def test_log_summary_no_error(self):
+        """Test that log_summary runs without errors."""
+        report = OutlierReport(
+            total_ticks=1000,
+            removed_mad_price=10,
+            removed_rolling_zscore=5,
+            removed_volume_outliers=3,
+            removed_dollar_value=2,
+            removed_dust_trades=8,
+            final_ticks=972,
+        )
+        # Should not raise
+        report.log_summary()
+
+    def test_log_summary_zero_ticks(self):
+        """Test that log_summary handles zero ticks gracefully."""
+        report = OutlierReport(total_ticks=0, final_ticks=0)
+        # Should not raise (division by zero protection)
+        report.log_summary()

@@ -84,25 +84,20 @@ def plot_log_returns_distribution(
         Figure matplotlib.
     """
     data = log_returns.dropna()
-    q_low, q_high = data.quantile([0.005, 0.995])
-    plot_data = data[(data >= q_low) & (data <= q_high)]
-    if plot_data.empty:
-        plot_data = data
-        q_low, q_high = data.min(), data.max()
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
     # Histogram avec KDE
     ax1 = axes[0]
-    ax1.hist(plot_data, bins=50, alpha=0.7, color="steelblue", edgecolor="white", density=True)
+    ax1.hist(data, bins=100, alpha=0.7, color="steelblue", edgecolor="white", density=True)
 
     # KDE
-    kde = stats.gaussian_kde(plot_data)
-    x_range = np.linspace(plot_data.min(), plot_data.max(), 200)
+    kde = stats.gaussian_kde(data)
+    x_range = np.linspace(data.min(), data.max(), 200)
     ax1.plot(x_range, kde(x_range), color="red", linewidth=2, label="KDE")
 
     # Normal distribution overlay
-    mu, std = plot_data.mean(), plot_data.std()
+    mu, std = data.mean(), data.std()
     normal_pdf = stats.norm.pdf(x_range, mu, std)
     ax1.plot(x_range, normal_pdf, color="green", linewidth=2, linestyle="--", label="Normal")
 
@@ -110,20 +105,19 @@ def plot_log_returns_distribution(
     ax1.set_title("Distribution des Log-Returns", fontsize=12, fontweight="bold")
     ax1.set_xlabel("Log-Return")
     ax1.set_ylabel("Densite")
-    ax1.set_xlim(q_low, q_high)
     ax1.legend()
 
     # QQ-plot
     ax2 = axes[1]
-    stats.probplot(plot_data, dist="norm", plot=ax2)
+    stats.probplot(data, dist="norm", plot=ax2)
     ax2.set_title("Q-Q Plot (Normal)", fontsize=12, fontweight="bold")
     ax2.grid(True, alpha=0.3)
 
     # Stats
-    skewness = stats.skew(plot_data)
-    kurtosis = stats.kurtosis(plot_data)
+    skewness = stats.skew(data)
+    kurtosis = stats.kurtosis(data)
     fig.suptitle(
-        f"Log-Returns (zoom central 99%): Mean={mu:.6f}, Std={std:.6f}, Skew={skewness:.3f}, Kurt={kurtosis:.3f}, range=[{q_low:.4f},{q_high:.4f}]",
+        f"Log-Returns: Mean={mu:.6f}, Std={std:.6f}, Skew={skewness:.3f}, Kurt={kurtosis:.3f}",
         fontsize=10, y=1.02
     )
 
@@ -424,6 +418,235 @@ def compute_autocorrelation(
         print(f"ACF plot saved: {output_dir / 'log_returns_acf.png'}")
 
     return fig
+
+
+def compute_autocorrelation_squared(
+    log_returns: pd.Series,
+    output_dir: Optional[Path] = None,
+    max_lags: int = 40,
+    figsize: Tuple[int, int] = (14, 5),
+) -> Figure:
+    """
+    Plot l'autocorrelation des log-returns au carre (volatilite clustering).
+
+    L'autocorrelation des log-returns au carre permet de detecter le
+    clustering de volatilite, caracteristique des series financieres.
+
+    Parameters
+    ----------
+    log_returns : pd.Series
+        Serie des log-returns.
+    output_dir : Path, optional
+        Repertoire ou sauvegarder le plot.
+    max_lags : int
+        Nombre maximum de lags.
+    figsize : Tuple[int, int]
+        Taille de la figure.
+
+    Returns
+    -------
+    Figure
+        Figure matplotlib.
+    """
+    from statsmodels.graphics.tsaplots import plot_acf, plot_pacf  # type: ignore
+
+    data = log_returns.dropna()
+    squared = data ** 2
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # ACF des log-returns au carre (sans lag 0)
+    plot_acf(squared, lags=max_lags, ax=axes[0], alpha=0.05, zero=False)
+    axes[0].set_title("ACF - Log-Returns² (Volatilite)", fontsize=12, fontweight="bold")
+    axes[0].set_xlabel("Lag")
+    axes[0].set_ylabel("Autocorrelation")
+
+    # PACF des log-returns au carre (sans lag 0)
+    plot_pacf(squared, lags=max_lags, ax=axes[1], alpha=0.05, zero=False)
+    axes[1].set_title("PACF - Log-Returns² (Volatilite)", fontsize=12, fontweight="bold")
+    axes[1].set_xlabel("Lag")
+    axes[1].set_ylabel("Partial Autocorrelation")
+
+    fig.suptitle(
+        "Autocorrelation des Log-Returns² (detection du clustering de volatilite)",
+        fontsize=11, y=1.02
+    )
+
+    plt.tight_layout()
+
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_dir / "log_returns_squared_acf.png", dpi=150, bbox_inches="tight")
+        print(f"ACF squared plot saved: {output_dir / 'log_returns_squared_acf.png'}")
+
+    return fig
+
+
+def run_ljung_box_test(
+    series: pd.Series,
+    lags: Optional[List[int]] = None,
+    output_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Test de Ljung-Box pour l'autocorrelation.
+
+    H0: Pas d'autocorrelation jusqu'au lag k
+    H1: Autocorrelation presente
+
+    Parameters
+    ----------
+    series : pd.Series
+        Serie temporelle (log-returns ou residus).
+    lags : List[int], optional
+        Lags a tester. Par defaut [10, 20, 40].
+    output_dir : Path, optional
+        Repertoire ou sauvegarder les resultats.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Resultats du test pour chaque lag.
+    """
+    import json
+    from statsmodels.stats.diagnostic import acorr_ljungbox  # type: ignore
+
+    if lags is None:
+        lags = [10, 20, 40]
+
+    data = series.dropna()
+
+    results: Dict[str, Any] = {
+        "test_name": "Ljung-Box",
+        "hypothesis": "H0: Pas d'autocorrelation jusqu'au lag k (p < 0.05 => rejeter H0)",
+        "lags_tested": {},
+    }
+
+    try:
+        lb_results = acorr_ljungbox(data, lags=lags, return_df=True)
+
+        for lag in lags:
+            if lag in lb_results.index:
+                lb_stat = float(lb_results.loc[lag, "lb_stat"])
+                lb_pvalue = float(lb_results.loc[lag, "lb_pvalue"])
+                conclusion = "Autocorrelation significative" if lb_pvalue < 0.05 else "Pas d'autocorrelation"
+                results["lags_tested"][str(lag)] = {
+                    "statistic": lb_stat,
+                    "p_value": lb_pvalue,
+                    "conclusion": conclusion,
+                }
+    except Exception as e:
+        results["error"] = str(e)
+
+    # Affichage
+    print("\n" + "=" * 60)
+    print("TEST DE LJUNG-BOX (Autocorrelation)")
+    print("=" * 60)
+    if "error" not in results:
+        for lag_str, lag_results in results["lags_tested"].items():
+            print(f"  Lag {lag_str}: stat={lag_results['statistic']:.4f}, p={lag_results['p_value']:.4f} -> {lag_results['conclusion']}")
+    else:
+        print(f"  Erreur: {results['error']}")
+    print("=" * 60 + "\n")
+
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open(output_dir / "ljung_box_test.json", "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"Ljung-Box test saved: {output_dir / 'ljung_box_test.json'}")
+
+    return results
+
+
+def run_normality_tests(
+    series: pd.Series,
+    output_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Tests de normalite (Jarque-Bera et Shapiro-Wilk).
+
+    Jarque-Bera: H0 = Distribution normale (basee sur skewness et kurtosis)
+    Shapiro-Wilk: H0 = Distribution normale (pour n < 5000)
+
+    Parameters
+    ----------
+    series : pd.Series
+        Serie temporelle (log-returns).
+    output_dir : Path, optional
+        Repertoire ou sauvegarder les resultats.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Resultats des tests de normalite.
+    """
+    import json
+    from scipy.stats import jarque_bera, shapiro  # type: ignore
+
+    data = series.dropna().values
+
+    results: Dict[str, Any] = {
+        "n_observations": len(data),
+    }
+
+    # Test de Jarque-Bera
+    try:
+        jb_stat, jb_pvalue = jarque_bera(data)
+        jb_conclusion = "Non normale" if jb_pvalue < 0.05 else "Compatible avec normale"
+        results["Jarque_Bera"] = {
+            "statistic": float(jb_stat),
+            "p_value": float(jb_pvalue),
+            "conclusion": jb_conclusion,
+            "hypothesis": "H0: Distribution normale (p < 0.05 => rejeter H0 => non normale)",
+        }
+    except Exception as e:
+        results["Jarque_Bera"] = {"error": str(e)}
+
+    # Test de Shapiro-Wilk (limite a 5000 observations)
+    try:
+        if len(data) <= 5000:
+            sw_stat, sw_pvalue = shapiro(data)
+            sw_conclusion = "Non normale" if sw_pvalue < 0.05 else "Compatible avec normale"
+            results["Shapiro_Wilk"] = {
+                "statistic": float(sw_stat),
+                "p_value": float(sw_pvalue),
+                "conclusion": sw_conclusion,
+                "hypothesis": "H0: Distribution normale (p < 0.05 => rejeter H0 => non normale)",
+            }
+        else:
+            # Sous-echantillonnage pour Shapiro-Wilk
+            np.random.seed(42)
+            sample = np.random.choice(data, size=5000, replace=False)
+            sw_stat, sw_pvalue = shapiro(sample)
+            sw_conclusion = "Non normale" if sw_pvalue < 0.05 else "Compatible avec normale"
+            results["Shapiro_Wilk"] = {
+                "statistic": float(sw_stat),
+                "p_value": float(sw_pvalue),
+                "conclusion": sw_conclusion,
+                "hypothesis": "H0: Distribution normale (test sur 5000 obs. aleatoires)",
+                "note": "Sous-echantillonne a 5000 observations (limite Shapiro-Wilk)",
+            }
+    except Exception as e:
+        results["Shapiro_Wilk"] = {"error": str(e)}
+
+    # Affichage
+    print("\n" + "=" * 60)
+    print("TESTS DE NORMALITE")
+    print("=" * 60)
+    for test_name in ["Jarque_Bera", "Shapiro_Wilk"]:
+        test_res = results.get(test_name, {})
+        if "error" not in test_res and "statistic" in test_res:
+            print(f"  {test_name}: stat={test_res['statistic']:.4f}, p={test_res['p_value']:.6f} -> {test_res['conclusion']}")
+        elif "error" in test_res:
+            print(f"  {test_name}: Erreur - {test_res['error']}")
+    print("=" * 60 + "\n")
+
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open(output_dir / "normality_tests.json", "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"Normality tests saved: {output_dir / 'normality_tests.json'}")
+
+    return results
 
 
 def mann_kendall_test(series: np.ndarray, max_samples: int = 5000) -> Dict[str, Any]:
@@ -875,10 +1098,13 @@ def run_full_analysis(
     print(f"\nDonnees chargees: {len(df)} barres")
     print(f"Periode: {df['datetime_close'].min()} a {df['datetime_close'].max()}")
 
-    # Appliquer l'echantillonnage si necessaire
+    # Appliquer l'echantillonnage systematique si necessaire
+    # (preserve la structure temporelle des dollar bars)
     if sample_fraction < 1.0 and not df.empty:
-        df = df.sample(frac=sample_fraction, random_state=42).sort_values("datetime_close").reset_index(drop=True)
-        print(f"Echantillonnage applique: {len(df)} barres ({sample_fraction:.0%} de l'original)")
+        original_len = len(df)
+        step = max(1, int(1 / sample_fraction))
+        df = df.iloc[::step].reset_index(drop=True)
+        print(f"Echantillonnage systematique applique: {len(df)} barres (1/{step} = {len(df)/original_len:.1%} de l'original)")
         if df.empty:
             raise ValueError("Dataset vide apres echantillonnage. Essayez d'augmenter sample_fraction.")
 
@@ -911,43 +1137,40 @@ def run_full_analysis(
     fig_dist = plot_log_returns_distribution(log_returns, output_dir=output_dir)
     results["fig_distribution"] = fig_dist
 
-    # 2. Tests de stationnarite
-    print("\n[2/8] Execution des tests de stationnarite...")
+    # 2. Tests de normalite (Jarque-Bera, Shapiro-Wilk)
+    print("\n[2/8] Execution des tests de normalite...")
+    normality_results = run_normality_tests(log_returns, output_dir=output_dir)
+    results["normality_tests"] = normality_results
+
+    # 3. Tests de stationnarite
+    print("\n[3/8] Execution des tests de stationnarite...")
     stationarity_results = run_stationarity_tests(log_returns, output_dir=output_dir)
     results["stationarity_tests"] = stationarity_results
 
-    # 3. Plot de stationnarite
-    print("\n[3/8] Generation du plot de stationnarite...")
+    # 4. Plot de stationnarite
+    print("\n[4/8] Generation du plot de stationnarite...")
     fig_stationarity = plot_stationarity(log_returns, stationarity_results, output_dir=output_dir)
     results["fig_stationarity"] = fig_stationarity
 
-    # 4. Serie temporelle
-    print("\n[4/8] Generation du plot de serie temporelle...")
+    # 5. Serie temporelle
+    print("\n[5/8] Generation du plot de serie temporelle...")
     fig_ts = plot_log_returns_time_series(df, log_returns, output_dir=output_dir)
     results["fig_time_series"] = fig_ts
 
-    # 5. Autocorrelation
-    print("\n[5/8] Calcul de l'autocorrelation...")
+    # 6. Autocorrelation des log-returns
+    print("\n[6/8] Calcul de l'autocorrelation des log-returns...")
     fig_acf = compute_autocorrelation(log_returns, output_dir=output_dir)
     results["fig_acf"] = fig_acf
 
-    # 6. Analyse de tendance sur les prix (Close)
-    print("\n[6/8] Analyse de tendance sur les prix...")
-    prices = cast(pd.Series, df[CLOSE_COLUMN])
-    trend_results_prices = compute_trend_statistics(prices, output_dir=output_dir)
-    results["trend_analysis_prices"] = trend_results_prices
+    # 7. Autocorrelation des log-returns² (volatilite clustering)
+    print("\n[7/8] Calcul de l'autocorrelation des log-returns² (volatilite)...")
+    fig_acf_sq = compute_autocorrelation_squared(log_returns, output_dir=output_dir)
+    results["fig_acf_squared"] = fig_acf_sq
 
-    # 7. Plot de l'analyse de tendance
-    print("\n[7/8] Generation du plot d'analyse de tendance...")
-    fig_trend = plot_trend_analysis(
-        prices, trend_results_prices, series_name="Prix (Close)", output_dir=output_dir
-    )
-    results["fig_trend_analysis"] = fig_trend
-
-    # 8. Extraction de tendance (adapte aux dollar bars)
-    print("\n[8/8] Extraction de tendance (dollar bars)...")
-    fig_decomp = plot_trend_extraction(prices, windows=[20, 50, 100, 200], output_dir=output_dir)
-    results["fig_trend_extraction"] = fig_decomp
+    # 8. Test de Ljung-Box (autocorrelation formelle)
+    print("\n[8/8] Execution du test de Ljung-Box...")
+    ljung_box_results = run_ljung_box_test(log_returns, output_dir=output_dir)
+    results["ljung_box_test"] = ljung_box_results
 
     print("\n" + "=" * 80)
     print("ANALYSE TERMINEE")
@@ -959,121 +1182,3 @@ def run_full_analysis(
     return results
 
 
-# =============================================================================
-# GARCH Visualization Utilities
-# =============================================================================
-
-
-def create_figure_canvas(
-    figsize: tuple[int, int] = (10, 6),
-    n_rows: int = 1,
-    n_cols: int = 1,
-) -> tuple[Figure, Figure, np.ndarray]:
-    """Create matplotlib figure and canvas with subplots.
-
-    Args:
-        figsize: Figure size (width, height).
-        n_rows: Number of rows in subplot grid.
-        n_cols: Number of columns in subplot grid.
-
-    Returns:
-        Tuple of (figure, canvas_figure, axes_array).
-    """
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    # For backward compatibility, return fig as both figure and canvas
-    return fig, fig, axes
-
-
-def save_canvas(
-    canvas: Figure,
-    path: Path | str,
-    format: str = "png",
-    dpi: int = 150,
-) -> None:
-    """Save matplotlib canvas to file.
-
-    Args:
-        canvas: Matplotlib Figure object.
-        path: Output path.
-        format: Image format.
-        dpi: Resolution.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.savefig(path, format=format, dpi=dpi, bbox_inches="tight")
-
-
-def add_zero_line(
-    ax: Axes,
-    color: str = "black",
-    linewidth: float = 1.0,
-    linestyle: str = "-",
-) -> None:
-    """Add a horizontal zero line to the plot.
-
-    Args:
-        ax: Matplotlib axes object.
-        color: Line color.
-        linewidth: Line width.
-        linestyle: Line style.
-    """
-    ax.axhline(y=0, color=color, linewidth=linewidth, linestyle=linestyle)
-
-
-def prepare_temporal_axis(
-    dates: Sequence[Any] | np.ndarray | pd.Series | pd.Index | None,
-    length: int | None = None,
-) -> np.ndarray:
-    """Prepare temporal axis for plotting.
-
-    Args:
-        dates: Date values.
-        length: Desired length (if None, use dates length).
-
-    Returns:
-        Array for x-axis.
-    """
-    if length is None:
-        if dates is not None and hasattr(dates, "__len__"):
-            length = len(dates)
-        else:
-            length = 100  # default
-
-    return np.arange(length)
-
-
-def plot_histogram_with_normal_overlay(
-    residuals: np.ndarray,
-    ax: Axes | None = None,
-    bins: int = 50,
-    alpha: float = 0.7,
-) -> tuple[float, float]:
-    """Plot histogram of residuals with normal distribution overlay.
-
-    Args:
-        residuals: Residual values.
-        ax: Matplotlib axes (if None, use current axes).
-        bins: Number of histogram bins.
-        alpha: Transparency level.
-
-    Returns:
-        Tuple of (mean, std) of residuals.
-    """
-    if ax is None:
-        ax = plt.gca()
-
-    # Plot histogram
-    ax.hist(residuals, bins=bins, alpha=alpha, density=True,
-            color="skyblue", edgecolor="black", linewidth=0.5)
-
-    # Add normal distribution overlay
-    mean_val = float(np.mean(residuals))
-    std_val = float(np.std(residuals))
-
-    x = np.linspace(mean_val - 3*std_val, mean_val + 3*std_val, 100)
-    y = 1/(std_val * np.sqrt(2*np.pi)) * np.exp(-0.5*((x-mean_val)/std_val)**2)
-
-    ax.plot(x, y, color="red", linewidth=2, label="Distribution normale")
-    ax.legend()
-
-    return mean_val, std_val

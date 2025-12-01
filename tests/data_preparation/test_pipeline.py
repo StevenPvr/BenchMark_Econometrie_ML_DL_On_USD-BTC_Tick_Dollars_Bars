@@ -59,7 +59,8 @@ class TestRunDollarBarsPipeline:
             adaptive=False,
             threshold_bounds=None,
             calibration_fraction=1.0,
-            include_incomplete_final=True
+            include_incomplete_final=False,  # Default changed to False
+            exclude_calibration_prefix=False,  # New parameter
         )
 
     def test_run_dollar_bars_pipeline_missing_input(self):

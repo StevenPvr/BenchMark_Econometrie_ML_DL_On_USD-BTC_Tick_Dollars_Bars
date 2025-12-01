@@ -19,16 +19,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import cast
 
 import joblib  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 
-from src.config_logging import get_logger
+from numpy.typing import NDArray
 
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
+from src.config_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -51,15 +50,127 @@ class StandardScalerCustom:
 
     z = (x - mean) / std
 
+    Supports incremental fitting via partial_fit() for large datasets.
+
     Attributes:
         mean_: Mean values per column (fit on train).
         std_: Standard deviation per column (fit on train).
         columns_: Column names.
+        _n_samples_seen_: Number of samples seen (for incremental fitting).
+        _var_: Variance accumulator (for incremental fitting).
     """
 
     mean_: NDArray[np.float64] | None = None
     std_: NDArray[np.float64] | None = None
     columns_: list[str] | None = None
+    _n_samples_seen_: NDArray[np.int64] | None = None  # Per-column sample counts
+    _var_: NDArray[np.float64] | None = None
+
+    def partial_fit(self, df: pd.DataFrame, columns: list[str] | None = None) -> "StandardScalerCustom":
+        """Incrementally fit scaler on a batch of data.
+
+        Uses Welford's online algorithm for numerically stable mean/variance.
+
+        Args:
+            df: Batch of training data.
+            columns: Columns to scale (required on first call).
+
+        Returns:
+            Self for chaining.
+        """
+        if columns is not None:
+            self.columns_ = columns
+        elif self.columns_ is None:
+            raise ValueError("columns must be provided on first call to partial_fit")
+
+        # Build mapping of column name to index in self.columns_
+        col_to_idx = {c: i for i, c in enumerate(self.columns_)}
+
+        # Only use columns that exist in this batch
+        available_cols = [c for c in self.columns_ if c in df.columns]
+        if not available_cols:
+            return self
+
+        data = df[available_cols].values.astype(np.float64)
+        # Replace inf with nan
+        data = np.where(np.isinf(data), np.nan, data)
+
+        n_cols = len(self.columns_)
+
+        # Initialize on first batch
+        if self.mean_ is None:
+            self.mean_ = np.zeros(n_cols, dtype=np.float64)
+            self._var_ = np.zeros(n_cols, dtype=np.float64)
+            self._n_samples_seen_ = np.zeros(n_cols, dtype=np.int64)
+
+        # Type assertions for type checker
+        assert self.mean_ is not None
+        assert self._var_ is not None
+        assert self._n_samples_seen_ is not None
+
+        # Welford's online algorithm for each available column
+        for data_idx, col_name in enumerate(available_cols):
+            col_idx = col_to_idx[col_name]  # Index in self.columns_
+            col_data = data[:, data_idx]
+            valid_mask = ~np.isnan(col_data)
+            col_valid = col_data[valid_mask]
+
+            if len(col_valid) == 0:
+                continue
+
+            for x in col_valid:
+                self._n_samples_seen_[col_idx] += 1
+                n = self._n_samples_seen_[col_idx]
+                delta = x - self.mean_[col_idx]
+                self.mean_[col_idx] += delta / n
+                delta2 = x - self.mean_[col_idx]
+                self._var_[col_idx] += delta * delta2
+
+        return self
+
+    def finalize_fit(self) -> "StandardScalerCustom":
+        """Finalize incremental fitting by computing std from variance.
+
+        Must be called after all partial_fit() calls.
+
+        Returns:
+            Self for chaining.
+        """
+        if self._var_ is None or self._n_samples_seen_ is None:
+            raise ValueError("No data has been fitted. Call partial_fit() first.")
+
+        total_samples = self._n_samples_seen_.sum()
+        if total_samples == 0:
+            raise ValueError("No valid samples found. Call partial_fit() first.")
+
+        # Compute std from variance (per column)
+        self.std_ = np.zeros_like(self._var_)
+        for i in range(len(self._var_)):
+            n = self._n_samples_seen_[i]
+            if n > 1:
+                self.std_[i] = np.sqrt(self._var_[i] / (n - 1))
+            else:
+                self.std_[i] = 1.0
+
+        # Avoid division by zero
+        self.std_ = np.where(cast(NDArray[np.float64], self.std_) < 1e-10, 1.0, cast(NDArray[np.float64], self.std_))
+
+        # Handle NaN
+        self.mean_ = np.where(np.isnan(cast(NDArray[np.float64], self.mean_)), 0.0, cast(NDArray[np.float64], self.mean_))
+
+        logger.info(
+            "StandardScaler finalized: %d columns, %d total samples",
+            len(self.columns_) if self.columns_ else 0,
+            total_samples,
+        )
+
+        # Type assertions for type checker
+        assert self.mean_ is not None
+        assert self.std_ is not None
+        assert self._var_ is not None
+        assert self._n_samples_seen_ is not None
+
+        return self
 
     def fit(self, df: pd.DataFrame, columns: list[str]) -> "StandardScalerCustom":
         """Fit scaler on training data.
@@ -82,16 +193,20 @@ class StandardScalerCustom:
         self.std_ = np.nanstd(data, axis=0, ddof=1)
 
         # Avoid division by zero
-        self.std_ = np.where(self.std_ < 1e-10, 1.0, self.std_)
+        self.std_ = np.where(cast(NDArray[np.float64], self.std_) < 1e-10, 1.0, cast(NDArray[np.float64], self.std_))
 
         # Handle case where mean is NaN (all values were NaN/inf)
-        self.mean_ = np.where(np.isnan(self.mean_), 0.0, self.mean_)
+        self.mean_ = np.where(np.isnan(cast(NDArray[np.float64], self.mean_)), 0.0, cast(NDArray[np.float64], self.mean_))
 
         logger.info(
             "StandardScaler fit on %d columns, %d rows",
             len(columns),
             len(df),
         )
+
+        # Type assertions for type checker
+        assert self.mean_ is not None
+        assert self.std_ is not None
 
         return self
 
@@ -106,6 +221,11 @@ class StandardScalerCustom:
         """
         if self.mean_ is None or self.std_ is None or self.columns_ is None:
             raise ValueError("Scaler not fitted. Call fit() first.")
+
+        # Type assertions for type checker
+        assert self.mean_ is not None
+        assert self.std_ is not None
+        assert self.columns_ is not None
 
         result = df.copy()
 
@@ -188,6 +308,8 @@ class MinMaxScalerCustom:
 
     x_scaled = 2 * (x - min) / (max - min) - 1
 
+    Supports incremental fitting via partial_fit() for large datasets.
+
     Attributes:
         min_: Minimum values per column (fit on train).
         max_: Maximum values per column (fit on train).
@@ -197,6 +319,87 @@ class MinMaxScalerCustom:
     min_: NDArray[np.float64] | None = None
     max_: NDArray[np.float64] | None = None
     columns_: list[str] | None = None
+
+    def partial_fit(self, df: pd.DataFrame, columns: list[str] | None = None) -> "MinMaxScalerCustom":
+        """Incrementally fit scaler on a batch of data.
+
+        Updates min/max values with each batch.
+
+        Args:
+            df: Batch of training data.
+            columns: Columns to scale (required on first call).
+
+        Returns:
+            Self for chaining.
+        """
+        if columns is not None:
+            self.columns_ = columns
+        elif self.columns_ is None:
+            raise ValueError("columns must be provided on first call to partial_fit")
+
+        # Build mapping of column name to index in self.columns_
+        col_to_idx = {c: i for i, c in enumerate(self.columns_)}
+
+        # Only use columns that exist in this batch
+        available_cols = [c for c in self.columns_ if c in df.columns]
+        if not available_cols:
+            return self
+
+        data = df[available_cols].values.astype(np.float64)
+        # Replace inf with nan
+        data = np.where(np.isinf(data), np.nan, data)
+
+        n_cols = len(self.columns_)
+
+        # Initialize on first batch
+        if self.min_ is None:
+            self.min_ = np.full(n_cols, np.inf, dtype=np.float64)
+            self.max_ = np.full(n_cols, -np.inf, dtype=np.float64)
+
+        # Update min/max for available columns
+        for data_idx, col_name in enumerate(available_cols):
+            col_idx = col_to_idx[col_name]
+            col_data = data[:, data_idx]
+            valid_mask = ~np.isnan(col_data)
+            col_valid = col_data[valid_mask]
+
+            if len(col_valid) == 0:
+                continue
+
+            batch_min = np.min(col_valid)
+            batch_max = np.max(col_valid)
+            cast(NDArray[np.float64], self.min_)[col_idx] = min(cast(NDArray[np.float64], self.min_)[col_idx], batch_min)
+            cast(NDArray[np.float64], self.max_)[col_idx] = max(cast(NDArray[np.float64], self.max_)[col_idx], batch_max)
+
+        return self
+
+    def finalize_fit(self) -> "MinMaxScalerCustom":
+        """Finalize incremental fitting.
+
+        Must be called after all partial_fit() calls.
+
+        Returns:
+            Self for chaining.
+        """
+        if self.min_ is None or self.max_ is None:
+            raise ValueError("No data has been fitted. Call partial_fit() first.")
+
+        # Handle columns that never received data (still at inf/-inf)
+        # Also handle NaN (all values were NaN/inf)
+        self.min_ = np.where(np.isinf(self.min_) | np.isnan(self.min_), 0.0, self.min_)
+        self.max_ = np.where(np.isinf(self.max_) | np.isnan(self.max_), 1.0, self.max_)
+
+        # Avoid division by zero
+        range_ = self.max_ - self.min_
+        range_ = np.where(range_ < 1e-10, 1.0, range_)
+        self.max_ = self.min_ + range_
+
+        logger.info(
+            "MinMaxScaler finalized: %d columns",
+            len(self.columns_) if self.columns_ else 0,
+        )
+
+        return self
 
     def fit(self, df: pd.DataFrame, columns: list[str]) -> "MinMaxScalerCustom":
         """Fit scaler on training data.
@@ -219,19 +422,23 @@ class MinMaxScalerCustom:
         self.max_ = np.nanmax(data, axis=0)
 
         # Handle case where min/max is NaN (all values were NaN/inf)
-        self.min_ = np.where(np.isnan(self.min_), 0.0, self.min_)
-        self.max_ = np.where(np.isnan(self.max_), 1.0, self.max_)
+        self.min_ = np.where(np.isnan(cast(NDArray[np.float64], self.min_)), 0.0, cast(NDArray[np.float64], self.min_))
+        self.max_ = np.where(np.isnan(cast(NDArray[np.float64], self.max_)), 1.0, cast(NDArray[np.float64], self.max_))
 
         # Avoid division by zero
-        range_ = self.max_ - self.min_
+        range_ = cast(NDArray[np.float64], self.max_) - cast(NDArray[np.float64], self.min_)
         range_ = np.where(range_ < 1e-10, 1.0, range_)
-        self.max_ = self.min_ + range_
+        self.max_ = cast(NDArray[np.float64], self.min_) + range_
 
         logger.info(
             "MinMaxScaler fit on %d columns, %d rows",
             len(columns),
             len(df),
         )
+
+        # Type assertions for type checker
+        assert self.min_ is not None
+        assert self.max_ is not None
 
         return self
 
@@ -246,6 +453,11 @@ class MinMaxScalerCustom:
         """
         if self.min_ is None or self.max_ is None or self.columns_ is None:
             raise ValueError("Scaler not fitted. Call fit() first.")
+
+        # Type assertions for type checker
+        assert self.min_ is not None
+        assert self.max_ is not None
+        assert self.columns_ is not None
 
         result = df.copy()
 
@@ -296,7 +508,7 @@ class MinMaxScalerCustom:
         for i, col in enumerate(self.columns_):
             if col in df.columns:
                 range_ = self.max_[i] - self.min_[i]
-                result[col] = (df[col].values + 1) / 2 * range_ + self.min_[i]
+                result[col] = (cast(NDArray[np.float64], df[col].values) + 1) / 2 * range_ + self.min_[i]
 
         return result
 

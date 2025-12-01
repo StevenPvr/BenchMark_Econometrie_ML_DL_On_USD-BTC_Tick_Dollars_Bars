@@ -20,6 +20,7 @@ Fonctions utilitaires partagees pour le traitement de donnees, validation, I/O e
 ## Categories de Fonctions
 
 ### Validation (`validation.py`)
+
 ```python
 validate_dataframe_not_empty(df)      # Verifie DataFrame non vide
 validate_file_exists(path)             # Verifie existence fichier
@@ -30,6 +31,7 @@ has_both_splits(df)                    # Verifie train/test presents
 ```
 
 ### Temporal (`temporal.py`)
+
 ```python
 compute_timeseries_split_indices(n, ratio)  # Indices de split
 validate_temporal_order_series(series)       # Ordre chronologique
@@ -38,6 +40,7 @@ log_split_dates(df_train, df_test)           # Log des plages de dates
 ```
 
 ### I/O (`io.py`)
+
 ```python
 ensure_output_dir(path)                # Cree repertoire si necessaire
 load_dataframe(path)                   # Charge DataFrame (auto-detect format)
@@ -49,6 +52,7 @@ save_json_pretty(data, path)           # Sauvegarde JSON formatte
 ```
 
 ### Transforms (`transforms.py`)
+
 ```python
 extract_features_and_target(df, target)  # Separe X et y
 filter_by_split(df, split)               # Filtre train/test
@@ -57,6 +61,7 @@ stable_ticker_id(df)                     # ID ticker stable
 ```
 
 ### DateTime (`datetime_utils.py`)
+
 ```python
 parse_date_value(value)                  # Parse date flexible
 normalize_timestamp_to_datetime(ts)      # Normalise timestamp
@@ -66,6 +71,7 @@ format_dates_to_string(dates)            # Formate dates en string
 ```
 
 ### Metrics (`metrics.py`)
+
 ```python
 compute_log_returns(prices)              # Calcule log-returns
 compute_residuals(actual, predicted)     # Calcule residus
@@ -73,6 +79,7 @@ chi2_sf(x, df)                           # Survival function chi2
 ```
 
 ### Logging (`logging_utils.py`)
+
 ```python
 log_series_summary(series, name)         # Resume d'une Series
 log_split_summary(df_train, df_test)     # Resume du split
@@ -80,6 +87,7 @@ save_plot(fig, path)                     # Sauvegarde figure
 ```
 
 ### Financial (`financial.py`)
+
 ```python
 compute_rolling_volume_scaling(df, window)  # Poids de volume rolling
 ```

@@ -29,6 +29,7 @@ Reference:
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -55,6 +56,51 @@ __all__ = [
     "run_dollar_bars_pipeline",
     "add_log_returns_to_bars_file",
 ]
+
+
+# =============================================================================
+# PARAMETER VALIDATION
+# =============================================================================
+
+
+def _validate_dollar_bars_params(
+    ema_span: int | None,
+    threshold_bounds: tuple[float, float] | None,
+    calibration_fraction: float,
+) -> None:
+    """Validate parameters for dollar bars computation.
+
+    Args:
+        ema_span: EMA span for adaptive threshold (must be positive if provided).
+        threshold_bounds: Tuple of (min_mult, max_mult) for threshold bounds.
+        calibration_fraction: Fraction of data used for calibration (must be in (0, 1]).
+
+    Raises:
+        ValueError: If any parameter is invalid.
+    """
+    if ema_span is not None and ema_span <= 0:
+        raise ValueError(f"ema_span must be positive, got {ema_span}")
+
+    if threshold_bounds is not None:
+        if len(threshold_bounds) != 2:
+            raise ValueError(
+                f"threshold_bounds must be a tuple of (min_mult, max_mult), "
+                f"got {len(threshold_bounds)} elements"
+            )
+        min_mult, max_mult = threshold_bounds
+        if min_mult >= max_mult:
+            raise ValueError(
+                f"threshold_bounds min ({min_mult}) must be < max ({max_mult})"
+            )
+        if min_mult <= 0:
+            raise ValueError(
+                f"threshold_bounds min_mult must be positive, got {min_mult}"
+            )
+
+    if not 0 < calibration_fraction <= 1:
+        raise ValueError(
+            f"calibration_fraction must be in (0, 1], got {calibration_fraction}"
+        )
 
 
 # =============================================================================
@@ -458,7 +504,8 @@ def _accumulate_dollar_bars_fixed(
 
 def compute_dollar_bars(
     df: pd.DataFrame,
-    target_num_bars: int,
+    target_ticks_per_bar: int | None = None,
+    target_num_bars: int | None = None,
     timestamp_col: str = "timestamp",
     price_col: str = "price",
     volume_col: str = "amount",
@@ -467,7 +514,8 @@ def compute_dollar_bars(
     adaptive: bool = False,
     threshold_bounds: tuple[float, float] | None = None,
     calibration_fraction: float = 1.0,
-    include_incomplete_final: bool = True,
+    include_incomplete_final: bool = False,
+    exclude_calibration_prefix: bool = False,
 ) -> pd.DataFrame:
     """Compute Dollar Bars from tick data following De Prado's methodology.
 
@@ -475,8 +523,9 @@ def compute_dollar_bars(
     is exchanged. This produces a series with more regular statistical
     properties than time-based bars, better suited for ML models.
 
-    De Prado's Expected Dollar Value calibration (AFML Chapter 2):
-        T = Total Dollar Volume (calibration prefix) / Target Number of Bars (prefix)
+    De Prado's calibration (AFML Chapter 2):
+        T = Total Dollar Volume / Target Number of Bars
+        where Target Bars = n_ticks / target_ticks_per_bar
 
     Adaptive threshold formula (optional bounds, off by default):
         T_0 calibrated on a prefix of the data
@@ -490,12 +539,15 @@ def compute_dollar_bars(
 
     Args:
         df: DataFrame with tick-by-tick data.
-        target_num_bars: Target number of bars to generate (REQUIRED).
-            Uses De Prado's Expected Dollar Value method for calibration.
+        target_ticks_per_bar: Target number of ticks per bar (RECOMMENDED).
+            Typical values: 100-500 for robust OHLCV statistics.
+            T is computed as: Total Dollar Volume / (n_ticks / target_ticks_per_bar)
+        target_num_bars: Alternative: target number of bars (legacy).
+            If both provided, target_ticks_per_bar takes precedence.
         timestamp_col: Name of timestamp column (int64 ms or datetime).
         price_col: Name of price column.
         volume_col: Name of volume column.
-        threshold: Override with fixed dollar threshold T (ignores target_num_bars).
+        threshold: Override with fixed dollar threshold T (ignores target params).
         ema_span: EMA span for adaptive threshold (default 100 bars).
         adaptive: If True, use adaptive EWMA threshold (optional).
             If False (default), use fixed threshold from calibration (standard dollar bars).
@@ -504,7 +556,10 @@ def compute_dollar_bars(
         calibration_fraction: Fraction of the dataset (prefix) used to calibrate
             T_0. Default 1.0 = full sample (classic expected value).
         include_incomplete_final: If True, keeps the trailing partial bar even if
-            the threshold was not hit.
+            the threshold was not hit. Default False for methodological rigor.
+        exclude_calibration_prefix: If True, excludes bars generated from ticks
+            in the calibration prefix. This prevents using the same data for both
+            threshold calibration AND bar generation. Default False.
 
     Returns:
         DataFrame with dollar bars containing:
@@ -517,17 +572,20 @@ def compute_dollar_bars(
         ValueError: If required columns are missing.
 
     Example:
-        >>> # De Prado Expected Value method
-        >>> bars = compute_dollar_bars(df_ticks, target_num_bars=500_000)
+        >>> # De Prado methodology with target ticks per bar
+        >>> bars = compute_dollar_bars(df_ticks, target_ticks_per_bar=100)
         >>>
         >>> # Fixed threshold override
-        >>> bars = compute_dollar_bars(df_ticks, target_num_bars=500_000, threshold=225_000)
+        >>> bars = compute_dollar_bars(df_ticks, threshold=225_000)
     """
     # Validate columns
     required_cols = {timestamp_col, price_col, volume_col}
     missing_cols = required_cols - set(df.columns)
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
+
+    # Validate parameters
+    _validate_dollar_bars_params(ema_span, threshold_bounds, calibration_fraction)
 
     if df.empty:
         logger.warning("Empty DataFrame provided, returning empty bars")
@@ -563,14 +621,21 @@ def compute_dollar_bars(
     # EMA alpha for adaptive threshold
     ema_alpha = 2.0 / (ema_span + 1.0)
 
-    # Clamp calibration_fraction to [0, 1]
-    calibration_fraction = float(calibration_fraction)
-    if calibration_fraction <= 0:
-        calibration_fraction = 1.0  # default to full-sample calibration
-    if calibration_fraction > 1:
-        calibration_fraction = 1.0
+    # Track calibration boundary for potential prefix exclusion
+    calibration_end_timestamp: int | None = None
 
-    # Determine which mode to use (priority: threshold > target_num_bars > legacy)
+    # Convert target_ticks_per_bar to target_num_bars (De Prado methodology)
+    n_ticks = len(df)
+    if target_ticks_per_bar is not None:
+        if target_ticks_per_bar <= 0:
+            raise ValueError("target_ticks_per_bar must be positive")
+        target_num_bars = max(1, n_ticks // target_ticks_per_bar)
+        logger.info(
+            f"De Prado methodology: {target_ticks_per_bar} ticks/bar → "
+            f"{target_num_bars:,} target bars from {n_ticks:,} ticks"
+        )
+
+    # Determine which mode to use (priority: threshold > target_num_bars)
     if threshold is not None:
         # === MODE 1: FIXED THRESHOLD (user-specified) ===
         logger.info(f"Using FIXED threshold: {threshold:,.2f} USD")
@@ -597,6 +662,10 @@ def compute_dollar_bars(
         initial_threshold = float(_compute_threshold_from_target_bars(
             calibration_values, target_bars_calibration
         ))
+
+        # Store the timestamp of the last calibration tick for potential exclusion
+        if exclude_calibration_prefix and calibration_size < len(timestamps):
+            calibration_end_timestamp = int(timestamps[calibration_size - 1])
 
         # Compute bounds for adaptive mode (None = unbounded pure EWMA)
         if threshold_bounds is None:
@@ -634,8 +703,9 @@ def compute_dollar_bars(
             )
 
     else:
-        # This should never happen with the new signature
-        raise ValueError("Either threshold or target_num_bars must be provided")
+        raise ValueError(
+            "Either threshold, target_ticks_per_bar, or target_num_bars must be provided"
+        )
 
     # Unpack results
     (
@@ -684,14 +754,31 @@ def compute_dollar_bars(
         "duration_sec": duration_sec,
     })
 
-    avg_ticks = len(df) / num_bars
-    threshold_range = f"{thresholds_arr.min():,.0f} - {thresholds_arr.max():,.0f}"
+    # Exclude bars from calibration prefix if requested
+    # This prevents using calibration data for both threshold estimation AND bar generation
+    if exclude_calibration_prefix and calibration_end_timestamp is not None:
+        original_count = len(df_bars)
+        df_bars = df_bars[df_bars["timestamp_close"] > calibration_end_timestamp].copy()
+        df_bars = df_bars.reset_index(drop=True)
+        df_bars["bar_id"] = np.arange(len(df_bars))  # Re-index bar_ids
+        excluded_count = original_count - len(df_bars)
+        logger.info(
+            f"Excluded {excluded_count} bars from calibration prefix "
+            f"(timestamp <= {calibration_end_timestamp})"
+        )
+
+    if len(df_bars) == 0:
+        logger.warning("No bars remaining after calibration prefix exclusion")
+        return _create_empty_bars_df()
+
+    avg_ticks = len(df) / len(df_bars) if len(df_bars) > 0 else 0
+    threshold_range = f"{df_bars['threshold_used'].min():,.0f} - {df_bars['threshold_used'].max():,.0f}"
     logger.info(
-        f"Generated {num_bars} dollar bars from {len(df)} ticks "
+        f"Generated {len(df_bars)} dollar bars from {len(df)} ticks "
         f"(avg {avg_ticks:.1f} ticks/bar, threshold range: {threshold_range})"
     )
 
-    return df_bars
+    return pd.DataFrame(df_bars)
 
 
 def _create_empty_bars_df() -> pd.DataFrame:
@@ -749,7 +836,8 @@ def generate_dollar_bars(
 
 def prepare_dollar_bars(
     parquet_path: Path | str,
-    target_num_bars: int,
+    target_ticks_per_bar: int | None = None,
+    target_num_bars: int | None = None,
     output_parquet: Path | str | None = None,
     threshold: float | None = None,
     timestamp_col: str = "timestamp",
@@ -759,15 +847,17 @@ def prepare_dollar_bars(
     adaptive: bool = False,
     threshold_bounds: tuple[float, float] | None = None,
     calibration_fraction: float = 1.0,
-    include_incomplete_final: bool = True,
+    include_incomplete_final: bool = False,
+    exclude_calibration_prefix: bool = False,
 ) -> pd.DataFrame:
     """End-to-end pipeline for generating Dollar Bars from tick parquet.
 
     Args:
         parquet_path: Path to input tick data parquet file.
+        target_ticks_per_bar: Target ticks per bar (RECOMMENDED, De Prado method).
+        target_num_bars: Alternative: target number of bars (legacy).
         output_parquet: Path to save bars as parquet (None to skip).
-        target_num_bars: Target number of bars (RECOMMENDED, De Prado method).
-        threshold: Fixed dollar threshold (overrides target_num_bars).
+        threshold: Fixed dollar threshold (overrides target params).
         timestamp_col: Name of timestamp column.
         price_col: Name of price column.
         volume_col: Name of volume column.
@@ -775,7 +865,8 @@ def prepare_dollar_bars(
         adaptive: Use adaptive EWMA threshold (De Prado recommended).
         threshold_bounds: Optional bounds when adaptive=True.
         calibration_fraction: Fraction of earliest ticks used to calibrate T_0.
-        include_incomplete_final: Keep trailing partial bar if True.
+        include_incomplete_final: Keep trailing partial bar if True. Default False.
+        exclude_calibration_prefix: Exclude bars from calibration period. Default False.
 
     Returns:
         DataFrame with computed dollar bars.
@@ -790,6 +881,7 @@ def prepare_dollar_bars(
 
     df_bars = compute_dollar_bars(
         df=df_ticks,
+        target_ticks_per_bar=target_ticks_per_bar,
         target_num_bars=target_num_bars,
         timestamp_col=timestamp_col,
         price_col=price_col,
@@ -800,6 +892,7 @@ def prepare_dollar_bars(
         threshold_bounds=threshold_bounds,
         calibration_fraction=calibration_fraction,
         include_incomplete_final=include_incomplete_final,
+        exclude_calibration_prefix=exclude_calibration_prefix,
     )
 
     if output_parquet is not None:
@@ -811,149 +904,343 @@ def prepare_dollar_bars(
     return df_bars
 
 
+@dataclass
+class _BarAccumulatorState:
+    """State for dollar bar accumulation across batches."""
+    cum_dollar: float = 0.0
+    cum_volume: float = 0.0
+    cum_pv: float = 0.0  # price * volume sum for VWAP
+    bar_open: float = 0.0
+    bar_high: float = 0.0
+    bar_low: float = 0.0
+    bar_ts_open: int = 0
+    n_ticks: int = 0
+    bar_idx: int = 0
+    current_threshold: float = 0.0
+    ema_dollar: float = 0.0
+    initialized: bool = False
+
+
+def _process_batch_with_state(
+    timestamps: np.ndarray,
+    prices: np.ndarray,
+    volumes: np.ndarray,
+    state: _BarAccumulatorState,
+    ema_alpha: float,
+    min_threshold: float,
+    max_threshold: float,
+    adaptive: bool,
+) -> tuple[list[dict], _BarAccumulatorState]:
+    """Process a batch of ticks and return completed bars + updated state.
+
+    This function maintains state between batches so that bars spanning
+    batch boundaries are handled correctly.
+    """
+    completed_bars: list[dict] = []
+    n = len(timestamps)
+
+    if n == 0:
+        return completed_bars, state
+
+    # Initialize state with first tick if needed
+    if not state.initialized:
+        state.bar_open = prices[0]
+        state.bar_high = prices[0]
+        state.bar_low = prices[0]
+        state.bar_ts_open = int(timestamps[0])
+        state.initialized = True
+
+    for i in range(n):
+        price = float(prices[i])
+        volume = float(volumes[i])
+        ts = int(timestamps[i])
+
+        dollar_value = price * volume
+
+        # Accumulate
+        state.cum_dollar += dollar_value
+        state.cum_volume += volume
+        state.cum_pv += price * volume
+        state.n_ticks += 1
+
+        # Update high/low
+        if price > state.bar_high:
+            state.bar_high = price
+        if price < state.bar_low:
+            state.bar_low = price
+
+        # Check threshold
+        if state.cum_dollar >= state.current_threshold:
+            # Close bar
+            vwap = state.cum_pv / state.cum_volume if state.cum_volume > 0 else price
+
+            completed_bars.append({
+                "bar_id": state.bar_idx,
+                "timestamp_open": state.bar_ts_open,
+                "timestamp_close": ts,
+                "open": state.bar_open,
+                "high": state.bar_high,
+                "low": state.bar_low,
+                "close": price,
+                "volume": state.cum_volume,
+                "cum_dollar_value": state.cum_dollar,
+                "vwap": vwap,
+                "n_ticks": state.n_ticks,
+                "threshold_used": state.current_threshold,
+            })
+
+            # Adaptive threshold update
+            if adaptive:
+                state.ema_dollar = ema_alpha * state.cum_dollar + (1.0 - ema_alpha) * state.ema_dollar
+                state.current_threshold = max(min_threshold, min(max_threshold, state.ema_dollar))
+
+            state.bar_idx += 1
+
+            # Reset for next bar
+            state.cum_dollar = 0.0
+            state.cum_volume = 0.0
+            state.cum_pv = 0.0
+            state.n_ticks = 0
+
+            # Next bar opens at next tick
+            if i + 1 < n:
+                state.bar_open = float(prices[i + 1])
+                state.bar_high = float(prices[i + 1])
+                state.bar_low = float(prices[i + 1])
+                state.bar_ts_open = int(timestamps[i + 1])
+            else:
+                state.initialized = False  # Will init with first tick of next batch
+
+    return completed_bars, state
+
+
 def run_dollar_bars_pipeline_batch(
-    input_dir: Path | str,
-    target_num_bars: int,
+    input_parquet: Path | str,
+    target_ticks_per_bar: int | None = None,
     output_parquet: Path | str | None = None,
-    threshold: float | None = None,
+    batch_size: int = 20_000_000,
     adaptive: bool = False,
     threshold_bounds: tuple[float, float] | None = None,
-    calibration_fraction: float = 1.0,
-    include_incomplete_final: bool = True,
+    calibration_fraction: float = 0.1,
+    include_incomplete_final: bool = False,
 ) -> pd.DataFrame:
-    """Run dollar bars pipeline on a directory of partitioned parquet files (memory efficient).
+    """Run dollar bars pipeline with memory-efficient batch processing.
 
-    Processes each file individually to avoid loading all data in memory at once.
-    This is much more memory-efficient for large datasets.
+    Processes ticks in batches to limit memory usage. State is maintained
+    between batches so bars spanning batch boundaries are handled correctly.
 
     Args:
-        input_dir: Directory containing partitioned parquet files
-        output_parquet: Path to save consolidated bars parquet. If None, uses default.
-        target_num_bars: Target number of bars (De Prado method).
-        threshold: Fixed dollar threshold (overrides target_num_bars).
-        adaptive: Use adaptive EWMA threshold (De Prado recommended).
-        threshold_bounds: Optional bounds when adaptive=True.
-        calibration_fraction: Fraction of earliest ticks used to calibrate T_0.
+        input_parquet: Path to cleaned tick data parquet file.
+        target_ticks_per_bar: Target ticks per bar (De Prado method). Default 100.
+        output_parquet: Path to save bars parquet. If None, uses default.
+        batch_size: Number of ticks per batch. Default 20M.
+        adaptive: Use adaptive EWMA threshold.
+        threshold_bounds: Optional (min_mult, max_mult) for adaptive bounds.
+        calibration_fraction: Fraction of first batch used to calibrate threshold.
         include_incomplete_final: Keep trailing partial bar if True.
 
     Returns:
-        DataFrame with consolidated dollar bars from all input files.
+        DataFrame with generated dollar bars.
     """
-    from pathlib import Path
-    import pandas as pd
-    import pyarrow as pa # type: ignore[import-untyped]
-    import pyarrow.parquet as pq # type: ignore[import-untyped]
+    import gc
+    import pyarrow as pa  # type: ignore[import-untyped]
+    import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
-    input_path = Path(input_dir)
+    input_path = Path(input_parquet)
     if not input_path.exists():
-        raise FileNotFoundError(f"Input directory not found: {input_path}")
+        raise FileNotFoundError(f"Input parquet not found: {input_path}")
 
-    # Find all parquet files
-    parquet_files = list(input_path.glob("*.parquet"))
-    if not parquet_files:
-        raise ValueError(f"No parquet files found in {input_path}")
-
-    logger.info(f"Processing {len(parquet_files)} partitioned files from {input_path}")
+    # Default target ticks per bar
+    if target_ticks_per_bar is None:
+        target_ticks_per_bar = 100
 
     # Resolve output path
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     if output_parquet is None:
-        from src.path import DOLLAR_BARS_PARQUET
-        output_parquet = DOLLAR_BARS_PARQUET.parent / f"dollar_bars_{timestamp}.parquet"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_parquet = DOLLAR_IMBALANCE_BARS_PARQUET.parent / f"dollar_bars_{timestamp}.parquet"
 
-    Path(output_parquet).parent.mkdir(parents=True, exist_ok=True)
+    output_path = Path(output_parquet)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Stream-write to Parquet to avoid holding everything in memory
+    # Get total row count without loading data
+    parquet_file = pq.ParquetFile(input_path)
+    total_ticks = parquet_file.metadata.num_rows
+    n_batches = (total_ticks + batch_size - 1) // batch_size
+
+    logger.info("=" * 70)
+    logger.info("DOLLAR BARS PIPELINE - BATCH PROCESSING")
+    logger.info("=" * 70)
+    logger.info(f"  Input: {input_path}")
+    logger.info(f"  Total ticks: {total_ticks:,}")
+    logger.info(f"  Batch size: {batch_size:,}")
+    logger.info(f"  Number of batches: {n_batches}")
+    logger.info(f"  Target ticks/bar: {target_ticks_per_bar}")
+
+    # EMA parameters
+    ema_span = 100
+    ema_alpha = 2.0 / (ema_span + 1.0)
+
+    # Initialize state
+    state = _BarAccumulatorState()
     parquet_writer: pq.ParquetWriter | None = None
     total_bars = 0
+    schema_initialized = False
 
-    for i, file_path in enumerate(sorted(parquet_files), 1):
-        logger.info(f"Processing file {i}/{len(parquet_files)}: {file_path.name}")
+    # First pass: calibrate threshold on first batch
+    logger.info("Calibrating threshold on first batch...")
+    first_batch = next(parquet_file.iter_batches(batch_size=batch_size))
+    df_calibration = first_batch.to_pandas()
 
-        try:
-            # Process this file individually
-            bars_df = prepare_dollar_bars(
-                parquet_path=file_path,
-                output_parquet=None,  # Avoid per-file saves
-                target_num_bars=target_num_bars,
-                threshold=threshold,
-                adaptive=adaptive,
-                threshold_bounds=threshold_bounds,
-                calibration_fraction=calibration_fraction,
-                include_incomplete_final=include_incomplete_final,
-            )
+    calibration_size = max(1, int(len(df_calibration) * calibration_fraction))
+    prices_cal = df_calibration["price"].values[:calibration_size].astype(np.float64)
+    volumes_cal = df_calibration["amount"].values[:calibration_size].astype(np.float64)
+    dollar_values_cal = prices_cal * volumes_cal
 
-            if not bars_df.empty:
-                # Sort chunk locally for better ordering
-                if "datetime_close" in bars_df.columns:
-                    bars_df = bars_df.sort_values("datetime_close").reset_index(drop=True)
+    target_bars_cal = max(1, calibration_size // target_ticks_per_bar)
+    initial_threshold = float(np.sum(dollar_values_cal)) / target_bars_cal
 
-                table = pa.Table.from_pandas(bars_df, preserve_index=False)
+    state.current_threshold = initial_threshold
+    state.ema_dollar = initial_threshold
 
-                if parquet_writer is None:
-                    parquet_writer = pq.ParquetWriter(output_parquet, table.schema)
+    # Compute bounds
+    if threshold_bounds is None:
+        min_threshold = 0.0
+        max_threshold = np.inf
+    else:
+        min_mult, max_mult = threshold_bounds
+        min_threshold = initial_threshold * min_mult
+        max_threshold = initial_threshold * max_mult
 
-                parquet_writer.write_table(table)
+    logger.info(f"  Calibrated threshold: ${initial_threshold:,.2f}")
+    logger.info(f"  Expected bars: ~{total_ticks // target_ticks_per_bar:,}")
 
-                total_bars += len(bars_df)
-                logger.info(
-                    "  Generated %d bars from %d ticks (running total: %d)",
-                    len(bars_df),
-                    len(pd.read_parquet(file_path)),
-                    total_bars,
-                )
+    # Clean up calibration data
+    del df_calibration, prices_cal, volumes_cal, dollar_values_cal
+    gc.collect()
+
+    # Process all batches
+    parquet_file = pq.ParquetFile(input_path)  # Re-open for fresh iteration
+
+    for batch_num, batch in enumerate(parquet_file.iter_batches(batch_size=batch_size), 1):
+        df_batch = batch.to_pandas()
+
+        # Ensure sorted by timestamp
+        if "timestamp" in df_batch.columns:
+            df_batch = df_batch.sort_values("timestamp").reset_index(drop=True)
+
+        # Extract arrays
+        if "timestamp" in df_batch.columns:
+            if pd.api.types.is_datetime64_any_dtype(df_batch["timestamp"]):
+                timestamps = (df_batch["timestamp"].astype("int64") // 10**6).values
             else:
-                logger.warning(f"  No bars generated from {file_path.name}")
+                timestamps = df_batch["timestamp"].values.astype(np.int64)
+        else:
+            raise ValueError("timestamp column required")
 
-        except Exception as e:
-            logger.error(f"  Failed to process {file_path.name}: {e}")
-            continue
+        prices = df_batch["price"].values.astype(np.float64)
+        volumes = df_batch["amount"].values.astype(np.float64)
 
-    if parquet_writer is None or total_bars == 0:
-        raise ValueError("No bars were generated from any input file")
-
-    parquet_writer.close()
-
-    logger.info(f"Streamed {total_bars} bars from {len(parquet_files)} files into {output_parquet}")
-
-    # Load once to enforce global sort/unique (bar dataset is much smaller than ticks)
-    consolidated_bars = pd.read_parquet(output_parquet)
-    if "datetime_close" in consolidated_bars.columns:
-        consolidated_bars = (
-            consolidated_bars
-            .sort_values("datetime_close")
-            .drop_duplicates(subset=["datetime_close"])
-            .reset_index(drop=True)
+        # Process batch
+        completed_bars, state = _process_batch_with_state(
+            timestamps, prices, volumes, state,
+            ema_alpha, min_threshold, max_threshold, adaptive
         )
-        consolidated_bars.to_parquet(output_parquet, index=False)
-        logger.info("Consolidated, sorted, and deduplicated bars saved to disk")
 
-    logger.info(f"Saved consolidated dollar bars to: {output_parquet}")
+        if completed_bars:
+            # Convert to DataFrame
+            df_bars = pd.DataFrame(completed_bars)
 
-    return consolidated_bars
+            # Add derived columns
+            df_bars["duration_sec"] = (df_bars["timestamp_close"] - df_bars["timestamp_open"]) / 1000.0
+            df_bars["datetime_open"] = pd.to_datetime(df_bars["timestamp_open"], unit="ms", utc=True)
+            df_bars["datetime_close"] = pd.to_datetime(df_bars["timestamp_close"], unit="ms", utc=True)
+
+            # Write to parquet
+            table = pa.Table.from_pandas(df_bars, preserve_index=False)
+
+            if parquet_writer is None:
+                parquet_writer = pq.ParquetWriter(output_path, table.schema, compression="snappy")
+
+            parquet_writer.write_table(table)
+            total_bars += len(df_bars)
+
+            del df_bars, completed_bars
+
+        # Clear memory
+        del df_batch, timestamps, prices, volumes, batch
+        gc.collect()
+
+        logger.info(
+            f"  Batch {batch_num}/{n_batches}: {total_bars:,} bars generated"
+        )
+
+    # Handle incomplete final bar
+    if include_incomplete_final and state.n_ticks > 0:
+        final_bar = {
+            "bar_id": state.bar_idx,
+            "timestamp_open": state.bar_ts_open,
+            "timestamp_close": state.bar_ts_open,  # Same as open for incomplete
+            "open": state.bar_open,
+            "high": state.bar_high,
+            "low": state.bar_low,
+            "close": state.bar_low,  # Use last known price
+            "volume": state.cum_volume,
+            "cum_dollar_value": state.cum_dollar,
+            "vwap": state.cum_pv / state.cum_volume if state.cum_volume > 0 else state.bar_open,
+            "n_ticks": state.n_ticks,
+            "threshold_used": state.current_threshold,
+            "duration_sec": 0.0,
+            "datetime_open": pd.to_datetime(state.bar_ts_open, unit="ms", utc=True),
+            "datetime_close": pd.to_datetime(state.bar_ts_open, unit="ms", utc=True),
+        }
+        df_final = pd.DataFrame([final_bar])
+        table = pa.Table.from_pandas(df_final, preserve_index=False)
+        if parquet_writer is not None:
+            parquet_writer.write_table(table)
+            total_bars += 1
+        del df_final
+
+    if parquet_writer is not None:
+        parquet_writer.close()
+
+    if total_bars == 0:
+        raise ValueError("No bars were generated")
+
+    logger.info("=" * 70)
+    logger.info(f"Pipeline complete: {total_bars:,} dollar bars generated")
+    logger.info(f"  Avg ticks/bar: {total_ticks / total_bars:.1f}")
+    logger.info(f"  Output: {output_path}")
+    logger.info("=" * 70)
+
+    # Return the result (read back from disk to avoid memory issues)
+    return pd.read_parquet(output_path)
 
 
 def run_dollar_bars_pipeline(
-    target_num_bars: int,
+    target_ticks_per_bar: int | None = None,
+    target_num_bars: int | None = None,
     input_parquet: Path | str | None = None,
     output_parquet: Path | str | None = None,
     threshold: float | None = None,
     adaptive: bool = False,
     threshold_bounds: tuple[float, float] | None = None,
     calibration_fraction: float = 1.0,
-    include_incomplete_final: bool = True,
+    include_incomplete_final: bool = False,
+    exclude_calibration_prefix: bool = False,
 ) -> pd.DataFrame:
     """Run the complete dollar bars pipeline.
 
     Args:
+        target_ticks_per_bar: Target ticks per bar (RECOMMENDED, De Prado method).
+        target_num_bars: Alternative: target number of bars (legacy).
         input_parquet: Path to input tick data. If None, uses default.
         output_parquet: Path to save bars parquet. If None, uses default.
-        target_num_bars: Target number of bars (De Prado method).
-        threshold: Fixed dollar threshold (overrides target_num_bars).
+        threshold: Fixed dollar threshold (overrides target params).
         adaptive: Use adaptive EWMA threshold with bounds.
         threshold_bounds: Optional (min_mult, max_mult) for adaptive bounds.
         calibration_fraction: Fraction of earliest ticks used to calibrate T_0.
-        include_incomplete_final: Keep trailing partial bar if True.
+        include_incomplete_final: Keep trailing partial bar if True. Default False.
+        exclude_calibration_prefix: Exclude bars from calibration period. Default False.
 
     Returns:
         DataFrame with generated dollar bars.
@@ -977,13 +1264,15 @@ def run_dollar_bars_pipeline(
 
     df_bars = prepare_dollar_bars(
         parquet_path=input_parquet,
-        output_parquet=output_parquet,
+        target_ticks_per_bar=target_ticks_per_bar,
         target_num_bars=target_num_bars,
+        output_parquet=output_parquet,
         threshold=threshold,
         adaptive=adaptive,
         threshold_bounds=threshold_bounds,
         calibration_fraction=calibration_fraction,
         include_incomplete_final=include_incomplete_final,
+        exclude_calibration_prefix=exclude_calibration_prefix,
     )
 
     logger.info("=" * 70)

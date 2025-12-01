@@ -13,6 +13,11 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from src.config_logging import setup_logging
+from src.constants import (
+    DOLLAR_BARS_CALIBRATION_FRACTION,
+    DOLLAR_BARS_INCLUDE_INCOMPLETE_FINAL,
+    DOLLAR_BARS_TARGET_TICKS_PER_BAR,
+)
 from src.data_preparation.preparation import (
     add_log_returns_to_bars_file,
     run_dollar_bars_pipeline,
@@ -32,8 +37,6 @@ def main() -> None:
     """Main CLI function for data preparation - generates dollar bars."""
     setup_logging()
 
-    calibration_fraction = 0.2  # use first 20% of ticks to calibrate T_0 (no lookahead)
-
     logger.info("Starting data preparation pipeline")
     logger.info("=" * 60)
     logger.info("DATA PREPARATION: Dollar Bars Generation")
@@ -46,31 +49,18 @@ def main() -> None:
             logger.error("Please run data_fetching and data_cleaning first")
             sys.exit(1)
 
-        # Determine processing approach based on input type
-        if DATASET_CLEAN_PARQUET.is_dir():
-            # Directory with partitioned files - use batch processing
-            logger.info("📁 Detected partitioned dataset - using memory-efficient batch processing")
-            logger.info("Generating dollar bars (De Prado fixed threshold, prefix calibration)...")
-            df_bars = run_dollar_bars_pipeline_batch(
-                input_dir=DATASET_CLEAN_PARQUET,
-                target_num_bars=500_000,
-                output_parquet=DOLLAR_BARS_PARQUET,
-                adaptive=False,
-                calibration_fraction=calibration_fraction,
-                include_incomplete_final=True,
-            )
-        else:
-            # Single file - use traditional processing
-            logger.info("📄 Detected single file - using traditional processing")
-            logger.info("Generating dollar bars (De Prado fixed threshold, prefix calibration)...")
-            df_bars = run_dollar_bars_pipeline(
-                target_num_bars=500_000,
-                input_parquet=DATASET_CLEAN_PARQUET,
-                output_parquet=DOLLAR_BARS_PARQUET,
-                adaptive=False,
-                calibration_fraction=calibration_fraction,
-                include_incomplete_final=True,
-            )
+        # Use memory-efficient batch processing (20M ticks per batch)
+        logger.info("Using memory-efficient batch processing (20M ticks/batch)")
+        logger.info("Generating dollar bars (De Prado methodology, %d ticks/bar)...", DOLLAR_BARS_TARGET_TICKS_PER_BAR)
+        df_bars = run_dollar_bars_pipeline_batch(
+            input_parquet=DATASET_CLEAN_PARQUET,
+            target_ticks_per_bar=DOLLAR_BARS_TARGET_TICKS_PER_BAR,
+            output_parquet=DOLLAR_BARS_PARQUET,
+            batch_size=20_000_000,
+            adaptive=False,
+            calibration_fraction=DOLLAR_BARS_CALIBRATION_FRACTION,
+            include_incomplete_final=DOLLAR_BARS_INCLUDE_INCOMPLETE_FINAL,
+        )
 
         logger.info("✓ Dollar bars generation completed")
         logger.info("  • Bars generated: %d", len(df_bars))

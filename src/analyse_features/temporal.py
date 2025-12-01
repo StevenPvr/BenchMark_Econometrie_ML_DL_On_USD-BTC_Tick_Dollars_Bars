@@ -47,7 +47,7 @@ from typing import Any, cast  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # type: ignore[import-untyped]  # noqa: E402
-from statsmodels.tsa.stattools import acf, pacf  # type: ignore[import-untyped]  # noqa: E402
+from statsmodels.tsa.stattools import acf, pacf, grangercausalitytests  # type: ignore[import-untyped]  # noqa: E402
 
 # Suppress statsmodels warnings for singular matrices and division by zero
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="statsmodels")
@@ -339,13 +339,23 @@ def compute_temporal_stability(
         mean_cv = np.nanstd(means) / (np.nanmean(np.abs(means)) + 1e-10)
         std_cv = np.nanstd(stds) / (np.nanmean(stds) + 1e-10)
 
+        # Compute mean_trend safely handling NaN values
+        means_arr = np.array(means)
+        valid_mask = ~np.isnan(means_arr)
+        if valid_mask.sum() >= 2:
+            x_valid = np.arange(len(means_arr))[valid_mask]
+            y_valid = means_arr[valid_mask]
+            mean_trend = np.polyfit(x_valid, y_valid, 1)[0]
+        else:
+            mean_trend = np.nan
+
         results.append({
             "feature": col,
             "mean_stability": 1.0 / (1.0 + mean_cv),
             "std_stability": 1.0 / (1.0 + std_cv),
             "mean_range": np.nanmax(means) - np.nanmin(means),
             "std_range": np.nanmax(stds) - np.nanmin(stds),
-            "mean_trend": np.polyfit(range(len(means)), means, 1)[0] if not np.any(np.isnan(means)) else np.nan,
+            "mean_trend": mean_trend,
         })
 
     result_df = pd.DataFrame(results)
@@ -462,6 +472,115 @@ def summarize_rolling_correlations(
         results.append(row)
 
     return pd.DataFrame(results)
+
+
+def compute_granger_causality(
+    df: pd.DataFrame,
+    feature_columns: list[str],
+    target_column: str = TARGET_COLUMN,
+    max_lag: int = 5,
+) -> pd.DataFrame:
+    """Test Granger causality from features to target.
+
+    Granger causality tests whether past values of X help predict Y
+    beyond what past values of Y alone can predict.
+
+    Note: Granger causality is correlation-based and does not imply
+    true causation. Both X and Y should be stationary for valid results.
+
+    Args:
+        df: DataFrame with features and target.
+        feature_columns: Features to test.
+        target_column: Target column name.
+        max_lag: Maximum lag to test (tests lags 1 to max_lag).
+
+    Returns:
+        DataFrame with Granger causality results for each feature.
+    """
+    logger.info("Computing Granger causality tests (max_lag=%d)...", max_lag)
+
+    if target_column not in df.columns:
+        raise ValueError(f"Target column '{target_column}' not found")
+
+    y = df[target_column].values
+    results = []
+
+    for col in feature_columns:
+        x = df[col].values
+
+        # Align data removing NaN from both
+        mask = ~(np.isnan(x) | np.isnan(y))
+        x_clean = x[mask]
+        y_clean = y[mask]
+
+        # Need enough data points for reliable test
+        if len(x_clean) < max_lag * 20:
+            results.append({
+                "feature": col,
+                "granger_pvalue": np.nan,
+                "best_lag": np.nan,
+                "granger_significant": None,
+            })
+            continue
+
+        # grangercausalitytests expects [y, x] format (testing if x causes y)
+        data_matrix = np.column_stack([y_clean, x_clean])
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                gc_result = grangercausalitytests(data_matrix, maxlag=max_lag, verbose=False)
+
+            # Extract F-test p-values for each lag
+            pvalues = []
+            for lag in range(1, max_lag + 1):
+                if lag in gc_result:
+                    # gc_result[lag] is a tuple: (test_results_dict, ols_results_tuple)
+                    test_dict = gc_result[lag][0]
+                    if "ssr_ftest" in test_dict:
+                        pvalues.append(test_dict["ssr_ftest"][1])  # p-value
+                    else:
+                        pvalues.append(np.nan)
+                else:
+                    pvalues.append(np.nan)
+
+            if pvalues and not all(np.isnan(pvalues)):
+                # Find best lag (lowest p-value)
+                valid_pvalues = [(i + 1, p) for i, p in enumerate(pvalues) if not np.isnan(p)]
+                if valid_pvalues:
+                    best_lag, best_pvalue = min(valid_pvalues, key=lambda x: x[1])
+                else:
+                    best_lag, best_pvalue = np.nan, np.nan
+            else:
+                best_lag, best_pvalue = np.nan, np.nan
+
+            results.append({
+                "feature": col,
+                "granger_pvalue": float(best_pvalue) if not np.isnan(best_pvalue) else np.nan,
+                "best_lag": int(best_lag) if not np.isnan(best_lag) else np.nan,
+                "granger_significant": best_pvalue < 0.05 if not np.isnan(best_pvalue) else None,
+            })
+
+        except Exception as e:
+            logger.debug("Granger test failed for %s: %s", col, e)
+            results.append({
+                "feature": col,
+                "granger_pvalue": np.nan,
+                "best_lag": np.nan,
+                "granger_significant": None,
+            })
+
+    result_df = pd.DataFrame(results)
+
+    # Sort by p-value (most significant first)
+    result_df = result_df.sort_values("granger_pvalue", ascending=True).reset_index(drop=True)
+
+    # Log summary
+    if "granger_significant" in result_df.columns:
+        n_significant = result_df["granger_significant"].sum()
+        logger.info("Features with significant Granger causality: %d", n_significant)
+
+    return result_df
 
 
 def run_temporal_analysis(

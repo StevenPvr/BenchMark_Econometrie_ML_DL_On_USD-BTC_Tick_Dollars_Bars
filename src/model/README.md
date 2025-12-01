@@ -50,23 +50,27 @@ class BaseModel(ABC):
 ## Categories de Modeles
 
 ### Baselines
+
 - **Persistence** : Predit la derniere valeur observee
 - **AR(1)** : Modele autoregressif d'ordre 1
 - **Random** : Predictions aleatoires (lower bound)
 
 ### Modeles Econometriques (Lineaires)
+
 - **Ridge** : Regression avec regularisation L2
 - **Lasso** : Regression avec regularisation L1
 - **ElasticNet** : Combinaison L1 + L2
 - **Logistic** : Classification logistique
 
 ### Machine Learning (Tree-based)
+
 - **Random Forest** : Ensemble de decision trees
 - **XGBoost** : Gradient boosting optimise
 - **LightGBM** : Gradient boosting rapide
 - **CatBoost** : Gradient boosting avec gestion des categoriques
 
 ### Deep Learning
+
 - **LSTM** : Long Short-Term Memory (PyTorch)
   - Architecture legere adaptee aux series temporelles
   - Dropout pour regularisation
@@ -108,14 +112,17 @@ Evalue tous les baselines sur les donnees de test.
 ## Notes d'Implementation
 
 ### Tree-based (XGBoost, LightGBM, CatBoost)
+
 - Ne necessitent PAS de normalisation des features
 - Utilisent `dataset_features.parquet` directement
 
 ### Lineaires (Ridge, Lasso)
+
 - Necessitent normalisation z-score
 - Utilisent `dataset_features_linear.parquet`
 
 ### LSTM
+
 - Necessite normalisation min-max [-1, 1]
 - Utilise `dataset_features_lstm.parquet`
 - Sequences temporelles (lookback window)
@@ -123,6 +130,7 @@ Evalue tous les baselines sur les donnees de test.
 ## Serialisation
 
 Les modeles sont sauvegardes avec `joblib` pour :
+
 - Persistance des poids
 - Reproductibilite
 - Deploiement

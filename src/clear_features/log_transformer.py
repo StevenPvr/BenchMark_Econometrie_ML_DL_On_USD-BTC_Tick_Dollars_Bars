@@ -6,9 +6,9 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-import joblib
+import joblib 
 import numpy as np
 import pandas as pd
 
@@ -77,7 +77,11 @@ class LogTransformer:
         if self._stationarity_data is None:
             self.load_stationarity_results()
 
-        non_stationary_conclusions = self.config["non_stationary_conclusions"]
+        if self._stationarity_data is None:
+            logger.error("Failed to load stationarity data")
+            self._stationarity_data = {"all_results": []}
+
+        non_stationary_conclusions = cast(list[str], self.config["non_stationary_conclusions"])
 
         # Get features from stationarity results
         all_results = self._stationarity_data.get("all_results", [])

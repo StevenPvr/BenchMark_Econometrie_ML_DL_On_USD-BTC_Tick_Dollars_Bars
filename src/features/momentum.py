@@ -68,7 +68,8 @@ def _rolling_sum(
             window_sum += returns[j]
             valid_count += 1
 
-    if valid_count >= window // 2:
+    # Require full window for consistency with other feature modules
+    if valid_count >= window:
         result[window - 1] = window_sum
 
     # Rolling forward

@@ -24,9 +24,9 @@ import pandas as pd  # type: ignore[import-untyped]
 from src.constants import DEFAULT_RANDOM_STATE
 from src.model.base import BaseModel
 from src.path import (
-    DATASET_FEATURES_PARQUET,
-    DATASET_FEATURES_LINEAR_PARQUET,
-    DATASET_FEATURES_LSTM_PARQUET,
+    DATASET_FEATURES_FINAL_PARQUET,
+    DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+    DATASET_FEATURES_LSTM_FINAL_PARQUET,
     DOLLAR_BARS_PARQUET,
 )
 
@@ -43,50 +43,53 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": "src.model.lightgbm_model.LightGBMModel",
         "dataset": "tree",
         "search_space": {
-            "n_estimators": ("categorical", [100, 200, 300]),
-            "max_depth": ("categorical", [4, 6, 8]),
-            "num_leaves": ("categorical", [31, 63, 95]),
-            "learning_rate": ("categorical", [0.02, 0.05, 0.1]),
-            "subsample": ("categorical", [0.7, 0.85, 1.0]),
-            "colsample_bytree": ("categorical", [0.7, 0.9]),
-            "reg_alpha": ("categorical", [1e-3, 1e-2, 0.1, 1.0]),
-            "reg_lambda": ("categorical", [1e-3, 1e-2, 0.1, 1.0]),
+            "n_estimators": ("categorical", [200, 400, 800, 1200]),
+            "max_depth": ("categorical", [3, 5, 7, 9]),
+            "num_leaves": ("categorical", [31, 63, 127, 255]),
+            "learning_rate": ("categorical", [0.01, 0.02, 0.05, 0.1]),
+            "subsample": ("categorical", [0.6, 0.75, 0.9, 1.0]),
+            "subsample_freq": ("categorical", [0, 1]),
+            "colsample_bytree": ("categorical", [0.6, 0.75, 0.9, 1.0]),
+            "min_child_samples": ("categorical", [5, 10, 20, 50]),
+            "min_split_gain": ("categorical", [0.0, 0.05, 0.1, 0.2]),
+            "reg_alpha": ("categorical", [1e-4, 1e-3, 1e-2, 0.1, 1.0]),
+            "reg_lambda": ("categorical", [1e-4, 1e-3, 1e-2, 0.1, 1.0]),
         },
     },
     "xgboost": {
         "class": "src.model.xgboost_model.XGBoostModel",
         "dataset": "tree",
         "search_space": {
-            "n_estimators": ("categorical", [100, 200, 300]),
-            "max_depth": ("categorical", [4, 6, 8]),
-            "learning_rate": ("categorical", [0.02, 0.05, 0.1]),
-            "subsample": ("categorical", [0.7, 0.85, 1.0]),
-            "colsample_bytree": ("categorical", [0.7, 0.9]),
-            "reg_alpha": ("categorical", [1e-3, 1e-2, 0.1, 1.0]),
-            "reg_lambda": ("categorical", [1e-3, 1e-2, 0.1, 1.0]),
+            "n_estimators": ("categorical", [200, 400, 800, 1200]),
+            "max_depth": ("categorical", [3, 5, 7, 9]),
+            "learning_rate": ("categorical", [0.01, 0.02, 0.05, 0.1]),
+            "subsample": ("categorical", [0.6, 0.75, 0.9, 1.0]),
+            "colsample_bytree": ("categorical", [0.6, 0.8, 1.0]),
+            "reg_alpha": ("categorical", [0.0, 1e-3, 1e-2, 0.1, 1.0]),
+            "reg_lambda": ("categorical", [0.0, 1e-3, 1e-2, 0.1, 1.0]),
         },
     },
     "catboost": {
         "class": "src.model.catboost_model.CatBoostModel",
         "dataset": "tree",
         "search_space": {
-            "iterations": ("categorical", [150, 300]),
-            "depth": ("categorical", [4, 6, 8]),
+            "iterations": ("categorical", [200, 400, 800]),
+            "depth": ("categorical", [4, 6, 8, 10]),
             "learning_rate": ("categorical", [0.02, 0.05, 0.1]),
-            "l2_leaf_reg": ("categorical", [0.5, 1.0, 3.0]),
+            "l2_leaf_reg": ("categorical", [0.5, 1.0, 3.0, 5.0]),
             "random_strength": ("categorical", [0.5, 1.0, 1.5]),
-            "bagging_temperature": ("categorical", [0.0, 0.5, 1.0]),
+            "bagging_temperature": ("categorical", [0.0, 0.5, 1.0, 3.0]),
         },
     },
     "random_forest": {
         "class": "src.model.random_forest_model.RandomForestModel",
         "dataset": "tree",
         "search_space": {
-            "n_estimators": ("categorical", [100, 200, 400]),
-            "max_depth": ("categorical", [5, 8, 12]),
-            "min_samples_split": ("categorical", [2, 5, 10]),
-            "min_samples_leaf": ("categorical", [1, 2, 4]),
-            "max_features": ("categorical", ["sqrt", "log2"]),
+            "n_estimators": ("categorical", [200, 400, 800, 1200]),
+            "max_depth": ("categorical", [5, 8, 12, 16]),
+            "min_samples_split": ("categorical", [2, 4, 6, 10]),
+            "min_samples_leaf": ("categorical", [1, 2, 4, 6]),
+            "max_features": ("categorical", ["sqrt", "log2", 0.7]),
         },
     },
     # Econometric - Linear
@@ -94,14 +97,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": "src.model.ridge_classifier.RidgeClassifierModel",
         "dataset": "linear",
         "search_space": {
-            "alpha": ("categorical", [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0, 1e3]),
-        },
-    },
-    "lasso": {
-        "class": "src.model.lasso_classifier.LassoClassifierModel",
-        "dataset": "linear",
-        "search_space": {
-            "C": ("categorical", [1e-3, 1e-2, 1e-1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0]),
+            "alpha": ("categorical", [1e-4, 1e-3, 1e-2, 1e-1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 1e3]),
         },
     },
     "logistic": {
@@ -110,17 +106,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "search_space": {
             # C: inverse regularization (higher = less regularization)
             # For financial data: test range from strong reg (1e-3) to weak (100.0)
-            "C": ("categorical", [1e-3, 1e-2, 1e-1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0]),
-        },
-    },
-    "elasticnet": {
-        "class": "src.model.elasticnet_classifier.ElasticNetClassifierModel",
-        "dataset": "linear",
-        "search_space": {
-            # C: inverse regularization strength (1e-3 = strong reg, 100.0 = weak reg)
-            "C": ("categorical", [1e-3, 1e-2, 1e-1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0]),
-            # l1_ratio: 0=pure L2 (Ridge), 1=pure L1 (Lasso), 0.5=balanced
-            "l1_ratio": ("categorical", [0.1, 0.3, 0.5, 0.7, 0.9]),
+            "C": ("categorical", [1e-3, 1e-2, 1e-1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 250.0]),
         },
     },
     # Deep Learning
@@ -128,23 +114,23 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": "src.model.lstm_model.LSTMModel",
         "dataset": "lstm",
         "search_space": {
-            "hidden_size": ("categorical", [32, 64, 96]),
-            "num_layers": ("categorical", [1, 2]),
-            "dropout": ("categorical", [0.0, 0.2]),
-            "learning_rate": ("categorical", [1e-3, 3e-3, 1e-2]),
-            "batch_size": ("categorical", [32, 64]),
-            "sequence_length": ("categorical", [10, 20, 30]),
+            "hidden_size": ("categorical", [32, 64, 96, 128]),
+            "num_layers": ("categorical", [1, 2, 3]),
+            "dropout": ("categorical", [0.0, 0.1, 0.2, 0.3]),
+            "learning_rate": ("categorical", [1e-4, 5e-4, 1e-3, 3e-3, 1e-2]),
+            "batch_size": ("categorical", [32, 64, 96]),
+            "sequence_length": ("categorical", [10, 20, 30, 40]),
         },
     },
 }
 
 # Triple barrier search space for primary model
-# Adapted for dollar bars (small log returns ~0.01% to 0.1%)
 TRIPLE_BARRIER_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
-    "pt_mult": ("categorical", [0.5, 1.0, 1.5, 2.0, 3.0]),
-    "sl_mult": ("categorical", [0.5, 1.0, 1.5, 2.0, 3.0]),
-    "min_return": ("categorical", [0.0, 0.00005, 0.0001, 0.0002]),  # 0 to 0.02%
-    "max_holding": ("categorical", [10, 20, 50, 100]),
+    # Narrowed ranges to favor balanced label proportions (-1/0/1)
+    "pt_mult": ("categorical", [0.8, 1.0, 1.5, 2.0]),
+    "sl_mult": ("categorical", [0.8, 1.0, 1.5, 2.0]),
+    "min_return": ("categorical", [0.00005, 0.0001, 0.0002, 0.0003]),
+    "max_holding": ("categorical", [20, 50, 100]),
 }
 
 
@@ -165,6 +151,9 @@ class OptimizationConfig:
     data_fraction: float = 0.5
     random_state: int = DEFAULT_RANDOM_STATE
     timeout: int | None = None
+    parallelize_labeling: bool = True
+    parallel_min_events: int = 10_000
+    n_jobs: int | None = None
 
 
 @dataclass
@@ -226,9 +215,9 @@ def get_dataset_for_model(model_name: str) -> pd.DataFrame:
     dataset_type = MODEL_REGISTRY[model_name]["dataset"]
 
     path_map = {
-        "tree": DATASET_FEATURES_PARQUET,
-        "linear": DATASET_FEATURES_LINEAR_PARQUET,
-        "lstm": DATASET_FEATURES_LSTM_PARQUET,
+        "tree": DATASET_FEATURES_FINAL_PARQUET,
+        "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+        "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
     }
 
     path = path_map.get(dataset_type)
@@ -457,7 +446,12 @@ def set_vertical_barriers(
     pd.Series
         Series with t1 values for each event.
     """
-    t1_series = pd.Series(index=t_events, dtype=object)
+    # Initialize with correct dtype to avoid FutureWarning
+    # close_idx may be timezone-aware (datetime64[ns, UTC])
+    if isinstance(close_idx, pd.DatetimeIndex) and close_idx.tz is not None:
+        t1_series = pd.Series(pd.NaT, index=t_events, dtype=close_idx.dtype)
+    else:
+        t1_series = pd.Series(pd.NaT, index=t_events, dtype="datetime64[ns]")
 
     for loc in t_events:
         try:
@@ -465,9 +459,7 @@ def set_vertical_barriers(
             if isinstance(t0_pos, int):
                 t1_pos = min(t0_pos + max_holding, len(close_idx) - 1)
                 t1_series.loc[loc] = close_idx[t1_pos]
-            else:
-                t1_series.loc[loc] = pd.NaT
         except (KeyError, TypeError):
-            t1_series.loc[loc] = pd.NaT
+            pass  # Already initialized with NaT
 
     return t1_series

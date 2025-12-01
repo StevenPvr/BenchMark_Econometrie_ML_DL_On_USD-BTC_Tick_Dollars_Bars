@@ -15,25 +15,30 @@ Pipeline de nettoyage des donnees tick pour les trades crypto (sortie ccxt).
 Le module implemente 5 methodes robustes adaptees aux marches financiers :
 
 ### 1. MAD (Median Absolute Deviation)
+
 - Robuste aux distributions a queues epaisses (fat-tailed)
 - Facteur de scaling 1.4826 pour compatibilite avec l'ecart-type
 - Reference : Huber, P.J. (1981). Robust Statistics
 
 ### 2. Rolling Z-score
+
 - S'adapte aux regimes de volatilite locaux
 - Utilise median et MAD roulants pour la robustesse
 - Tolere des mouvements plus grands en haute volatilite
 
 ### 3. Detection Flash Crash/Spike
+
 - Identifie les anomalies de prix transitoires
 - Criteres : mouvement > 15% avec reversion rapide
 - Filtre les erreurs de donnees et gaps de liquidite
 
 ### 4. Anomalies de Volume
+
 - Filtre les "dust trades" (volume minimum)
 - Detection MAD pour volumes extremes (manipulation)
 
 ### 5. Filtrage Dollar Value
+
 - Combine prix * volume pour detecter les anomalies
 - Identifie : fat-finger errors, wash trading, glitches
 
@@ -52,6 +57,9 @@ Le module implemente 5 methodes robustes adaptees aux marches financiers :
 python -m src.data_cleaning.main
 ```
 
+Parametres utiles (via `clean_ticks_data`) :
+- Pipeline minimaliste par defaut : enlève seulement la poussière et applique des seuils MAD prix élevés. Pas de rolling Z-score ni filtrage dollar-value pour limiter les suppressions excessives.
+
 ## Configuration
 
 Seuils definis dans `src/constants.py` :
@@ -63,7 +71,10 @@ Seuils definis dans `src/constants.py` :
 
 ## Sortie
 
-- Entree : `DATASET_RAW_PARQUET` (donnees brutes)
+- Entree : partitions `part-*.parquet` dans `data/raw/copie_raw` (consolide vers `DATASET_RAW_PARQUET`)
 - Sortie : `DATASET_CLEAN_PARQUET` (donnees nettoyees)
+
+Le nettoyage parcourt les partitions une par une (streaming Parquet writer) avant fusion
+afin d'eviter de traiter un bloc unique de plusieurs dizaines de millions de ticks.
 
 Un rapport `OutlierReport` est genere avec les statistiques detaillees.

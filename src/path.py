@@ -25,12 +25,15 @@ ARTIFACTS_DIR = RESULTS_DIR
 
 # BTC/USD tick data pipeline directories
 RAW_DATA_DIR = DATA_DIR / "raw"
+RAW_PARTITIONS_DIR = RAW_DATA_DIR / "copie_raw"
 CLEANED_DATA_DIR = DATA_DIR / "cleaned"
 PREPARED_DATA_DIR = DATA_DIR / "prepared"
 
 # Raw BTC/USD tick data files
 DATASET_RAW_CSV = RAW_DATA_DIR / "dataset_raw.csv"
-DATASET_RAW_PARQUET = RAW_DATA_DIR / "dataset_raw.parquet"
+# Note: _load_raw_trades() reads partitioned parquet parts from RAW_PARTITIONS_DIR
+# and consolidates them into dataset_raw_consolidated.parquet
+DATASET_RAW_PARQUET = RAW_DATA_DIR / "dataset_raw_consolidated.parquet"
 
 # Cleaned BTC/USD tick data files
 DATASET_CLEAN_CSV = CLEANED_DATA_DIR / "dataset_clean.csv"
@@ -67,6 +70,17 @@ DATASET_FEATURES_LSTM_TRAIN_PARQUET = FEATURES_DIR / "dataset_features_lstm_trai
 DATASET_FEATURES_LSTM_TEST_PARQUET = FEATURES_DIR / "dataset_features_lstm_test.parquet"
 DATASET_FEATURES_LSTM_TRAIN_CSV = FEATURES_DIR / "dataset_features_lstm_train.csv"
 DATASET_FEATURES_LSTM_TEST_CSV = FEATURES_DIR / "dataset_features_lstm_test.csv"
+
+# Clear features output (after PCA reduction in clear_features/)
+DATASET_FEATURES_CLEAR_PARQUET = FEATURES_DIR / "dataset_features_clear.parquet"
+DATASET_FEATURES_LINEAR_CLEAR_PARQUET = FEATURES_DIR / "dataset_features_linear_clear.parquet"
+DATASET_FEATURES_LSTM_CLEAR_PARQUET = FEATURES_DIR / "dataset_features_lstm_clear.parquet"
+
+# Final features output (after analyse_features/ - ready for labelling)
+DATASET_FEATURES_FINAL_PARQUET = FEATURES_DIR / "dataset_features_final.parquet"
+DATASET_FEATURES_LINEAR_FINAL_PARQUET = FEATURES_DIR / "dataset_features_linear_final.parquet"
+DATASET_FEATURES_LSTM_FINAL_PARQUET = FEATURES_DIR / "dataset_features_lstm_final.parquet"
+
 # Scalers (fit on train only)
 ZSCORE_SCALER_FILE = SCALERS_DIR / "zscore_scaler.joblib"
 MINMAX_SCALER_FILE = SCALERS_DIR / "minmax_scaler.joblib"

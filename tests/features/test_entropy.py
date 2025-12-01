@@ -180,8 +180,10 @@ def test_compute_sampen_single_edge_cases():
     # Normalize manually approx
     data = (data - np.mean(data)) / np.std(data)
 
-    val = _compute_sampen_single(data, m=2, r=0.01)
-    assert val == 5.0 # Cap
+    # New signature includes max_entropy parameter (adaptive based on window size)
+    max_entropy = np.log(len(data))  # Adaptive max = log(n)
+    val = _compute_sampen_single(data, m=2, r=0.01, max_entropy=max_entropy)
+    assert val == max_entropy  # Adaptive cap based on window size
 
     # Case where B>0 but A=0
     # Matches of length m exist, but not m+1
@@ -193,6 +195,7 @@ def test_compute_sampen_single_edge_cases():
     # normalize
     data = (data - np.mean(data)) / np.std(data)
 
-    val = _compute_sampen_single(data, m=2, r=0.1)
-    # Should be high (capped)
-    assert val == 5.0
+    max_entropy = np.log(len(data))
+    val = _compute_sampen_single(data, m=2, r=0.1, max_entropy=max_entropy)
+    # Should be high (capped at adaptive max)
+    assert val == max_entropy

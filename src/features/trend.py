@@ -6,7 +6,8 @@ This module computes trend-based and mean reversion features:
    MA_t^{(k)} = (1/k) * Σ_{j=1}^{k} P_{t-j}
 
 2. Price z-score (deviation from MA):
-   z_t^{price,(k)} = (P_t - MA_t^{(k)}) / std(P_{t-k:t})
+   z_t^{price,(k)} = (P_t - MA_{t-1}^{(k)}) / std(P_{t-k-1:t-1})
+   NOTE: Uses only past prices to avoid data leakage
 
 3. Cross MA (trend regime):
    sign(MA^{(k1)}_t - MA^{(k2)}_t)
@@ -148,7 +149,10 @@ def _compute_zscore(
 ) -> NDArray[np.float64]:
     """Compute price z-score relative to MA using pandas (numerically stable).
 
-    z_t = (P_t - MA_t) / std(P_{t-k:t})
+    z_t = (P_t - MA_{t-1}) / std(P_{t-k-1:t-1})
+
+    IMPORTANT: Uses shifted rolling window to avoid data leakage.
+    The mean and std are computed from past prices only (not including P_t).
 
     Args:
         prices: Array of prices.
@@ -158,12 +162,15 @@ def _compute_zscore(
         Array of z-scores.
     """
     series = pd.Series(prices)
-    rolling = series.rolling(window=window, min_periods=window)
+    # Shift by 1 to use only past prices for mean/std calculation (prevent leakage)
+    shifted = series.shift(1)
+    rolling = shifted.rolling(window=window, min_periods=window)
 
     mean = rolling.mean()
     std = rolling.std()
 
-    # Z-score: 0 when std is ~0 (price constant = no deviation)
+    # Z-score: deviation of current price from past mean, normalized by past std
+    # Returns 0 when std is ~0 (price constant = no deviation)
     zscore = np.where(
         std > 1e-10,
         (series - mean) / std,

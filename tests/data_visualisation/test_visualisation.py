@@ -13,16 +13,14 @@ from src.data_visualisation.visualisation import (
     plot_stationarity,
     plot_log_returns_time_series,
     compute_autocorrelation,
+    compute_autocorrelation_squared,
+    run_ljung_box_test,
+    run_normality_tests,
     mann_kendall_test,
     compute_trend_statistics,
     plot_trend_extraction,
     plot_trend_analysis,
     run_full_analysis,
-    create_figure_canvas,
-    save_canvas,
-    add_zero_line,
-    prepare_temporal_axis,
-    plot_histogram_with_normal_overlay,
 )
 
 # Mocking constants just in case they are imported and cause issues,
@@ -154,6 +152,91 @@ def test_compute_autocorrelation(mock_pacf, mock_acf, mock_plt, mock_log_returns
     assert mock_pacf.called
     assert (tmp_path / "log_returns_acf.png").exists() or mock_fig.savefig.called
 
+
+@patch("src.data_visualisation.visualisation.plt")
+@patch("statsmodels.graphics.tsaplots.plot_acf")
+@patch("statsmodels.graphics.tsaplots.plot_pacf")
+def test_compute_autocorrelation_squared(mock_pacf, mock_acf, mock_plt, mock_log_returns, tmp_path):
+    """Test autocorrelation of squared log returns (volatility clustering)."""
+    mock_fig = MagicMock()
+    mock_plt.subplots.return_value = (mock_fig, [MagicMock(), MagicMock()])
+
+    fig = compute_autocorrelation_squared(mock_log_returns, output_dir=tmp_path)
+
+    assert fig == mock_fig
+    assert mock_acf.called
+    assert mock_pacf.called
+    assert (tmp_path / "log_returns_squared_acf.png").exists() or mock_fig.savefig.called
+
+
+def test_run_ljung_box_test(mock_log_returns, tmp_path):
+    """Test Ljung-Box autocorrelation test."""
+    results = run_ljung_box_test(mock_log_returns, output_dir=tmp_path)
+
+    assert "test_name" in results
+    assert results["test_name"] == "Ljung-Box"
+    assert "lags_tested" in results
+    assert "hypothesis" in results
+
+    # Check that we have results for default lags
+    assert "10" in results["lags_tested"] or "error" in results
+    assert "20" in results["lags_tested"] or "error" in results
+    assert "40" in results["lags_tested"] or "error" in results
+
+    # Check JSON was saved
+    assert (tmp_path / "ljung_box_test.json").exists()
+
+
+def test_run_ljung_box_test_custom_lags(mock_log_returns, tmp_path):
+    """Test Ljung-Box test with custom lags."""
+    results = run_ljung_box_test(mock_log_returns, lags=[5, 15], output_dir=tmp_path)
+
+    assert "lags_tested" in results
+    # Should have results for custom lags
+    assert "5" in results["lags_tested"] or "error" in results
+    assert "15" in results["lags_tested"] or "error" in results
+
+
+def test_run_normality_tests(mock_log_returns, tmp_path):
+    """Test normality tests (Jarque-Bera and Shapiro-Wilk)."""
+    results = run_normality_tests(mock_log_returns, output_dir=tmp_path)
+
+    assert "n_observations" in results
+    assert "Jarque_Bera" in results
+    assert "Shapiro_Wilk" in results
+
+    # Check Jarque-Bera results
+    jb = results["Jarque_Bera"]
+    if "error" not in jb:
+        assert "statistic" in jb
+        assert "p_value" in jb
+        assert "conclusion" in jb
+        assert jb["conclusion"] in ["Non normale", "Compatible avec normale"]
+
+    # Check Shapiro-Wilk results
+    sw = results["Shapiro_Wilk"]
+    if "error" not in sw:
+        assert "statistic" in sw
+        assert "p_value" in sw
+        assert "conclusion" in sw
+
+    # Check JSON was saved
+    assert (tmp_path / "normality_tests.json").exists()
+
+
+def test_run_normality_tests_large_sample(tmp_path):
+    """Test normality tests with large sample (triggers Shapiro-Wilk subsampling)."""
+    np.random.seed(42)
+    large_series = pd.Series(np.random.normal(0, 1, 6000))
+
+    results = run_normality_tests(large_series, output_dir=tmp_path)
+
+    # Shapiro-Wilk should have a note about subsampling
+    sw = results["Shapiro_Wilk"]
+    if "error" not in sw:
+        assert "note" in sw or len(large_series) <= 5000
+
+
 def test_mann_kendall_test():
     """Test Mann-Kendall test logic."""
     # Monotonically increasing
@@ -230,10 +313,13 @@ def test_plot_trend_analysis(mock_plt, mock_dollar_bars_df, tmp_path):
 @patch("src.data_visualisation.visualisation.load_dollar_bars")
 @patch("src.data_visualisation.visualisation.plt")
 @patch("src.data_visualisation.visualisation.plot_log_returns_distribution")
+@patch("src.data_visualisation.visualisation.run_normality_tests")
 @patch("src.data_visualisation.visualisation.run_stationarity_tests")
 @patch("src.data_visualisation.visualisation.plot_stationarity")
 @patch("src.data_visualisation.visualisation.plot_log_returns_time_series")
 @patch("src.data_visualisation.visualisation.compute_autocorrelation")
+@patch("src.data_visualisation.visualisation.compute_autocorrelation_squared")
+@patch("src.data_visualisation.visualisation.run_ljung_box_test")
 @patch("src.data_visualisation.visualisation.compute_trend_statistics")
 @patch("src.data_visualisation.visualisation.plot_trend_analysis")
 @patch("src.data_visualisation.visualisation.plot_trend_extraction")
@@ -241,10 +327,13 @@ def test_run_full_analysis(
     mock_plot_trend_extraction,
     mock_plot_trend_analysis,
     mock_compute_trend_statistics,
+    mock_run_ljung_box,
+    mock_compute_autocorrelation_squared,
     mock_compute_autocorrelation,
     mock_plot_ts,
     mock_plot_stationarity,
     mock_run_stationarity,
+    mock_run_normality,
     mock_plot_dist,
     mock_plt,
     mock_load,
@@ -257,6 +346,8 @@ def test_run_full_analysis(
     # Setup mocks to return something valid
     mock_compute_trend_statistics.return_value = {"Linear_Regression": {}, "Mann_Kendall": {}}
     mock_run_stationarity.return_value = {"ADF": {}, "KPSS": {}}
+    mock_run_normality.return_value = {"Jarque_Bera": {}, "Shapiro_Wilk": {}}
+    mock_run_ljung_box.return_value = {"lags_tested": {}}
 
     results = run_full_analysis(
         parquet_path=Path("dummy"),
@@ -268,62 +359,54 @@ def test_run_full_analysis(
     assert results["n_bars"] == len(mock_dollar_bars_df)
     assert mock_load.called
     assert mock_plot_dist.called
+    assert mock_run_normality.called
     assert mock_run_stationarity.called
     assert mock_plot_stationarity.called
     assert mock_plot_ts.called
     assert mock_compute_autocorrelation.called
+    assert mock_compute_autocorrelation_squared.called
+    assert mock_run_ljung_box.called
     assert mock_compute_trend_statistics.called
     assert mock_plot_trend_analysis.called
     assert mock_plot_trend_extraction.called
 
-    # Test sampling
-    run_full_analysis(
-        parquet_path=Path("dummy"),
-        output_dir=tmp_path,
-        show_plots=False,
-        sample_fraction=0.5
-    )
-    # Check that sample was called on df (indirectly by checking n_bars in result if we could,
-    # but since we mocked load, the dataframe returned is constant, but the function should handle it).
-    # Actually, run_full_analysis splits the DF.
 
-    # If we want to verify sampling actually happened, we'd need to inspect the dataframe passed to functions.
-    # But for now, ensuring no crash is good enough.
+def test_run_full_analysis_systematic_sampling(mock_dollar_bars_df, tmp_path):
+    """Test that sampling is systematic (not random) and preserves temporal order."""
+    # Create a dataframe with sequential values to verify ordering
+    dates = pd.date_range(start="2023-01-01", periods=100, freq="h")
+    df = pd.DataFrame({
+        "close": np.arange(100, dtype=float),
+        "datetime_close": dates
+    })
 
-def test_garch_utils(tmp_path):
-    """Test GARCH visualization utilities."""
-    # create_figure_canvas
-    fig, canvas, axes = create_figure_canvas()
-    assert fig is not None
+    # Save to parquet for the test
+    parquet_path = tmp_path / "test_bars.parquet"
+    df.to_parquet(parquet_path)
 
-    # save_canvas
-    mock_fig = MagicMock()
-    save_canvas(mock_fig, tmp_path / "test.png")
-    assert mock_fig.savefig.called
+    with patch("src.data_visualisation.visualisation.plt"):
+        # Use sample_fraction=0.2 which should take every 5th element
+        with patch("src.data_visualisation.visualisation.plot_log_returns_distribution"):
+            with patch("src.data_visualisation.visualisation.run_normality_tests") as mock_norm:
+                with patch("src.data_visualisation.visualisation.run_stationarity_tests") as mock_stat:
+                    with patch("src.data_visualisation.visualisation.plot_stationarity"):
+                        with patch("src.data_visualisation.visualisation.plot_log_returns_time_series"):
+                            with patch("src.data_visualisation.visualisation.compute_autocorrelation"):
+                                with patch("src.data_visualisation.visualisation.compute_autocorrelation_squared"):
+                                    with patch("src.data_visualisation.visualisation.run_ljung_box_test"):
+                                        with patch("src.data_visualisation.visualisation.compute_trend_statistics") as mock_trend:
+                                            with patch("src.data_visualisation.visualisation.plot_trend_analysis"):
+                                                with patch("src.data_visualisation.visualisation.plot_trend_extraction"):
+                                                    mock_stat.return_value = {"ADF": {}, "KPSS": {}}
+                                                    mock_norm.return_value = {}
+                                                    mock_trend.return_value = {"Linear_Regression": {}, "Mann_Kendall": {}}
 
-    # add_zero_line
-    mock_ax = MagicMock()
-    add_zero_line(mock_ax)
-    assert mock_ax.axhline.called
+                                                    results = run_full_analysis(
+                                                        parquet_path=parquet_path,
+                                                        output_dir=tmp_path,
+                                                        show_plots=False,
+                                                        sample_fraction=0.2
+                                                    )
 
-    # prepare_temporal_axis
-    dates = pd.date_range("2023-01-01", periods=10)
-    axis = prepare_temporal_axis(dates)
-    assert len(axis) == 10
-
-    axis_fixed = prepare_temporal_axis(None, length=5)
-    assert len(axis_fixed) == 5
-
-    # plot_histogram_with_normal_overlay
-    residuals = np.random.normal(0, 1, 100)
-
-    # With implicit ax (using the imported plt from module if we wanted, but we imported it at top level here)
-    # But wait, plot_histogram_with_normal_overlay calls plt.gca() if ax is None.
-    # We should provide an ax to avoid relying on global state, or use our imported plt.
-
-    fig, ax = plt.subplots()
-    mean, std = plot_histogram_with_normal_overlay(residuals, ax=ax)
-    plt.close(fig)
-
-    assert isinstance(mean, float)
-    assert isinstance(std, float)
+                                                    # With step=5, we should have 20 bars
+                                                    assert results["n_bars"] == 20

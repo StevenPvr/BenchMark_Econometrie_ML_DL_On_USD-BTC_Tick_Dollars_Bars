@@ -440,6 +440,7 @@ def _compute_sampen_single(
     data: NDArray[np.float64],
     m: int,
     r: float,
+    max_entropy: float,
 ) -> float:
     """Compute Sample Entropy for a single window (numba optimized).
 
@@ -451,6 +452,7 @@ def _compute_sampen_single(
         data: Input time series (should be normalized).
         m: Embedding dimension.
         r: Tolerance threshold.
+        max_entropy: Maximum entropy value (adaptive, based on window size).
 
     Returns:
         Sample entropy value.
@@ -459,12 +461,12 @@ def _compute_sampen_single(
 
     if B == 0:
         # No similar patterns found = maximum entropy (fully random)
-        return 5.0
+        # Use adaptive max based on window size: log(n)
+        return max_entropy
     if A == 0:
-        # No matches of length m+1 found - cap at reasonable max
+        # No matches of length m+1 found - cap at adaptive max
         # This indicates maximum unpredictability
-        # Cap value ~5 corresponds to A/B ratio of ~0.007 (very low similarity)
-        return 5.0
+        return max_entropy
 
     return -np.log(A / B)
 
@@ -513,7 +515,10 @@ def _rolling_sampen(
         # After normalization, r is just r_mult (since std=1)
         r = r_mult
 
-        sampen[i] = _compute_sampen_single(normalized, m, r)
+        # Adaptive max entropy based on effective window size
+        max_entropy = np.log(float(len(valid_data)))
+
+        sampen[i] = _compute_sampen_single(normalized, m, r, max_entropy)
 
     return sampen
 

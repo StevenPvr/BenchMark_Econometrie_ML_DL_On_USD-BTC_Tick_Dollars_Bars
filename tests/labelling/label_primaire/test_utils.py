@@ -41,7 +41,7 @@ def test_registry_contains_expected_models():
         "catboost",
         "random_forest",
         "ridge",
-        "lasso",
+        "logistic",
         "lstm",
     ]
     for model in expected:
@@ -272,8 +272,8 @@ def test_set_vertical_barriers():
 
     # Normal case
     t1 = set_vertical_barriers(t_events, close_idx, max_holding=2)
-    assert t1[0] == dates[2]
+    assert t1.iloc[0] == dates[2]
 
     # Cap at end
     t1 = set_vertical_barriers(t_events, close_idx, max_holding=20)
-    assert t1[0] == dates[-1]
+    assert t1.iloc[0] == dates[-1]

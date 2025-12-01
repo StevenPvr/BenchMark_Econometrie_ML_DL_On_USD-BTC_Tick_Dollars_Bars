@@ -10,7 +10,6 @@ from src.clear_features.pca_reducer import (
     GroupPCAResult,
     PCAReductionSummary,
     GroupPCAReducer,
-    WeightedPCAReducer,  # Alias for backward compatibility
 )
 from src.clear_features.log_transformer import LogTransformer, LogTransformResult
 from src.clear_features.scaler_applier import ScalerApplier
@@ -21,7 +20,6 @@ __all__ = [
     "GroupPCAResult",
     "PCAReductionSummary",
     "GroupPCAReducer",
-    "WeightedPCAReducer",
     # Log transform
     "LogTransformer",
     "LogTransformResult",

@@ -14,7 +14,6 @@ from src.labelling.label_primaire.train import (
     TrainingConfig,
     TrainingResult,
     load_optimized_params,
-    get_model_output_dir,
     get_available_optimized_models,
     select_model,
     get_yes_no_input,
@@ -51,6 +50,12 @@ def mock_bars():
 # =============================================================================
 
 def test_train_model(mocker: MockerFixture, mock_dataset, mock_bars, tmp_path):
+    # Mock MODEL_REGISTRY to include test_model
+    mocker.patch.dict(
+        "src.labelling.label_primaire.train.MODEL_REGISTRY",
+        {"test_model": {"class": "test.Model", "dataset": "tree", "search_space": {}}}
+    )
+
     # Mock external dependencies
     mocker.patch(
         "src.labelling.label_primaire.train.load_optimized_params",

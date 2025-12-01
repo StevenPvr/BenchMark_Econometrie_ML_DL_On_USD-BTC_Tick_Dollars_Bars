@@ -123,7 +123,7 @@ class LogisticClassifierModel(BaseModel):
             self.scaler = StandardScaler()
             X_arr = self.scaler.fit_transform(X_arr)
 
-        # Use lbfgs solver for L2 penalty (fast and stable)
+        # Use saga solver for large datasets (faster than lbfgs for n_samples > 10k)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             self.model = LogisticRegression(
@@ -132,7 +132,7 @@ class LogisticClassifierModel(BaseModel):
                 fit_intercept=self.fit_intercept,
                 max_iter=self.max_iter,
                 tol=self.tol,
-                solver="lbfgs",
+                solver="saga",  # Much faster for large datasets
                 class_weight=self.class_weight,
                 n_jobs=-1,
             )

@@ -19,31 +19,37 @@ Module d'analyse comprehensive des features pour le projet de volatility forecas
 ## Analyses Disponibles
 
 ### 1. Correlation Analysis
+
 - **Spearman** : Correlation de rang (robuste aux outliers)
 - **Distance Correlation (dCor)** : Capture les dependances non-lineaires
 - **Mutual Information (MI)** : Information mutuelle normalisee
 
 ### 2. Stationarity Analysis
+
 - **ADF (Augmented Dickey-Fuller)** : Test de racine unitaire
 - **KPSS** : Test de stationnarite autour d'une tendance
 - Classification : Stationnaire, Non-stationnaire, Ambigu
 
 ### 3. Multicollinearity Analysis
+
 - **VIF (Variance Inflation Factor)** : Detection de collinearite
 - **Condition Number** : Stabilite numerique de la matrice de correlation
 - Seuil VIF > 10 = collinearite problematique
 
 ### 4. Target Analysis
+
 - Correlations feature-target (log_return)
 - Classement des features par predictabilite
 - Identification des features les plus informatives
 
 ### 5. Clustering Analysis
+
 - **Hierarchical** : Dendrogramme des features similaires
 - **t-SNE** : Visualisation 2D des relations
 - **UMAP** : Embedding pour clusters locaux
 
 ### 6. Temporal Analysis
+
 - **ACF/PACF** : Autocorrelation des features
 - **Rolling Correlations** : Stabilite temporelle des relations
 - Detection de regimes
@@ -64,6 +70,7 @@ python -m src.analyse_features.main --skip-dcor --skip-umap
 ## Configuration
 
 Dans `config.py` :
+
 - `TARGET_COLUMN` : Colonne cible (defaut: "log_return")
 - `DATASET_SAMPLE_FRACTION` : Fraction d'echantillonnage
 - `ANALYSE_FEATURES_DIR` : Repertoire de sortie
@@ -71,6 +78,7 @@ Dans `config.py` :
 ## Sorties
 
 Fichiers JSON generes :
+
 - `correlation_results.json` : Matrices de correlation
 - `stationarity_results.json` : Resultats ADF/KPSS
 - `multicollinearity_results.json` : VIF et condition number
@@ -80,6 +88,7 @@ Fichiers JSON generes :
 - `summary.json` : Resume global
 
 Plots generes :
+
 - Heatmaps de correlation
 - Scores VIF
 - Dendrogrammes

@@ -7,7 +7,9 @@ Available features:
 - Temporal Acceleration: Bar formation speed dynamics
 - Entropy: Shannon, Approximate, and Sample entropy for regime detection
 - Momentum: Cumulative returns and recent extremes
-- Realized Volatility: Historical volatility and local Sharpe ratio
+- Realized Volatility: Historical volatility and return-volatility ratio
+- Realized Higher Moments: Skewness and kurtosis
+- Jump Detection: Bipower variation, jump component (De Prado/Barndorff-Nielsen)
 - Trend: Moving averages, z-score, cross MA, return streak
 - Range Volatility: Parkinson, Garman-Klass, Rogers-Satchell, Yang-Zhang
 - Microstructure Volatility: Intrabar variance/range from tick data
@@ -54,8 +56,16 @@ from src.features.range_volatility import (
     compute_yang_zhang_volatility,
 )
 from src.features.realized_volatility import (
-    compute_local_sharpe,
+    compute_local_sharpe,  # Deprecated, use compute_return_volatility_ratio
+    compute_return_volatility_ratio,
     compute_realized_volatility,
+    compute_realized_skewness,
+    compute_realized_kurtosis,
+)
+from src.features.jump_detection import (
+    compute_bipower_variation,
+    compute_jump_component,
+    compute_all_jump_features,
 )
 from src.features.scalers import (
     MinMaxScalerCustom,
@@ -118,9 +128,16 @@ __all__ = [
     # Momentum
     "compute_cumulative_returns",
     "compute_recent_extremes",
-    # Realized Volatility
+    # Realized Volatility & Higher Moments
     "compute_realized_volatility",
-    "compute_local_sharpe",
+    "compute_return_volatility_ratio",
+    "compute_local_sharpe",  # Deprecated alias
+    "compute_realized_skewness",
+    "compute_realized_kurtosis",
+    # Jump Detection
+    "compute_bipower_variation",
+    "compute_jump_component",
+    "compute_all_jump_features",
     # Trend
     "compute_moving_averages",
     "compute_price_zscore",

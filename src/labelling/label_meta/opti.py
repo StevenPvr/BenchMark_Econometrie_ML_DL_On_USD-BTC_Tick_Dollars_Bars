@@ -25,21 +25,24 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 import logging
+import multiprocessing
 import warnings
-from typing import Any, Callable, Dict, List, Tuple, Type
+from concurrent.futures import ProcessPoolExecutor
+from typing import Any, Callable, Dict, List, Tuple, Type, cast
 
 import numpy as np
 import optuna
-import pandas as pd
-from sklearn.metrics import f1_score
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.utils.class_weight import compute_class_weight
+import pandas as pd  # type: ignore[import-untyped]
+from sklearn.metrics import balanced_accuracy_score, f1_score  # type: ignore[import-untyped]
+from sklearn.model_selection import TimeSeriesSplit  # type: ignore[import-untyped]
+from sklearn.utils.class_weight import compute_class_weight  # type: ignore[import-untyped]
 
 from src.constants import TRAIN_SPLIT_LABEL
 from src.model.base import BaseModel
 from src.path import LABEL_META_OPTI_DIR
 
 from src.labelling.label_meta.utils import (
+    get_meta_labeled_dataset,
     # Registry
     MODEL_REGISTRY,
     TRIPLE_BARRIER_SEARCH_SPACE,
@@ -72,6 +75,23 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # META-LABELING CORE FUNCTIONS
 # =============================================================================
+
+MIN_BIN_RATIO = 0.15
+PARALLEL_MIN_EVENTS = 10_000
+
+
+def _resolve_n_jobs(requested: int | None) -> int:
+    """Return a valid worker count capped to available CPU cores."""
+    max_cores = multiprocessing.cpu_count()
+    if requested is None or requested <= 0:
+        return max_cores
+    return min(requested, max_cores)
+
+
+def _split_t_events(t_events: pd.DatetimeIndex, n_splits: int) -> List[pd.DatetimeIndex]:
+    """Split events into roughly equal chunks while preserving order."""
+    chunks = np.array_split(t_events, n_splits)
+    return [pd.DatetimeIndex(chunk) for chunk in chunks if len(chunk) > 0]
 
 
 def _filter_valid_events_meta(
@@ -119,10 +139,24 @@ def _apply_meta_barriers(close: pd.Series, events: pd.DataFrame) -> pd.DataFrame
     for loc, row in events.iterrows():
         t1 = row["t1"]
         side_val = int(row["side"])
-        pt = float(row["pt"]) if pd.notna(row["pt"]) else 0.0
-        sl = float(row["sl"]) if pd.notna(row["sl"]) else 0.0
+        pt_val = row["pt"]
+        sl_val = row["sl"]
+        # Handle potential NaN values safely
+        try:
+            is_pt_na = pd.isna(pt_val)
+            pt = 0.0 if (isinstance(is_pt_na, bool) and is_pt_na) else float(pt_val)
+        except (TypeError, ValueError):
+            pt = 0.0
+        try:
+            is_sl_na = pd.isna(sl_val)
+            sl = 0.0 if (isinstance(is_sl_na, bool) and is_sl_na) else float(sl_val)
+        except (TypeError, ValueError):
+            sl = 0.0
 
-        path_ret = _get_path_returns(close, loc, t1)
+        # Ensure loc and t1 are Timestamps
+        loc_ts = cast(pd.Timestamp, loc)
+        t1_ts = cast(pd.Timestamp, t1)
+        path_ret = _get_path_returns(close, loc_ts, t1_ts)
         if path_ret is None:
             continue
 
@@ -163,17 +197,18 @@ def get_events_meta(
 
     # Set vertical barriers
     events = set_vertical_barriers_meta(events, close.index, max_holding)
-    events = events[events["t1"].notna()]
+    events = cast(pd.DataFrame, events[events["t1"].notna()].copy())  # Ensure we have a DataFrame
     if len(events) == 0:
         return pd.DataFrame()
 
     # Compute side-adjusted barriers
-    events = compute_side_adjusted_barriers(events, pt_mult, sl_mult)
+    events = cast(pd.DataFrame, compute_side_adjusted_barriers(events, pt_mult, sl_mult))
 
     # Apply barriers and find first touch
-    events = _apply_meta_barriers(close, events)
+    events = cast(pd.DataFrame, _apply_meta_barriers(close, events))
 
-    return events[["t1", "trgt", "side", "pt", "sl"]]
+    result: pd.DataFrame = cast(pd.DataFrame, events[["t1", "trgt", "side", "pt", "sl"]].copy())
+    return result
 
 
 def get_bins(events: pd.DataFrame, close: pd.Series) -> pd.DataFrame:
@@ -188,15 +223,15 @@ def get_bins(events: pd.DataFrame, close: pd.Series) -> pd.DataFrame:
     out["bin"] = 0
 
     for loc, row in out.iterrows():
-        t1 = row["t1"]
+        t1_val = row["t1"]
         side = int(row["side"])
 
-        if t1 is None or pd.isna(t1):
+        if t1_val is None or cast(bool, pd.isna(t1_val)):
             continue
 
         try:
             price_t0 = close.loc[loc]
-            price_t1 = close.loc[t1]
+            price_t1 = close.loc[t1_val]
             ret = (price_t1 - price_t0) / price_t0
             out.loc[loc, "ret"] = ret
             out.loc[loc, "bin"] = compute_meta_label(ret, side)
@@ -293,38 +328,73 @@ def _sample_barrier_params(trial: optuna.Trial) -> Dict[str, Any]:
     return params
 
 
-def _generate_trial_events_meta(
-    features_df: pd.DataFrame,
+def _process_chunk_events_meta(
+    chunk: pd.DatetimeIndex,
     close: pd.Series,
     volatility: pd.Series,
     side_predictions: pd.Series,
     tb_params: Dict[str, Any],
 ) -> pd.DataFrame:
-    """Generate meta events with given barrier parameters."""
-    events = get_events_meta(
+    """Process a chunk of events for meta-labeling (module-level for pickling)."""
+    ev = get_events_meta(
         close=close,
-        t_events=pd.DatetimeIndex(features_df.index),
+        t_events=chunk,
         pt_mult=tb_params["pt_mult"],
         sl_mult=tb_params["sl_mult"],
         trgt=volatility,
         max_holding=tb_params["max_holding"],
         side=side_predictions,
     )
-    if not events.empty:
-        events = get_bins(events, close)
-    return events
+    if not ev.empty:
+        ev = get_bins(ev, close)
+    return ev
+
+
+def _generate_trial_events_meta(
+    features_df: pd.DataFrame,
+    close: pd.Series,
+    volatility: pd.Series,
+    side_predictions: pd.Series,
+    tb_params: Dict[str, Any],
+    config: MetaOptimizationConfig,
+) -> pd.DataFrame:
+    """Generate meta events with given barrier parameters (optionally in parallel)."""
+    t_events = pd.DatetimeIndex(features_df.index)
+
+    if (not config.parallelize_labeling) or len(t_events) < max(config.parallel_min_events, 1):
+        return _process_chunk_events_meta(t_events, close, volatility, side_predictions, tb_params)
+
+    n_jobs = _resolve_n_jobs(config.n_jobs)
+    event_chunks = _split_t_events(t_events, n_jobs)
+    if len(event_chunks) <= 1:
+        return _process_chunk_events_meta(t_events, close, volatility, side_predictions, tb_params)
+
+    with ProcessPoolExecutor(max_workers=len(event_chunks)) as executor:
+        futures = [
+            executor.submit(_process_chunk_events_meta, chunk, close, volatility, side_predictions, tb_params)
+            for chunk in event_chunks
+        ]
+        results = [f.result() for f in futures]
+
+    non_empty = [df for df in results if df is not None and not df.empty]
+    if not non_empty:
+        return pd.DataFrame()
+
+    return pd.concat(non_empty).sort_index()
 
 
 def _validate_meta_events(
     events: pd.DataFrame,
     config: MetaOptimizationConfig,
-) -> bool:
+) -> Tuple[bool, str]:
     """Validate that events are suitable for training."""
-    if events.empty or len(events) < config.min_train_size:
-        return False
+    if events.empty:
+        return False, "PRUNED: empty events"
+    if len(events) < config.min_train_size:
+        return False, "PRUNED: not enough events"
     if len(events["bin"].value_counts()) < 2:
-        return False
-    return True
+        return False, "PRUNED: only one class"
+    return True, "OK"
 
 
 def _align_features_events_meta(
@@ -362,25 +432,30 @@ def _evaluate_fold_meta(
     val_idx: np.ndarray,
     model_class: Type[BaseModel],
     model_params: Dict[str, Any],
-) -> float | None:
+) -> Tuple[float | None, float | None, float | None]:
     """Evaluate a single CV fold for meta-labeling."""
     try:
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
 
         if len(y_train.unique()) < 2:
-            return None
+            return None, None, None
 
         # Train meta model
         model = model_class(**model_params)
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
 
-        # F1 score for binary classification
-        return f1_score(y_val, y_pred, zero_division=0.0)
+        # Combined metrics for robust binary classification
+        bal_acc = balanced_accuracy_score(y_val, y_pred)
+        f1_weighted = f1_score(y_val, y_pred, average="weighted", zero_division="warn")
+
+        # Mean of both metrics
+        score = (bal_acc + f1_weighted) / 2
+        return score, bal_acc, f1_weighted
 
     except Exception:
-        return None
+        return None, None, None
 
 
 def _run_cv_scoring_meta(
@@ -390,22 +465,41 @@ def _run_cv_scoring_meta(
     model_class: Type[BaseModel],
     model_params: Dict[str, Any],
     config: MetaOptimizationConfig,
-) -> float:
-    """Run walk-forward CV and return mean score."""
+) -> Tuple[float, float, float]:
+    """Run walk-forward CV and return mean score and component metrics."""
     cv = WalkForwardCV(
         n_splits=config.n_splits,
         min_train_size=config.min_train_size,
     )
 
-    cv_scores = []
+    cv_scores: list[float] = []
+    cv_bal_acc: list[float] = []
+    cv_f1_weighted: list[float] = []
     for train_idx, val_idx in cv.split(X, events):
-        score = _evaluate_fold_meta(X, y, train_idx, val_idx, model_class, model_params)
-        if score is not None:
-            cv_scores.append(score)
+        score, bal_acc, f1_weighted = _evaluate_fold_meta(
+            X, y, train_idx, val_idx, model_class, model_params
+        )
+        if score is None or bal_acc is None or f1_weighted is None:
+            raise optuna.TrialPruned("PRUNED: invalid fold")
+        cv_scores.append(score)
+        cv_bal_acc.append(bal_acc)
+        cv_f1_weighted.append(f1_weighted)
 
     if len(cv_scores) == 0:
-        return float("-inf")
-    return float(np.mean(cv_scores))
+        raise optuna.TrialPruned("PRUNED: no valid CV folds")
+    mean_score = float(np.mean(cv_scores))
+    mean_bal_acc = float(np.mean(cv_bal_acc))
+    mean_f1_weighted = float(np.mean(cv_f1_weighted))
+
+    logger.info(
+        "CV metrics - score: %.4f | balanced_acc: %.4f | f1_weighted: %.4f | folds: %d",
+        mean_score,
+        mean_bal_acc,
+        mean_f1_weighted,
+        len(cv_scores),
+    )
+
+    return mean_score, mean_bal_acc, mean_f1_weighted
 
 
 def create_objective(
@@ -423,23 +517,35 @@ def create_objective(
         # Sample and generate events
         tb_params = _sample_barrier_params(trial)
         events = _generate_trial_events_meta(
-            features_df, close, volatility, side_predictions, tb_params
+            features_df, close, volatility, side_predictions, tb_params, config
         )
 
         # Validate events
-        if not _validate_meta_events(events, config):
-            return float("-inf")
+        is_valid, reason = _validate_meta_events(events, config)
+        if not is_valid:
+            logger.debug(reason)
+            raise optuna.TrialPruned(reason)
 
         # Prepare data
         X, y, events_aligned = _align_features_events_meta(features_df, events, config)
-        if X is None:
-            return float("-inf")
+        if X is None or y is None or events_aligned is None:
+            raise optuna.TrialPruned("PRUNED: alignment failed")
 
         # Sample model params and run CV
         model_params = _sample_model_params(trial, meta_search_space, config)
-        return _run_cv_scoring_meta(
+        score, mean_bal_acc, mean_f1w = _run_cv_scoring_meta(
             X, y, events_aligned, meta_model_class, model_params, config
         )
+
+        logger.info(
+            "[Trial %s] OBJ=%.4f | balanced_acc=%.4f | f1_weighted=%.4f",
+            trial.number,
+            score,
+            mean_bal_acc,
+            mean_f1w,
+        )
+
+        return score
 
     return objective
 
@@ -450,25 +556,28 @@ def create_objective(
 
 
 def _load_and_filter_features(
-    model_name: str,
     config: MetaOptimizationConfig,
 ) -> pd.DataFrame:
-    """Load features and apply filtering."""
-    features_df = get_dataset_for_model(model_name)
+    """Load features for meta model and apply filtering."""
+    # Load meta model's dataset type (tree for lightgbm, etc.)
+    features_df, _ = get_meta_labeled_dataset(
+        config.primary_model_name,
+        config.meta_model_name,
+    )
 
     # Filter to train split
     if "split" in features_df.columns:
-        features_df = features_df[features_df["split"] == TRAIN_SPLIT_LABEL].copy()
+        features_df = cast(pd.DataFrame, features_df[features_df["split"] == TRAIN_SPLIT_LABEL].copy())
         features_df = features_df.drop(columns=["split"])
 
     # Set datetime index
     if "datetime_close" in features_df.columns:
-        features_df = features_df.set_index("datetime_close")
-    features_df = features_df.sort_index()
+        features_df = cast(pd.DataFrame, features_df.set_index("datetime_close"))
+    features_df = cast(pd.DataFrame, features_df.sort_index())
 
     # Remove duplicates
     if features_df.index.has_duplicates:
-        features_df = features_df[~features_df.index.duplicated(keep="first")]
+        features_df = cast(pd.DataFrame, features_df[~features_df.index.duplicated(keep="first")].copy())
 
     return features_df
 
@@ -508,22 +617,8 @@ def _align_close_to_features(
         (close.index <= features_df.index[-1])
     ]
     if close.index.has_duplicates:
-        close = close[~close.index.duplicated(keep="first")]
+        close = cast(pd.Series, close[~close.index.duplicated(keep="first")].copy())
     return close
-
-
-def _generate_side_predictions(
-    primary_model: BaseModel,
-    X_features: pd.DataFrame,
-) -> pd.Series:
-    """Generate primary model predictions (side)."""
-    side_predictions = pd.Series(
-        primary_model.predict(X_features),
-        index=X_features.index,
-        name="side",
-    )
-    # Filter to valid sides (+1 or -1)
-    return side_predictions.loc[side_predictions.isin([1, -1])]
 
 
 def _create_study(config: MetaOptimizationConfig) -> optuna.Study:
@@ -552,36 +647,90 @@ def _build_result(
         best_params=best_model,
         best_triple_barrier_params=best_tb,
         best_score=best_trial.value if best_trial.value is not None else float("nan"),
-        metric="f1_score",
+        metric="mean_balanced_accuracy_f1_weighted",
         n_trials=len(study.trials),
     )
 
 
 def _log_result(result: MetaOptimizationResult) -> None:
     """Log optimization results."""
-    logger.info(f"Best F1 score: {result.best_score:.4f}")
+    logger.info(f"Best score (balanced_acc + f1_weighted)/2: {result.best_score:.4f}")
     logger.info(f"Best TB params: {result.best_triple_barrier_params}")
     logger.info(f"Best meta model params: {result.best_params}")
 
 
+def _generate_primary_side_predictions(config: MetaOptimizationConfig) -> pd.Series:
+    """
+    Generate primary model side predictions on its own feature set (train split).
+
+    This avoids using ground-truth labels as side inputs for meta optimization.
+    """
+    from src.labelling.label_meta.utils import get_labeled_dataset_for_primary_model
+
+    primary_df = cast(pd.DataFrame, get_labeled_dataset_for_primary_model(config.primary_model_name))
+
+    if "split" in primary_df.columns:
+        primary_df = cast(pd.DataFrame, primary_df[primary_df["split"] == TRAIN_SPLIT_LABEL].copy())
+
+    if "datetime_close" in primary_df.columns:
+        primary_df = cast(pd.DataFrame, primary_df.set_index("datetime_close"))
+    primary_df = cast(pd.DataFrame, primary_df.sort_index())
+
+    if primary_df.index.has_duplicates:
+        primary_df = cast(pd.DataFrame, primary_df[~primary_df.index.duplicated(keep="first")])
+
+    non_feature_cols = [
+        "bar_id", "timestamp_open", "timestamp_close",
+        "datetime_open", "datetime_close",
+        "threshold_used", "log_return", "split", "label",
+    ]
+    feature_cols = [c for c in primary_df.columns if c not in non_feature_cols]
+    X_primary = cast(pd.DataFrame, primary_df[feature_cols])
+
+    primary_model = load_primary_model(config.primary_model_name)
+    side_predictions = pd.Series(
+        primary_model.predict(X_primary),
+        index=X_primary.index,
+        name="side",
+    )
+
+    return side_predictions.sort_index()
+
+
 def _prepare_meta_data(
     config: MetaOptimizationConfig,
-    primary_model: BaseModel,
 ) -> Tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
     """Prepare features, close, volatility and side predictions."""
-    features_df = _load_and_filter_features(config.meta_model_name, config)
-    features_df = _subsample_features(features_df, config)
-    X_features = features_df[_get_feature_columns(features_df)]
+    # Load meta model's features (train split only)
+    meta_features_df = _load_and_filter_features(config)
+    meta_features_df = _subsample_features(meta_features_df, config)
 
+    # Generate side predictions from the trained primary model (no ground-truth labels)
+    side_predictions_primary = _generate_primary_side_predictions(config)
+
+    # Align indices between meta features and primary side predictions
+    common_idx = meta_features_df.index.intersection(side_predictions_primary.index)
+    meta_features_df = meta_features_df.loc[common_idx]
+    side_predictions = side_predictions_primary.loc[common_idx]
+
+    # Filter to valid sides (+1/-1) and keep aligned features
+    valid_sides_mask = side_predictions.isin([1, -1])
+    meta_features_df = meta_features_df.loc[valid_sides_mask]
+    side_predictions = side_predictions.loc[valid_sides_mask]
+
+    # Extract feature columns for the meta model
+    feature_cols = _get_feature_columns(meta_features_df)
+    X_meta_features = cast(pd.DataFrame, meta_features_df[feature_cols])
+
+    # Load market data
     bars = load_dollar_bars()
-    close = _align_close_to_features(bars["close"], features_df)
+    close_prices = cast(pd.Series, bars["close"])
+    close = _align_close_to_features(close_prices, meta_features_df)
     volatility = get_daily_volatility(close, span=config.vol_span)
 
-    side_predictions = _generate_side_predictions(primary_model, X_features)
-    X_features = X_features.loc[side_predictions.index]
     logger.info(f"Side distribution: {side_predictions.value_counts().to_dict()}")
 
-    return X_features, close, volatility, side_predictions
+    return X_meta_features, close, volatility, side_predictions
 
 
 # =============================================================================
@@ -603,11 +752,11 @@ def optimize_meta_model(
 
     logger.info(f"Starting META optimization: {primary_model_name} -> {meta_model_name}")
 
-    primary_model = load_primary_model(primary_model_name)
     meta_model_class = load_model_class(meta_model_name)
     meta_search_space = MODEL_REGISTRY[meta_model_name]["search_space"]
 
-    X_features, close, volatility, side = _prepare_meta_data(config, primary_model)
+    # Load features and side labels (from primary model's labeled dataset)
+    X_features, close, volatility, side = _prepare_meta_data(config)
 
     study = _create_study(config)
     objective = create_objective(

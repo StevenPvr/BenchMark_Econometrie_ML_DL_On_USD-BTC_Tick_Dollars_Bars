@@ -29,24 +29,31 @@ features/main.py -> clear_features/main.py -> ready for training
 ## Classes Principales
 
 ### GroupPCAReducer
+
 Reduction PCA intelligente par groupes de features similaires :
+
 - Detecte automatiquement les groupes correles
 - Fit uniquement sur les donnees TRAIN (anti-leakage)
 - Preserve la variance expliquee cible
 
 ### LogTransformer
+
 Transformation logarithmique pour features non-stationnaires :
+
 - Detecte les features qui beneficient du log
 - Gere les valeurs negatives (shift)
 
 ### ScalerApplier
+
 Application des scalers pre-fits :
+
 - Z-score pour modeles lineaires (Ridge, Lasso)
 - Min-Max [-1, 1] pour LSTM
 
 ## Anti-Leakage
 
 **CRITIQUE** : Toutes les transformations sont :
+
 1. **Fit sur TRAIN uniquement**
 2. **Transform sur TRAIN et TEST**
 
@@ -61,6 +68,7 @@ python -m src.clear_features.main
 ## Configuration
 
 Dans `config.py` :
+
 - `PCA_CONFIG` : Parametres PCA (variance cible, groupes)
 - `TARGET_COLUMN` : Colonne a ne pas transformer
 - `META_COLUMNS` : Colonnes meta a preserver
@@ -68,11 +76,13 @@ Dans `config.py` :
 ## Entrees / Sorties
 
 **Entrees** :
+
 - `dataset_features.parquet` : Features brutes (tree-based)
 - `dataset_features_linear.parquet` : Pour modeles lineaires
 - `dataset_features_lstm.parquet` : Pour LSTM
 
 **Sorties** (ecrase les fichiers) :
+
 - Memes fichiers avec features transformees
 - Artefacts PCA dans `PCA_ARTIFACTS_DIR`
 

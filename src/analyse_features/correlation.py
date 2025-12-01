@@ -38,6 +38,7 @@ from sklearn.feature_selection import mutual_info_regression  # type: ignore[imp
 
 from src.analyse_features.config import (
     CORRELATION_RESULTS_JSON,
+    CORRELATION_SIGNIFICANT_THRESHOLD,
     MI_N_NEIGHBORS,
     MI_RANDOM_STATE,
     SPEARMAN_HIGH_CORR_THRESHOLD,
@@ -250,24 +251,25 @@ def compute_feature_feature_mi(
         n_jobs,
     )
 
-    # Prepare data dict for efficiency
-    data = {col: cast(np.ndarray, df[col].dropna().values) for col in feature_columns}
+    # Prepare data dict for efficiency - keep all values to align with common mask
+    data = {col: cast(np.ndarray, df[col].values) for col in feature_columns}
 
     def compute_mi_pair(i, j, col_i, col_j):
         x = data[col_i]
         y = data[col_j]
 
-        # Align lengths
-        min_len = min(len(x), len(y))
-        x = np.asarray(x[:min_len]).reshape(-1, 1)
-        y = np.asarray(y[:min_len])
+        # Align using common mask (not slice) to handle NaN at different positions
+        mask = ~(np.isnan(x) | np.isnan(y))
+        x_clean = x[mask]
+        y_clean = y[mask]
 
-        if min_len < 10:
+        if len(x_clean) < 10:
             return (col_i, col_j, np.nan)
 
         try:
             mi = mutual_info_regression(
-                x, y,
+                x_clean.reshape(-1, 1),
+                y_clean,
                 n_neighbors=n_neighbors,
                 random_state=MI_RANDOM_STATE,
             )[0]
@@ -297,16 +299,16 @@ def compute_feature_feature_mi(
 def run_correlation_analysis(
     df: pd.DataFrame,
     feature_columns: list[str] | None = None,
-    compute_dcor: bool = True,
     save_results: bool = True,
 ) -> dict[str, pd.DataFrame]:
     """Run complete correlation analysis pipeline.
 
+    Computes Spearman correlation matrix and Mutual Information with target.
+
     Args:
         df: DataFrame with features.
         feature_columns: Columns to analyze.
-        compute_dcor: Whether to compute distance correlation (deprecated, ignored).
-        save_results: Whether to save results to parquet.
+        save_results: Whether to save results to JSON.
 
     Returns:
         Dictionary with all correlation results.
@@ -354,7 +356,7 @@ def run_correlation_analysis(
             for i in range(len(spearman)):
                 for j in range(i + 1, len(spearman)):
                     val = spearman.iloc[i, j]
-                    if abs(val) > 0.5:  # Only significant correlations
+                    if abs(val) > CORRELATION_SIGNIFICANT_THRESHOLD:
                         corr_pairs.append({
                             "feature_1": spearman.index[i],
                             "feature_2": spearman.columns[j],
@@ -406,6 +408,6 @@ if __name__ == "__main__":
         df = df[df["split"] == "train"].copy()
         df = df.drop(columns=["split"])
 
-    results = run_correlation_analysis(cast(pd.DataFrame, df), compute_dcor=False)
+    results = run_correlation_analysis(cast(pd.DataFrame, df))
 
     logger.info("Results keys: %s", list(results.keys()))

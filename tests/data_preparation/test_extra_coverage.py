@@ -108,15 +108,20 @@ class TestPreparationEdgeCases:
         })
         compute_dollar_bars(df, target_num_bars=1, adaptive=True)
 
-    def test_compute_dollar_bars_calibration_fraction_clamping(self):
-        """Cover lines 552-553, 556-557: calibration_fraction clamping."""
+    def test_compute_dollar_bars_calibration_fraction_validation(self):
+        """Test calibration_fraction validation (now raises ValueError instead of clamping)."""
         df = pd.DataFrame({
             "timestamp": [0, 1],
             "price": [10.0, 10.0],
             "amount": [1.0, 1.0]
         })
-        compute_dollar_bars(df, target_num_bars=1, calibration_fraction=-0.1)
-        compute_dollar_bars(df, target_num_bars=1, calibration_fraction=1.5)
+        # Invalid values now raise ValueError instead of being silently clamped
+        with pytest.raises(ValueError, match="calibration_fraction must be in"):
+            compute_dollar_bars(df, target_num_bars=1, calibration_fraction=-0.1)
+        with pytest.raises(ValueError, match="calibration_fraction must be in"):
+            compute_dollar_bars(df, target_num_bars=1, calibration_fraction=1.5)
+        # Valid value should work
+        compute_dollar_bars(df, target_num_bars=1, calibration_fraction=0.5)
 
     def test_run_dollar_bars_pipeline_batch_exception(self, tmp_path):
         """Cover lines 908-910: Exception in batch loop."""

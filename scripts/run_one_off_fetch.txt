@@ -1,0 +1,15 @@
+# One-off data fetch using dates from constants.py (no auto-increment).
+#
+# Usage:
+#   bash scripts/run_one_off_fetch.txt
+
+./scripts/run_data_fetching_daemon.sh stop
+rm -f data/fetch_dates_state.json
+
+python - <<'PY'
+from src.data_fetching.main import main
+
+main(auto_increment=False)
+PY
+
+[ -f data/fetch_dates_state.json.bak ] && mv data/fetch_dates_state.json.bak data/fetch_dates_state.json

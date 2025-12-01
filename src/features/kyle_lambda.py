@@ -72,7 +72,7 @@ def _ols_slope(x: NDArray[np.float64], y: NDArray[np.float64]) -> float:
         cov_xy += dx * (y[i] - y_mean)
         var_x += dx * dx
 
-    if var_x < 1e-15:
+    if var_x < 1e-10:
         return np.nan
 
     return cov_xy / var_x
