@@ -61,6 +61,73 @@ TARGET_COLUMN = "log_return"
 # Default correlation threshold
 DEFAULT_THRESHOLD = 0.7
 
+# Features to manually remove (identified via SHAP/analysis)
+MANUAL_FEATURES_TO_REMOVE = [
+    # PCA distribution long
+    "pca_distribution_long_c2",
+    "pca_distribution_long_c3",
+    "pca_distribution_long_c4",
+    "pca_distribution_long_c5",
+    "pca_distribution_long_c6",
+    "pca_distribution_long_c7",
+    # PCA distribution medium
+    "pca_distribution_medium_c2",
+    "pca_distribution_medium_c3",
+    "pca_distribution_medium_c4",
+    # PCA distribution short
+    "pca_distribution_short_c4",
+    "pca_distribution_short_c5",
+    "pca_distribution_short_c6",
+    "pca_distribution_short_c7",
+    # PCA drawdown short
+    "pca_drawdown_short_c0",
+    "pca_drawdown_short_c1",
+    # PCA jumps medium
+    "pca_jumps_medium_c1",
+    "pca_jumps_medium_c2",
+    "pca_jumps_medium_c4",
+    "pca_jumps_medium_c5",
+    # PCA moving averages
+    "pca_moving_averages_long_c4",
+    "pca_moving_averages_medium_c2",
+    "pca_moving_averages_short_c3",
+    "pca_moving_averages_short_c5",
+    # PCA other
+    "pca_other_long_c2",
+    "pca_other_long_c4",
+    "pca_other_long_c5",
+    "pca_other_medium_c4",
+    "pca_other_medium_c5",
+    "pca_other_short_c7",
+    # PCA returns long
+    "pca_returns_long_c8",
+    # PCA temporal long
+    "pca_temporal_long_c4",
+    "pca_temporal_long_c6",
+    "pca_temporal_long_c8",
+    "pca_temporal_long_c14",
+    "pca_temporal_long_c15",
+    # PCA temporal medium
+    "pca_temporal_medium_c10",
+    # PCA temporal short
+    "pca_temporal_short_c5",
+    "pca_temporal_short_c12",
+    "pca_temporal_short_c13",
+    # PCA volume medium
+    "pca_volume_medium_c6",
+    "pca_volume_medium_c8",
+    "pca_volume_medium_c9",
+    "pca_volume_medium_c11",
+    # PCA volume short
+    "pca_volume_short_c5",
+    "pca_volume_short_c6",
+    "pca_volume_short_c8",
+    "pca_volume_short_c11",
+    "pca_volume_short_c12",
+    # PCA jumps long (high VIF)
+    "pca_jumps_long_c6",
+]
+
 
 def compute_spearman_matrix(df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
     """Compute Spearman correlation matrix."""
@@ -185,15 +252,26 @@ def main(threshold: float = DEFAULT_THRESHOLD) -> None:
     high_corr_before = (((corr_before > threshold) | (corr_before < -threshold)) & (corr_before.abs() < 1.0)).sum().sum() // 2
     logger.info("High correlation pairs BEFORE (>%.2f or <-%.2f): %d", threshold, threshold, high_corr_before)
 
-    # Find features to drop
-    features_to_drop = find_features_to_drop(corr_before, threshold)
-    logger.info("\nFeatures to drop: %d", len(features_to_drop))
+    # Find features to drop based on correlation
+    features_to_drop_corr = find_features_to_drop(corr_before, threshold)
+    logger.info("\nFeatures to drop (correlation): %d", len(features_to_drop_corr))
 
-    if features_to_drop:
-        for f in features_to_drop[:10]:
+    # Add manual features to drop (from SHAP analysis)
+    manual_to_drop = [f for f in MANUAL_FEATURES_TO_REMOVE if f in feature_cols]
+    logger.info("Features to drop (manual/SHAP): %d", len(manual_to_drop))
+    for f in manual_to_drop:
+        logger.info("  - %s", f)
+
+    # Combine both lists
+    features_to_drop = list(set(features_to_drop_corr) | set(manual_to_drop))
+    logger.info("\nTotal features to drop: %d", len(features_to_drop))
+
+    if features_to_drop_corr:
+        logger.info("From correlation:")
+        for f in features_to_drop_corr[:10]:
             logger.info("  - %s", f)
-        if len(features_to_drop) > 10:
-            logger.info("  ... and %d more", len(features_to_drop) - 10)
+        if len(features_to_drop_corr) > 10:
+            logger.info("  ... and %d more", len(features_to_drop_corr) - 10)
 
     # Features to keep
     features_to_keep = [f for f in feature_cols if f not in features_to_drop]

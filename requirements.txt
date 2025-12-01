@@ -19,6 +19,7 @@ lightgbm>=3.3.0
 catboost>=1.0.0
 torch>=1.10.0
 torchvision>=0.11.0
+shap>=0.42.0
 
 # Statistics and Econometrics
 statsmodels>=0.13.0

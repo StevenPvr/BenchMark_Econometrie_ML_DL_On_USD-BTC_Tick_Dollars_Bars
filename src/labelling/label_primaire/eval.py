@@ -31,8 +31,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, cast
 
+import matplotlib
+matplotlib.use("Agg")  # Non-interactive backend for saving plots
+import matplotlib.pyplot as plt  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
+import shap  # type: ignore[import-untyped]
 from sklearn.metrics import (  # type: ignore[import-untyped]
     accuracy_score,
     balanced_accuracy_score,
@@ -172,6 +176,240 @@ def compute_metrics(
 
 
 # =============================================================================
+# SHAP ANALYSIS
+# =============================================================================
+
+# Models compatible with SHAP TreeExplainer
+SHAP_TREE_MODELS = {"lightgbm", "xgboost", "catboost", "random_forest"}
+
+# Models compatible with SHAP LinearExplainer
+SHAP_LINEAR_MODELS = {"ridge", "logistic"}
+
+# Models NOT compatible with standard SHAP (would need KernelExplainer, too slow)
+SHAP_INCOMPATIBLE_MODELS = {"lstm"}
+
+
+def is_shap_compatible(model_name: str) -> bool:
+    """Check if a model is compatible with SHAP analysis."""
+    return model_name in SHAP_TREE_MODELS or model_name in SHAP_LINEAR_MODELS
+
+
+def get_shap_explainer_type(model_name: str) -> str | None:
+    """Get the type of SHAP explainer to use for a model."""
+    if model_name in SHAP_TREE_MODELS:
+        return "tree"
+    elif model_name in SHAP_LINEAR_MODELS:
+        return "linear"
+    return None
+
+
+def compute_shap_values(
+    model: Any,
+    X: pd.DataFrame,
+    model_name: str,
+    max_samples: int = 1000,
+) -> tuple[shap.Explainer | None, np.ndarray | None]:
+    """
+    Compute SHAP values for a model.
+
+    Parameters
+    ----------
+    model : Any
+        The trained model wrapper (must have .model attribute).
+    X : pd.DataFrame
+        Feature data.
+    model_name : str
+        Name of the model (for explainer selection).
+    max_samples : int, default=1000
+        Maximum samples for SHAP computation (for performance).
+
+    Returns
+    -------
+    tuple[shap.Explainer | None, np.ndarray | None]
+        (explainer, shap_values) or (None, None) if incompatible.
+    """
+    if not is_shap_compatible(model_name):
+        logger.warning(f"Model {model_name} is not compatible with SHAP analysis")
+        return None, None
+
+    # Sample data if too large
+    if len(X) > max_samples:
+        X_sample = X.sample(n=max_samples, random_state=42)
+    else:
+        X_sample = X
+
+    explainer_type = get_shap_explainer_type(model_name)
+    underlying_model = getattr(model, "model", None)
+
+    if underlying_model is None:
+        logger.warning(f"Could not access underlying model for {model_name}")
+        return None, None
+
+    try:
+        if explainer_type == "tree":
+            explainer = shap.TreeExplainer(underlying_model)
+            shap_values = explainer.shap_values(X_sample)
+        elif explainer_type == "linear":
+            # For linear models, we need background data
+            # Handle normalized models (ridge has scaler)
+            X_transformed = X_sample.values
+            if hasattr(model, "scaler") and model.scaler is not None:
+                X_transformed = model.scaler.transform(X_transformed)
+
+            explainer = shap.LinearExplainer(
+                underlying_model,
+                X_transformed,
+                feature_perturbation="interventional",
+            )
+            shap_values = explainer.shap_values(X_transformed)
+        else:
+            return None, None
+
+        return explainer, shap_values
+
+    except Exception as e:
+        logger.warning(f"Failed to compute SHAP values for {model_name}: {e}")
+        return None, None
+
+
+def save_shap_plots(
+    shap_values: np.ndarray,
+    X: pd.DataFrame,
+    model_name: str,
+    output_dir: Path,
+    class_names: List[str] | None = None,
+    max_display: int = 20,
+) -> List[Path]:
+    """
+    Save SHAP summary and bar plots.
+
+    Parameters
+    ----------
+    shap_values : np.ndarray
+        SHAP values from explainer.
+    X : pd.DataFrame
+        Feature data (sampled if needed).
+    model_name : str
+        Name of the model.
+    output_dir : Path
+        Directory to save plots.
+    class_names : List[str] | None
+        Names of classes for multi-class models.
+    max_display : int, default=20
+        Maximum features to display.
+
+    Returns
+    -------
+    List[Path]
+        List of saved plot paths.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_paths: List[Path] = []
+
+    # Sample X if needed to match shap_values
+    if len(X) > len(shap_values) if isinstance(shap_values, np.ndarray) and shap_values.ndim == 2 else len(X) > len(shap_values[0]):
+        X = X.iloc[:len(shap_values) if isinstance(shap_values, np.ndarray) and shap_values.ndim == 2 else len(shap_values[0])]
+
+    # Handle multi-class SHAP values (list of arrays, one per class)
+    is_multiclass = isinstance(shap_values, list) or (
+        isinstance(shap_values, np.ndarray) and shap_values.ndim == 3
+    )
+
+    if is_multiclass:
+        # For multi-class: shap_values is a list [class0_values, class1_values, ...]
+        # or array of shape (n_classes, n_samples, n_features)
+        if isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
+            shap_values = [shap_values[i] for i in range(shap_values.shape[0])]
+
+        n_classes = len(shap_values)
+        if class_names is None:
+            class_names = [f"Class {i}" for i in range(n_classes)]
+
+        # Summary plot for each class
+        for i, (sv, cn) in enumerate(zip(shap_values, class_names)):
+            try:
+                plt.figure(figsize=(12, 8))
+                shap.summary_plot(
+                    sv,
+                    X,
+                    max_display=max_display,
+                    show=False,
+                    plot_type="dot",
+                )
+                plt.title(f"SHAP Summary - {model_name} - {cn}")
+                plt.tight_layout()
+                path = output_dir / f"{model_name}_shap_summary_class_{i}.png"
+                plt.savefig(path, dpi=150, bbox_inches="tight")
+                plt.close()
+                saved_paths.append(path)
+                logger.info(f"Saved SHAP summary plot: {path}")
+            except Exception as e:
+                logger.warning(f"Failed to save SHAP summary plot for class {i}: {e}")
+
+        # Global bar plot (mean absolute SHAP across all classes)
+        try:
+            mean_abs_shap = np.mean([np.abs(sv).mean(axis=0) for sv in shap_values], axis=0)
+            plt.figure(figsize=(12, 8))
+            feature_importance = pd.Series(mean_abs_shap, index=X.columns)
+            feature_importance = feature_importance.nlargest(max_display)
+            feature_importance.plot(kind="barh")
+            plt.xlabel("Mean |SHAP value| (average across classes)")
+            plt.ylabel("Feature")
+            plt.title(f"SHAP Feature Importance - {model_name}")
+            plt.tight_layout()
+            path = output_dir / f"{model_name}_shap_bar_global.png"
+            plt.savefig(path, dpi=150, bbox_inches="tight")
+            plt.close()
+            saved_paths.append(path)
+            logger.info(f"Saved SHAP bar plot: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to save global SHAP bar plot: {e}")
+
+    else:
+        # Binary or regression: single array
+        try:
+            plt.figure(figsize=(12, 8))
+            shap.summary_plot(
+                shap_values,
+                X,
+                max_display=max_display,
+                show=False,
+                plot_type="dot",
+            )
+            plt.title(f"SHAP Summary - {model_name}")
+            plt.tight_layout()
+            path = output_dir / f"{model_name}_shap_summary.png"
+            plt.savefig(path, dpi=150, bbox_inches="tight")
+            plt.close()
+            saved_paths.append(path)
+            logger.info(f"Saved SHAP summary plot: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to save SHAP summary plot: {e}")
+
+        # Bar plot
+        try:
+            plt.figure(figsize=(12, 8))
+            shap.summary_plot(
+                shap_values,
+                X,
+                max_display=max_display,
+                show=False,
+                plot_type="bar",
+            )
+            plt.title(f"SHAP Feature Importance - {model_name}")
+            plt.tight_layout()
+            path = output_dir / f"{model_name}_shap_bar.png"
+            plt.savefig(path, dpi=150, bbox_inches="tight")
+            plt.close()
+            saved_paths.append(path)
+            logger.info(f"Saved SHAP bar plot: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to save SHAP bar plot: {e}")
+
+    return saved_paths
+
+
+# =============================================================================
 # DATA LOADING
 # =============================================================================
 
@@ -284,6 +522,7 @@ class EvaluationResult:
     test_samples: int
     label_distribution_train: Dict[str, Any]
     label_distribution_test: Dict[str, Any]
+    shap_plots: List[str] = field(default_factory=list)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_dict(self) -> Dict[str, Any]:
@@ -296,6 +535,7 @@ class EvaluationResult:
             "test_samples": self.test_samples,
             "label_distribution_train": self.label_distribution_train,
             "label_distribution_test": self.label_distribution_test,
+            "shap_plots": self.shap_plots,
             "timestamp": self.timestamp,
         }
 
@@ -388,6 +628,88 @@ def evaluate_model(model_name: str) -> EvaluationResult:
         label_distribution_train=train_dist,
         label_distribution_test=test_dist,
     )
+
+
+def run_shap_analysis(
+    model_name: str,
+    output_dir: Path,
+    max_samples: int = 1000,
+) -> List[str]:
+    """
+    Run SHAP analysis for a trained model.
+
+    Parameters
+    ----------
+    model_name : str
+        Name of the model.
+    output_dir : Path
+        Directory to save SHAP plots.
+    max_samples : int, default=1000
+        Maximum samples for SHAP computation.
+
+    Returns
+    -------
+    List[str]
+        List of saved plot paths as strings.
+    """
+    if not is_shap_compatible(model_name):
+        logger.info(f"Skipping SHAP analysis for {model_name} (not compatible)")
+        return []
+
+    logger.info(f"{'='*60}")
+    logger.info(f"SHAP ANALYSIS: {model_name.upper()}")
+    logger.info(f"{'='*60}")
+
+    # Load model
+    logger.info("Loading model for SHAP analysis...")
+    model = load_model(model_name)
+
+    # Load data
+    logger.info("Loading test data for SHAP analysis...")
+    _, test_df = load_data(model_name)
+
+    # Prepare features
+    non_feature_cols = [
+        "bar_id", "timestamp_open", "timestamp_close",
+        "datetime_open", "datetime_close", "threshold_used",
+        "log_return", "split", "label",
+    ]
+    feature_cols = [c for c in test_df.columns if c not in non_feature_cols]
+    test_valid = test_df[~test_df["label"].isna()].copy()
+    X_test = cast(pd.DataFrame, test_valid[feature_cols])
+
+    # Compute SHAP values
+    logger.info(f"Computing SHAP values (max {max_samples} samples)...")
+    explainer, shap_values = compute_shap_values(
+        model, X_test, model_name, max_samples=max_samples
+    )
+
+    if shap_values is None:
+        logger.warning("Could not compute SHAP values")
+        return []
+
+    # Get class labels
+    classes = np.unique(test_valid["label"].dropna().astype(int).values)
+    class_names = [f"Class {int(c)}" for c in sorted(classes)]
+
+    # Sample X_test to match shap_values if needed
+    if len(X_test) > max_samples:
+        X_test_sampled = X_test.sample(n=max_samples, random_state=42)
+    else:
+        X_test_sampled = X_test
+
+    # Save SHAP plots
+    logger.info("Saving SHAP plots...")
+    shap_dir = output_dir / "shap"
+    saved_paths = save_shap_plots(
+        shap_values,
+        X_test_sampled,
+        model_name,
+        shap_dir,
+        class_names=class_names,
+    )
+
+    return [str(p) for p in saved_paths]
 
 
 # =============================================================================
@@ -579,6 +901,25 @@ def main() -> None:
     result.save(results_path)
 
     print(f"\nResultats sauvegardes: {results_path}")
+
+    # Run SHAP analysis if compatible
+    if is_shap_compatible(model_name):
+        run_shap = input("\nLancer l'analyse SHAP? (O/n): ").strip().lower()
+        if run_shap != "n":
+            print("\n")
+            shap_plots = run_shap_analysis(model_name, output_dir)
+            result.shap_plots = shap_plots
+            # Update saved results with SHAP info
+            result.save(results_path)
+
+            if shap_plots:
+                print(f"\n--- SHAP Plots ---")
+                for plot_path in shap_plots:
+                    print(f"  {plot_path}")
+            else:
+                print("\nAucun plot SHAP genere.")
+    else:
+        print(f"\n(SHAP non disponible pour {model_name})")
 
 
 if __name__ == "__main__":

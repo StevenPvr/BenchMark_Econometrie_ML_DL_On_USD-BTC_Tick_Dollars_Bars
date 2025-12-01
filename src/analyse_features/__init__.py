@@ -19,10 +19,7 @@ Usage:
     from src.analyse_features.stationarity import run_stationarity_analysis
 """
 
-from src.analyse_features.main import (
-    load_features,
-    run_all_analyses,
-)
+# Import analysis functions (not from main.py to avoid circular import warning)
 from src.analyse_features.correlation import run_correlation_analysis
 from src.analyse_features.stationarity import run_stationarity_analysis
 from src.analyse_features.multicollinearity import run_multicollinearity_analysis
@@ -31,8 +28,6 @@ from src.analyse_features.clustering import run_clustering_analysis
 from src.analyse_features.temporal import run_temporal_analysis
 
 __all__ = [
-    "load_features",
-    "run_all_analyses",
     "run_correlation_analysis",
     "run_stationarity_analysis",
     "run_multicollinearity_analysis",

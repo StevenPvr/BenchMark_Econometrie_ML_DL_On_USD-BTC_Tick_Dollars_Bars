@@ -54,7 +54,6 @@ from src.analyse_features.config import (  # noqa: E402
     SUMMARY_JSON,
     DATASET_SAMPLE_FRACTION,
     INPUT_DATASETS,
-    OUTPUT_DATASETS,
     ensure_directories,
 )
 from src.analyse_features.correlation import run_correlation_analysis  # noqa: E402
@@ -376,6 +375,7 @@ def run_all_analyses(
     compute_dcor: bool = True,
     compute_umap: bool = True,
     generate_plots: bool = True,
+    skip_stationarity: bool = False,
 ) -> dict[str, Any]:
     """Run complete feature analysis pipeline.
 
@@ -385,6 +385,7 @@ def run_all_analyses(
         compute_dcor: Whether to compute distance correlation (deprecated, ignored).
         compute_umap: Whether to compute UMAP (requires umap-learn).
         generate_plots: Whether to generate visualizations.
+        skip_stationarity: Whether to skip stationarity analysis.
 
     Returns:
         Dictionary with all analysis results.
@@ -420,18 +421,23 @@ def run_all_analyses(
     # =========================================================================
     # 2. STATIONARITY ANALYSIS
     # =========================================================================
-    logger.info("\n" + "=" * 70)
-    logger.info("ANALYSIS 2/6: STATIONARITY ANALYSIS")
-    logger.info("=" * 70)
+    if skip_stationarity:
+        logger.info("\n" + "=" * 70)
+        logger.info("ANALYSIS 2/6: STATIONARITY ANALYSIS (SKIPPED)")
+        logger.info("=" * 70)
+    else:
+        logger.info("\n" + "=" * 70)
+        logger.info("ANALYSIS 2/6: STATIONARITY ANALYSIS")
+        logger.info("=" * 70)
 
-    start = time.time()
-    station_results = run_stationarity_analysis(df, feature_columns)
-    all_results["stationarity"] = station_results
-    save_stationarity_results(station_results)
-    logger.info("Stationarity analysis completed in %.1f seconds", time.time() - start)
+        start = time.time()
+        station_results = run_stationarity_analysis(df, feature_columns)
+        all_results["stationarity"] = station_results
+        save_stationarity_results(station_results)
+        logger.info("Stationarity analysis completed in %.1f seconds", time.time() - start)
 
-    if generate_plots:
-        plot_stationarity_summary(station_results)
+        if generate_plots:
+            plot_stationarity_summary(station_results)
 
     # =========================================================================
     # 3. MULTICOLLINEARITY ANALYSIS
@@ -612,33 +618,6 @@ def print_summary(results: dict[str, Any]) -> None:
         logger.info("Clustering: %d clusters identified", n_clusters)
 
 
-def copy_datasets_to_final() -> None:
-    """Copy datasets from _clear to _final suffix.
-
-    Since analyse_features only analyzes without modifying data,
-    we simply copy the clear datasets to final datasets.
-    """
-    import shutil
-
-    logger.info("\n" + "=" * 70)
-    logger.info("COPYING DATASETS: _clear -> _final")
-    logger.info("=" * 70)
-
-    for dataset_name in INPUT_DATASETS:
-        input_path = INPUT_DATASETS[dataset_name]
-        output_path = OUTPUT_DATASETS[dataset_name]
-
-        if not input_path.exists():
-            logger.warning("Input not found, skipping: %s", input_path)
-            continue
-
-        logger.info("Copying %s -> %s", input_path.name, output_path.name)
-        shutil.copy2(input_path, output_path)
-        logger.info("  Done: %s", output_path)
-
-    logger.info("All datasets copied to _final suffix")
-
-
 def main() -> None:
     """Main entry point for feature analysis."""
     parser = argparse.ArgumentParser(
@@ -672,6 +651,12 @@ def main() -> None:
         "--skip-umap",
         action="store_true",
         help="Skip UMAP embedding (requires umap-learn)",
+    )
+
+    parser.add_argument(
+        "--skip-stationarity",
+        action="store_true",
+        help="Skip stationarity analysis (ADF/KPSS tests - slow)",
     )
 
     parser.add_argument(
@@ -711,6 +696,7 @@ def main() -> None:
             compute_dcor=not args.skip_dcor,
             compute_umap=not args.skip_umap,
             generate_plots=not args.no_plots,
+            skip_stationarity=args.skip_stationarity,
         )
         print_summary(results)
 
@@ -751,9 +737,6 @@ def main() -> None:
         ensure_directories()
         results = run_temporal_analysis(df, feature_columns)
         save_temporal_results(results)
-
-    # Copy datasets from _clear to _final
-    copy_datasets_to_final()
 
     logger.info("\nAnalysis complete!")
 
