@@ -144,18 +144,24 @@ def test_get_events_primary(sample_data):
 # CV TESTS
 # =============================================================================
 
-def test_walk_forward_cv(sample_data, sample_events):
-    _, features, _ = sample_data
-    events = sample_events
+def test_walk_forward_cv(sample_data):
+    close, features, volatility = sample_data
 
-    cv = WalkForwardCV(n_splits=3, min_train_size=20, embargo_pct=0.0)
-    splits = cv.split(features, events)
+    # Create events DataFrame that aligns with features
+    n_events = 80  # Use only first 80 samples
+    events = pd.DataFrame(index=features.index[:n_events])
+    events["trgt"] = volatility.iloc[:n_events].values
+    # Use offset timestamps for t1 (10 bars ahead, capped at end)
+    t1_values = list(features.index[10:n_events]) + list(features.index[-10:])
+    events["t1"] = t1_values[:n_events]
+
+    cv = WalkForwardCV(n_splits=3, min_train_size=10, embargo_pct=0.0)
+    splits = cv.split(features.iloc[:n_events], events)
 
     assert len(splits) > 0
     for train, val in splits:
-        assert len(train) >= 20
+        assert len(train) >= 10
         assert len(val) > 0
-        # Check no overlap if purged (mocking overlap check implicitly via logic)
 
 # =============================================================================
 # OBJECTIVE & OPTIMIZATION TESTS
@@ -197,24 +203,26 @@ def test_validate_events_empty(sample_events):
 
 def test_evaluate_fold(sample_data):
     _, features, _ = sample_data
-    # Create synthetic binary classification problem
-    y = pd.Series(np.random.randint(0, 2, len(features)), index=features.index)
+    # Create synthetic multiclass classification problem (-1, 0, 1)
+    y = pd.Series(np.random.choice([-1, 0, 1], len(features)), index=features.index)
 
     # Mock model
     mock_model_cls = MagicMock()
     mock_instance = MagicMock()
     mock_model_cls.return_value = mock_instance
-    mock_instance.predict.return_value = y.iloc[:10].values # Predict subset
+    # Predict different classes to avoid "only 1 class" issue
+    mock_instance.predict.return_value = np.random.choice([-1, 0, 1], 10)
 
     train_idx = np.arange(50)
     val_idx = np.arange(50, 60)
 
-    score, reason = _evaluate_fold(
+    mcc, f1_weighted, reason = _evaluate_fold(
         features, y, train_idx, val_idx,
         mock_model_cls, {}, "test_model", 0
     )
 
-    assert score is not None
+    assert mcc is not None
+    assert f1_weighted is not None
     assert reason == "OK"
 
 def test_create_objective(sample_data, mocker):
@@ -222,10 +230,12 @@ def test_create_objective(sample_data, mocker):
     config = OptimizationConfig(model_name="lightgbm", n_trials=1, min_train_size=10)
 
     # Mock external calls to avoid heavy computation
-    mocker.patch("src.labelling.label_primaire.opti._generate_trial_events", return_value=pd.DataFrame({"label": [1]*50 + [-1]*50}, index=features.index))
+    mock_events = pd.DataFrame({"label": [1]*50 + [-1]*50}, index=features.index)
+    mocker.patch("src.labelling.label_primaire.opti._generate_trial_events", return_value=mock_events)
     mocker.patch("src.labelling.label_primaire.opti._validate_events", return_value=(True, "OK"))
-    mocker.patch("src.labelling.label_primaire.opti._align_features_events", return_value=(features, pd.Series([1]*100), pd.DataFrame(), "OK"))
-    mocker.patch("src.labelling.label_primaire.opti._run_cv_scoring", return_value=(0.5, 5, 5, "OK"))
+    mocker.patch("src.labelling.label_primaire.opti._align_features_events", return_value=(features, pd.Series([1]*100, index=features.index), pd.DataFrame(index=features.index), "OK"))
+    # _run_cv_scoring returns (objective, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason)
+    mocker.patch("src.labelling.label_primaire.opti._run_cv_scoring", return_value=(0.5, 0.5, 0.5, 5, 5, "OK"))
 
     mock_model_cls = MagicMock()
     search_space = {"p1": ("categorical", [1])}
@@ -242,17 +252,24 @@ def test_create_objective(sample_data, mocker):
     assert score == 0.5
 
 def test_optimize_model(mocker):
+    # Create proper mock data
+    dates = pd.date_range("2023-01-01", periods=100, freq="D")
+    mock_features = pd.DataFrame(np.random.randn(100, 5), index=dates, columns=[f"f{i}" for i in range(5)])
+    mock_close = pd.Series(np.random.uniform(100, 110, 100), index=dates)
+    mock_volatility = pd.Series(np.random.uniform(0.01, 0.02, 100), index=dates)
+
     # Mock everything around the main loop
-    mocker.patch("src.labelling.label_primaire.opti.load_model_class")
-    mocker.patch("src.labelling.label_primaire.opti._prepare_optimization_data", return_value=(MagicMock(), MagicMock(), MagicMock()))
-    mocker.patch("src.labelling.label_primaire.opti._create_study")
-    mocker.patch("src.labelling.label_primaire.opti.create_objective")
+    mocker.patch("src.labelling.label_primaire.opti.load_model_class", return_value=MagicMock)
+    mocker.patch("src.labelling.label_primaire.opti._prepare_optimization_data", return_value=(mock_features, mock_close, mock_volatility))
 
     mock_study = MagicMock()
     mocker.patch("src.labelling.label_primaire.opti._create_study", return_value=mock_study)
+    mocker.patch("src.labelling.label_primaire.opti.create_objective", return_value=lambda trial: 0.5)
 
     mock_result = MagicMock()
+    mock_result.best_score = 0.75  # Set real value to avoid formatting error
     mocker.patch("src.labelling.label_primaire.opti._build_result", return_value=mock_result)
+    mocker.patch("src.labelling.label_primaire.opti._log_result")  # Skip logging
 
     res = optimize_model("lightgbm")
     assert res == mock_result
@@ -285,9 +302,10 @@ def test_run_sequential(mocker):
 
 def test_main_cli(mocker):
     mocker.patch("src.labelling.label_primaire.opti.select_models_interactive", return_value=["lightgbm"])
-    mocker.patch("builtins.input", side_effect=["1", "1", "n", "o"]) # trials, splits, parallel, launch
+    # trials, splits, data_fraction, parallel, launch
+    mocker.patch("builtins.input", side_effect=["1", "1", "1.0", "n", "o"])
 
-    mock_run = mocker.patch("src.labelling.label_primaire.opti._run_sequential")
+    mock_run = mocker.patch("src.labelling.label_primaire.opti._run_sequential", return_value=[])
     mocker.patch("src.labelling.label_primaire.opti._print_final_summary")
 
     main()

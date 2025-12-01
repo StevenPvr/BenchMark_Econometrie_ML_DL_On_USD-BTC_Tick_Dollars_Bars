@@ -272,7 +272,10 @@ def test_save_outputs(mocker, mock_paths):
     pass
 
 def test_main(mocker, mock_paths):
-    # Mock all the steps
+    # Mock sys.argv with --no-batch to use non-batch mode where our mocks apply
+    mocker.patch("sys.argv", ["main.py", "--no-batch"])
+
+    # Mock all the steps (these apply to non-batch mode)
     mocker.patch("src.features.main.setup_logging")
     mocker.patch("src.features.main.load_input_data", return_value=pd.DataFrame({"close": [1, 2], "log_return": [0.1, 0.2]}))
     mocker.patch("src.features.main.compute_timestamp_features", side_effect=lambda x: x)

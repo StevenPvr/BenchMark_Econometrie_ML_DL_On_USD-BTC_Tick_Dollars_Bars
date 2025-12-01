@@ -53,14 +53,15 @@ class TestRunDollarBarsPipeline:
         assert result.equals(sample_bars_df)
         mock_prepare_dollar_bars.assert_called_once_with(
             parquet_path=input_path,
-            output_parquet=output_path,
+            target_ticks_per_bar=None,
             target_num_bars=100,
+            output_parquet=output_path,
             threshold=50.0,
             adaptive=False,
             threshold_bounds=None,
             calibration_fraction=1.0,
-            include_incomplete_final=False,  # Default changed to False
-            exclude_calibration_prefix=False,  # New parameter
+            include_incomplete_final=False,
+            exclude_calibration_prefix=False,
         )
 
     def test_run_dollar_bars_pipeline_missing_input(self):
@@ -95,75 +96,121 @@ class TestRunDollarBarsPipeline:
              expected_prefix = str(mock_output_dir / "dollar_imbalance_bars_")
              assert output_path.startswith(expected_prefix)
 
+    def test_run_dollar_bars_pipeline_with_target_ticks_per_bar(self, mock_prepare_dollar_bars, sample_bars_df, tmp_path):
+        """Test pipeline with target_ticks_per_bar parameter."""
+        mock_prepare_dollar_bars.return_value = sample_bars_df
+
+        input_path = tmp_path / "input.parquet"
+        input_path.touch()
+        output_path = tmp_path / "output.parquet"
+
+        result = run_dollar_bars_pipeline(
+            target_ticks_per_bar=100,
+            input_parquet=input_path,
+            output_parquet=output_path
+        )
+
+        assert result.equals(sample_bars_df)
+        args, kwargs = mock_prepare_dollar_bars.call_args
+        assert kwargs['target_ticks_per_bar'] == 100
+
 
 class TestRunDollarBarsPipelineBatch:
 
-    def test_batch_processing_success(self, mock_prepare_dollar_bars, sample_bars_df, mock_logger, tmp_path):
-        """Test batch processing iterates over files and consolidates results."""
-        input_dir = tmp_path / "input_parts"
-        input_dir.mkdir()
-
-        # Create dummy parquet files
-        (input_dir / "part1.parquet").touch()
-        (input_dir / "part2.parquet").touch()
+    def test_batch_processing_success(self, tmp_path):
+        """Test batch processing with valid parquet file."""
+        # Create a valid parquet file with tick data
+        input_path = tmp_path / "input.parquet"
+        df_ticks = pd.DataFrame({
+            "timestamp": np.arange(1000, dtype=np.int64) * 1000,  # ms timestamps
+            "price": np.random.uniform(100, 101, 1000),
+            "amount": np.random.uniform(0.1, 1.0, 1000)
+        })
+        df_ticks.to_parquet(input_path)
 
         output_path = tmp_path / "output.parquet"
 
-        # Mock pandas read_parquet for checking file length logging
-        mock_prepare_dollar_bars.return_value = sample_bars_df
+        result = run_dollar_bars_pipeline_batch(
+            input_parquet=input_path,
+            target_ticks_per_bar=50,
+            output_parquet=output_path,
+            batch_size=500
+        )
 
-        # Mock pyarrow.parquet.ParquetWriter and pd.read_parquet
+        assert not result.empty
+        assert output_path.exists()
+        assert "bar_id" in result.columns
+        assert "close" in result.columns
 
-        with patch("pyarrow.parquet.ParquetWriter") as mock_writer_cls, \
-             patch("src.data_preparation.preparation.pd.read_parquet") as mock_read_parquet:
-
-            mock_writer_instance = mock_writer_cls.return_value
-
-            consolidated_df = pd.concat([sample_bars_df, sample_bars_df])
-            mock_read_parquet.side_effect = [
-                pd.DataFrame({"dummy": [1]*10}), # part 1 log
-                pd.DataFrame({"dummy": [1]*10}), # part 2 log
-                consolidated_df # final read for consolidation
-            ]
-
-            result = run_dollar_bars_pipeline_batch(
-                input_dir=input_dir,
-                target_num_bars=100,
-                output_parquet=output_path
+    def test_batch_processing_missing_file(self):
+        """Test raises FileNotFoundError if input file missing."""
+        with pytest.raises(FileNotFoundError, match="Input parquet not found"):
+            run_dollar_bars_pipeline_batch(
+                input_parquet="non_existent.parquet",
+                target_ticks_per_bar=100
             )
 
-            assert mock_prepare_dollar_bars.call_count == 2
-            assert mock_writer_cls.call_count == 1
-            assert mock_writer_instance.write_table.call_count == 2
-            mock_writer_instance.close.assert_called_once()
+    def test_batch_processing_adaptive(self, tmp_path):
+        """Test batch processing with adaptive threshold."""
+        input_path = tmp_path / "input.parquet"
+        df_ticks = pd.DataFrame({
+            "timestamp": np.arange(500, dtype=np.int64) * 1000,
+            "price": np.random.uniform(100, 101, 500),
+            "amount": np.random.uniform(0.1, 1.0, 500)
+        })
+        df_ticks.to_parquet(input_path)
 
-            assert result.equals(consolidated_df.sort_values("datetime_close").drop_duplicates(subset=["datetime_close"]).reset_index(drop=True))
+        output_path = tmp_path / "output.parquet"
 
-    def test_batch_processing_no_files(self, tmp_path):
-        """Test raises ValueError if no parquet files found."""
-        input_dir = tmp_path / "empty_dir"
-        input_dir.mkdir()
+        result = run_dollar_bars_pipeline_batch(
+            input_parquet=input_path,
+            target_ticks_per_bar=25,
+            output_parquet=output_path,
+            adaptive=True
+        )
 
-        with pytest.raises(ValueError, match="No parquet files found"):
-            run_dollar_bars_pipeline_batch(input_dir=input_dir, target_num_bars=100)
+        assert not result.empty
 
-    def test_batch_processing_missing_dir(self):
-        """Test raises FileNotFoundError if directory missing."""
-        with pytest.raises(FileNotFoundError, match="Input directory not found"):
-            run_dollar_bars_pipeline_batch(input_dir="non_existent", target_num_bars=100)
+    def test_batch_processing_with_threshold_bounds(self, tmp_path):
+        """Test batch processing with threshold bounds."""
+        input_path = tmp_path / "input.parquet"
+        df_ticks = pd.DataFrame({
+            "timestamp": np.arange(500, dtype=np.int64) * 1000,
+            "price": np.random.uniform(100, 101, 500),
+            "amount": np.random.uniform(0.1, 1.0, 500)
+        })
+        df_ticks.to_parquet(input_path)
 
-    def test_batch_processing_no_bars_generated(self, mock_prepare_dollar_bars, tmp_path):
-        """Test raises ValueError if all files yield empty bars."""
-        input_dir = tmp_path / "input_parts"
-        input_dir.mkdir()
-        (input_dir / "part1.parquet").touch()
+        output_path = tmp_path / "output.parquet"
 
-        mock_prepare_dollar_bars.return_value = pd.DataFrame() # Empty result
+        result = run_dollar_bars_pipeline_batch(
+            input_parquet=input_path,
+            target_ticks_per_bar=25,
+            output_parquet=output_path,
+            adaptive=True,
+            threshold_bounds=(0.5, 2.0)
+        )
 
-        # We also need to mock read_parquet because it is called to log ticks count
-        with patch("src.data_preparation.preparation.pd.read_parquet", return_value=pd.DataFrame({"a":[1]})):
-             with pytest.raises(ValueError, match="No bars were generated"):
-                run_dollar_bars_pipeline_batch(
-                    input_dir=input_dir,
-                    target_num_bars=100
-                )
+        assert not result.empty
+
+    def test_batch_processing_include_incomplete_final(self, tmp_path):
+        """Test batch processing with include_incomplete_final=True."""
+        input_path = tmp_path / "input.parquet"
+        df_ticks = pd.DataFrame({
+            "timestamp": np.arange(100, dtype=np.int64) * 1000,
+            "price": np.full(100, 100.0),
+            "amount": np.full(100, 0.01)  # Small volumes to ensure incomplete final bar
+        })
+        df_ticks.to_parquet(input_path)
+
+        output_path = tmp_path / "output.parquet"
+
+        result = run_dollar_bars_pipeline_batch(
+            input_parquet=input_path,
+            target_ticks_per_bar=200,  # More than available ticks to force incomplete
+            output_parquet=output_path,
+            include_incomplete_final=True
+        )
+
+        # Should have at least one bar (the incomplete final one)
+        assert len(result) >= 1

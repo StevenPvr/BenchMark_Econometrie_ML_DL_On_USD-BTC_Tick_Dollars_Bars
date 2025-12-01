@@ -65,13 +65,18 @@ class TestDataLoading:
         with pytest.raises(ValueError, match="Unknown model"):
             load_model_class("invalid_model")
 
-    def test_get_dataset_for_model(self, mocker):
+    def test_get_dataset_for_model(self, mocker, tmp_path):
         """Test dataset loading."""
-        mocker.patch("src.labelling.label_meta.utils.DATASET_FEATURES_PARQUET", Path("dummy_tree.parquet"))
-        mocker.patch("pandas.read_parquet", return_value=pd.DataFrame())
-        mocker.patch("pathlib.Path.exists", return_value=True)
+        # Create dummy parquet file
+        dummy_df = pd.DataFrame({"col": [1, 2, 3]})
+        parquet_path = tmp_path / "test.parquet"
+        dummy_df.to_parquet(parquet_path)
 
-        df = get_dataset_for_model("lightgbm") # tree dataset
+        mocker.patch("src.labelling.label_meta.utils.DATASET_FEATURES_FINAL_PARQUET", parquet_path)
+        mocker.patch("src.labelling.label_meta.utils.DATASET_FEATURES_LINEAR_FINAL_PARQUET", parquet_path)
+        mocker.patch("src.labelling.label_meta.utils.DATASET_FEATURES_LSTM_FINAL_PARQUET", parquet_path)
+
+        df = get_dataset_for_model("lightgbm")  # tree dataset
         assert isinstance(df, pd.DataFrame)
 
         with pytest.raises(ValueError):

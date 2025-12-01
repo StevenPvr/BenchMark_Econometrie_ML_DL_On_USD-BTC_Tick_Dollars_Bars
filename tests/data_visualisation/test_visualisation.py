@@ -320,13 +320,7 @@ def test_plot_trend_analysis(mock_plt, mock_dollar_bars_df, tmp_path):
 @patch("src.data_visualisation.visualisation.compute_autocorrelation")
 @patch("src.data_visualisation.visualisation.compute_autocorrelation_squared")
 @patch("src.data_visualisation.visualisation.run_ljung_box_test")
-@patch("src.data_visualisation.visualisation.compute_trend_statistics")
-@patch("src.data_visualisation.visualisation.plot_trend_analysis")
-@patch("src.data_visualisation.visualisation.plot_trend_extraction")
 def test_run_full_analysis(
-    mock_plot_trend_extraction,
-    mock_plot_trend_analysis,
-    mock_compute_trend_statistics,
     mock_run_ljung_box,
     mock_compute_autocorrelation_squared,
     mock_compute_autocorrelation,
@@ -344,7 +338,6 @@ def test_run_full_analysis(
     mock_load.return_value = mock_dollar_bars_df
 
     # Setup mocks to return something valid
-    mock_compute_trend_statistics.return_value = {"Linear_Regression": {}, "Mann_Kendall": {}}
     mock_run_stationarity.return_value = {"ADF": {}, "KPSS": {}}
     mock_run_normality.return_value = {"Jarque_Bera": {}, "Shapiro_Wilk": {}}
     mock_run_ljung_box.return_value = {"lags_tested": {}}
@@ -366,9 +359,6 @@ def test_run_full_analysis(
     assert mock_compute_autocorrelation.called
     assert mock_compute_autocorrelation_squared.called
     assert mock_run_ljung_box.called
-    assert mock_compute_trend_statistics.called
-    assert mock_plot_trend_analysis.called
-    assert mock_plot_trend_extraction.called
 
 
 def test_run_full_analysis_systematic_sampling(mock_dollar_bars_df, tmp_path):

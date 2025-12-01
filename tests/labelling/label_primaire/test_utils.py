@@ -140,9 +140,11 @@ def test_get_dataset_for_model(mocker: MockerFixture, tmp_path: Path):
     p = tmp_path / "test.parquet"
     df.to_parquet(p)
 
-    mocker.patch("src.labelling.label_primaire.utils.DATASET_FEATURES_PARQUET", p)
+    mocker.patch("src.labelling.label_primaire.utils.DATASET_FEATURES_FINAL_PARQUET", p)
+    mocker.patch("src.labelling.label_primaire.utils.DATASET_FEATURES_LINEAR_FINAL_PARQUET", p)
+    mocker.patch("src.labelling.label_primaire.utils.DATASET_FEATURES_LSTM_FINAL_PARQUET", p)
 
-    # Valid model
+    # Valid model - tree dataset (lightgbm)
     loaded_df = get_dataset_for_model("lightgbm")
     pd.testing.assert_frame_equal(df, loaded_df)
 
@@ -151,7 +153,7 @@ def test_get_dataset_for_model(mocker: MockerFixture, tmp_path: Path):
         get_dataset_for_model("unknown")
 
     # File not found
-    mocker.patch("src.labelling.label_primaire.utils.DATASET_FEATURES_PARQUET", Path("nonexistent"))
+    mocker.patch("src.labelling.label_primaire.utils.DATASET_FEATURES_FINAL_PARQUET", Path("nonexistent"))
     with pytest.raises(FileNotFoundError):
         get_dataset_for_model("lightgbm")
 

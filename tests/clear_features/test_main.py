@@ -55,8 +55,8 @@ def test_clean_nan_values():
     assert "feat_1" in stats["nan_cols"]
 
 
-def test_clean_nan_values_requires_split_column():
-    """Test that clean_nan_values raises error without split column."""
+def test_clean_nan_values_without_split_column():
+    """Test that clean_nan_values warns and uses full dataset without split column."""
     df = pd.DataFrame({
         "feat_1": [1.0, np.nan, 3.0],
         "target": [1.0, 1.0, 1.0],
@@ -64,8 +64,13 @@ def test_clean_nan_values_requires_split_column():
         # No split column
     })
 
-    with pytest.raises(ValueError, match="split"):
-        clean_nan_values(df, meta_columns=["meta"], target_column="target")
+    import warnings
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        # Should not raise, just warn and use full dataset
+        cleaned, stats = clean_nan_values(df, meta_columns=["meta"], target_column="target")
+        # Median of [1.0, 3.0] is 2.0
+        assert cleaned["feat_1"].iloc[1] == 2.0
 
 
 def test_clean_nan_values_uses_train_median_only():

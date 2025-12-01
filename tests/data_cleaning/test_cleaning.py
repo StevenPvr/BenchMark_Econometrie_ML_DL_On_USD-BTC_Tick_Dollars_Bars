@@ -16,9 +16,11 @@ from src.data_cleaning.cleaning import (
     _filter_rolling_zscore_outliers,
     _filter_volume_outliers,
     _load_raw_trades,
+    _merge_outlier_reports,
     _persist_clean_dataset,
     _strip_unwanted_columns,
     _validate_numeric_columns,
+    _compute_dollar_notional,
     clean_ticks_data,
     OutlierReport,
 )
@@ -598,3 +600,160 @@ class TestOutlierReport:
         report = OutlierReport(total_ticks=0, final_ticks=0)
         # Should not raise (division by zero protection)
         report.log_summary()
+
+
+class TestMergeOutlierReports:
+    """Tests for _merge_outlier_reports function."""
+
+    def test_merge_with_none_aggregate(self):
+        """Test merging when aggregate is None (first partition)."""
+        current = OutlierReport(
+            total_ticks=1000,
+            removed_mad_price=10,
+            removed_rolling_zscore=5,
+            removed_volume_outliers=3,
+            removed_dollar_value=2,
+            removed_dust_trades=8,
+            final_ticks=972,
+        )
+        result = _merge_outlier_reports(None, current)
+        assert result is current
+
+    def test_merge_two_reports(self):
+        """Test merging two non-None reports."""
+        aggregate = OutlierReport(
+            total_ticks=1000,
+            removed_mad_price=10,
+            removed_rolling_zscore=5,
+            removed_volume_outliers=3,
+            removed_dollar_value=2,
+            removed_dust_trades=8,
+            final_ticks=972,
+        )
+        current = OutlierReport(
+            total_ticks=500,
+            removed_mad_price=5,
+            removed_rolling_zscore=3,
+            removed_volume_outliers=2,
+            removed_dollar_value=1,
+            removed_dust_trades=4,
+            final_ticks=485,
+        )
+        result = _merge_outlier_reports(aggregate, current)
+
+        assert result.total_ticks == 1500
+        assert result.removed_mad_price == 15
+        assert result.removed_rolling_zscore == 8
+        assert result.removed_volume_outliers == 5
+        assert result.removed_dollar_value == 3
+        assert result.removed_dust_trades == 12
+        assert result.final_ticks == 1457
+
+    def test_merge_multiple_reports_sequentially(self):
+        """Test merging multiple reports in sequence."""
+        reports = [
+            OutlierReport(total_ticks=100, final_ticks=90, removed_mad_price=5),
+            OutlierReport(total_ticks=200, final_ticks=180, removed_mad_price=10),
+            OutlierReport(total_ticks=150, final_ticks=140, removed_mad_price=8),
+        ]
+        aggregate = None
+        for report in reports:
+            aggregate = _merge_outlier_reports(aggregate, report)
+
+        assert aggregate.total_ticks == 450
+        assert aggregate.final_ticks == 410
+        assert aggregate.removed_mad_price == 23
+
+
+class TestComputeDollarNotional:
+    """Tests for _compute_dollar_notional function."""
+
+    @pytest.fixture
+    def sample_df(self):
+        return pd.DataFrame({
+            "price": [100.0, 200.0, 150.0],
+            "amount": [1.0, 2.0, 0.5],
+        })
+
+    def test_usd_base_currency(self, sample_df):
+        """Test when USD is the base currency (e.g., USD/BTC)."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "USD/BTC")
+        # Should return volume directly since USD is base
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            sample_df["amount"].reset_index(drop=True)
+        )
+
+    def test_usdt_quote_currency(self, sample_df):
+        """Test when USDT is the quote currency (e.g., BTC/USDT)."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "BTC/USDT")
+        # Should return price * volume
+        expected = sample_df["price"] * sample_df["amount"]
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True)
+        )
+
+    def test_usdc_quote_currency(self, sample_df):
+        """Test when USDC is the quote currency."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "ETH/USDC")
+        expected = sample_df["price"] * sample_df["amount"]
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True)
+        )
+
+    def test_busd_quote_currency(self, sample_df):
+        """Test when BUSD is the quote currency."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "BTC/BUSD")
+        expected = sample_df["price"] * sample_df["amount"]
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True)
+        )
+
+    def test_dai_quote_currency(self, sample_df):
+        """Test when DAI is the quote currency."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "ETH/DAI")
+        expected = sample_df["price"] * sample_df["amount"]
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True)
+        )
+
+    def test_non_usd_pair(self, sample_df):
+        """Test non-USD pair (e.g., BTC/ETH)."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "BTC/ETH")
+        # Fallback to price * volume
+        expected = sample_df["price"] * sample_df["amount"]
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True)
+        )
+
+    def test_symbol_without_slash(self, sample_df):
+        """Test symbol without slash separator."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "BTCUSD")
+        # Fallback to price * volume since no quote is recognized
+        expected = sample_df["price"] * sample_df["amount"]
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True)
+        )
+
+    def test_lowercase_usd_codes(self, sample_df):
+        """Test that USD codes are case-insensitive."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "btc/usdt")
+        expected = sample_df["price"] * sample_df["amount"]
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True)
+        )
+
+    def test_mixed_case_usd_base(self, sample_df):
+        """Test mixed case USD as base currency."""
+        result = _compute_dollar_notional(sample_df, "price", "amount", "Usd/BTC")
+        pd.testing.assert_series_equal(
+            result.reset_index(drop=True),
+            sample_df["amount"].reset_index(drop=True)
+        )
