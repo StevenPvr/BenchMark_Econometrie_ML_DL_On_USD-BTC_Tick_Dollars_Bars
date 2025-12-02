@@ -81,8 +81,8 @@ logger = logging.getLogger(__name__)
 # TRIPLE BARRIER LABELING
 # =============================================================================
 
-MIN_LABEL_RATIO_POS_NEG = 0.15  # Require at least 15% for -1 and 1
-MIN_LABEL_RATIO_NEUTRAL = 0.10  # Require at least 10% for 0
+MIN_LABEL_RATIO_POS_NEG = 0.10  # Require at least 10% for -1 and 1 (was 15%)
+MIN_LABEL_RATIO_NEUTRAL = 0.05  # Require at least 5% for 0 (was 10%)
 PARALLEL_MIN_EVENTS = 10_000
 
 # Type alias for events cache key
@@ -503,10 +503,29 @@ def _sample_model_params(
     search_space: Dict[str, Any],
     config: OptimizationConfig,
 ) -> Dict[str, Any]:
-    """Sample model hyperparameters."""
-    params = {"random_state": config.random_state}
-    for name, (_, choices) in search_space.items():
-        params[name] = trial.suggest_categorical(name, choices)
+    """Sample model hyperparameters with support for categorical/int/float spaces."""
+    params: Dict[str, Any] = {"random_state": config.random_state}
+
+    for name, (param_type, values) in search_space.items():
+        if param_type == "categorical":
+            params[name] = trial.suggest_categorical(name, values)
+        elif param_type == "int":
+            # values: [low, high, step?]
+            low, high = values[0], values[1]
+            step = values[2] if len(values) > 2 else 1
+            params[name] = trial.suggest_int(name, int(low), int(high), step=int(step))
+        elif param_type == "float":
+            # values: [low, high, log?]
+            low, high = values[0], values[1]
+            log_flag = False
+            if len(values) > 2:
+                flag = values[2]
+                log_flag = bool(flag == "log" or flag is True)
+            params[name] = trial.suggest_float(name, float(low), float(high), log=log_flag)
+        else:
+            # Fallback to categorical to avoid crashing on unknown types
+            params[name] = trial.suggest_categorical(name, values)
+
     return params
 
 
@@ -771,10 +790,11 @@ def _run_cv_scoring(
 
     mean_mcc = float(np.mean(cv_scores_mcc))
     mean_f1w = float(np.mean(cv_scores_f1w))
-    objective_score = 0.5 * (mean_mcc + mean_f1w)
+    objective_score = (0.7 * mean_mcc) + (0.3 * mean_f1w)
     reason = (
         f"{trial_prefix}OBJ={objective_score:.4f} "
-        f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}; {len(cv_scores_mcc)}/{len(splits)} folds)"
+        f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}, w=0.7/0.3; "
+        f"{len(cv_scores_mcc)}/{len(splits)} folds)"
     )
     logger.debug(reason)
     return objective_score, mean_mcc, mean_f1w, len(cv_scores_mcc), len(splits), reason
@@ -1172,7 +1192,7 @@ def _build_result(
         best_triple_barrier_params=best_tb,
         best_focal_loss_params=best_focal,
         best_score=best_trial.value if best_trial.value is not None else float("nan"),
-        metric="mean_mcc_f1_weighted",
+        metric="weighted_mcc_0.7_f1w_0.3",
         n_trials=len(study.trials),
     )
 

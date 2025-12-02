@@ -306,6 +306,14 @@ def save_shap_plots(
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: List[Path] = []
 
+    def _safe_name(name: str) -> str:
+        return (
+            name.replace(" ", "_")
+            .replace("+", "p")
+            .replace("-", "m")
+            .replace("/", "_")
+        )
+
     # Normalize SHAP values format
     # TreeExplainer for multi-class can return:
     # - List of arrays: [array(n_samples, n_features), ...] one per class
@@ -356,6 +364,9 @@ def save_shap_plots(
         n_classes = len(shap_list)
         if class_names is None:
             class_names = [f"Class {i}" for i in range(n_classes)]
+        # Align length in case of mismatch
+        if len(class_names) != n_classes:
+            class_names = class_names[:n_classes]
 
         # Summary plot for each class
         for i, (sv, cn) in enumerate(zip(shap_list, class_names)):
@@ -370,7 +381,8 @@ def save_shap_plots(
                 )
                 plt.title(f"SHAP Summary - {model_name} - {cn}")
                 plt.tight_layout()
-                path = output_dir / f"{model_name}_shap_summary_class_{i}.png"
+                safe_cn = _safe_name(str(cn))
+                path = output_dir / f"{model_name}_shap_summary_class_{safe_cn}.png"
                 plt.savefig(path, dpi=150, bbox_inches="tight")
                 plt.close()
                 saved_paths.append(path)
@@ -387,7 +399,7 @@ def save_shap_plots(
             feature_importance.plot(kind="barh")
             plt.xlabel("Mean |SHAP value| (average across classes)")
             plt.ylabel("Feature")
-            plt.title(f"SHAP Feature Importance - {model_name}")
+            plt.title(f"SHAP Feature Importance - {model_name} - all classes")
             plt.tight_layout()
             path = output_dir / f"{model_name}_shap_bar_global.png"
             plt.savefig(path, dpi=150, bbox_inches="tight")

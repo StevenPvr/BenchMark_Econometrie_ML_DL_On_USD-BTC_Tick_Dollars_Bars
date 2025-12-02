@@ -43,53 +43,54 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": "src.model.lightgbm_model.LightGBMModel",
         "dataset": "tree",
         "search_space": {
-            "n_estimators": ("categorical", [200, 400, 800, 1200]),
-            "max_depth": ("categorical", [3, 5, 7, 9]),
-            "num_leaves": ("categorical", [31, 63, 127, 255]),
-            "learning_rate": ("categorical", [0.01, 0.02, 0.05, 0.1]),
-            "subsample": ("categorical", [0.6, 0.75, 0.9, 1.0]),
-            "subsample_freq": ("categorical", [0, 1]),
-            "colsample_bytree": ("categorical", [0.6, 0.75, 0.9, 1.0]),
-            "min_child_samples": ("categorical", [5, 10, 20, 50]),
-            "min_split_gain": ("categorical", [0.0, 0.05, 0.1, 0.2]),
-            "reg_alpha": ("categorical", [1e-4, 1e-3, 1e-2, 0.1, 1.0]),
-            "reg_lambda": ("categorical", [1e-4, 1e-3, 1e-2, 0.1, 1.0]),
+            # Wider / finer ranges; see _sample_model_params for type handling
+            "n_estimators": ("int", [200, 1400, 50]),  # step 50
+            "max_depth": ("int", [3, 12, 1]),
+            "num_leaves": ("int", [31, 511, 8]),
+            "learning_rate": ("float", [0.005, 0.2, "log"]),  # log scale
+            "subsample": ("float", [0.5, 1.0]),
+            "subsample_freq": ("int", [0, 5, 1]),
+            "colsample_bytree": ("float", [0.5, 1.0]),
+            "min_child_samples": ("int", [5, 150, 5]),
+            "min_split_gain": ("float", [0.0, 0.3]),
+            "reg_alpha": ("float", [1e-4, 1.0, "log"]),
+            "reg_lambda": ("float", [1e-4, 1.0, "log"]),
         },
     },
     "xgboost": {
         "class": "src.model.xgboost_model.XGBoostModel",
         "dataset": "tree",
         "search_space": {
-            "n_estimators": ("categorical", [200, 400, 800, 1200]),
-            "max_depth": ("categorical", [3, 5, 7, 9]),
-            "learning_rate": ("categorical", [0.01, 0.02, 0.05, 0.1]),
-            "subsample": ("categorical", [0.6, 0.75, 0.9, 1.0]),
-            "colsample_bytree": ("categorical", [0.6, 0.8, 1.0]),
-            "reg_alpha": ("categorical", [0.0, 1e-3, 1e-2, 0.1, 1.0]),
-            "reg_lambda": ("categorical", [0.0, 1e-3, 1e-2, 0.1, 1.0]),
+            "n_estimators": ("int", [200, 1400, 50]),
+            "max_depth": ("int", [3, 12, 1]),
+            "learning_rate": ("float", [0.005, 0.2, "log"]),
+            "subsample": ("float", [0.5, 1.0]),
+            "colsample_bytree": ("float", [0.5, 1.0]),
+            "reg_alpha": ("float", [1e-4, 1.0, "log"]),
+            "reg_lambda": ("float", [1e-4, 1.0, "log"]),
         },
     },
     "catboost": {
         "class": "src.model.catboost_model.CatBoostModel",
         "dataset": "tree",
         "search_space": {
-            "iterations": ("categorical", [200, 400, 800]),
-            "depth": ("categorical", [4, 6, 8, 10]),
-            "learning_rate": ("categorical", [0.02, 0.05, 0.1]),
-            "l2_leaf_reg": ("categorical", [0.5, 1.0, 3.0, 5.0]),
-            "random_strength": ("categorical", [0.5, 1.0, 1.5]),
-            "bagging_temperature": ("categorical", [0.0, 0.5, 1.0, 3.0]),
+            "iterations": ("int", [200, 1200, 100]),
+            "depth": ("int", [4, 12, 1]),
+            "learning_rate": ("float", [0.01, 0.2]),
+            "l2_leaf_reg": ("float", [0.1, 10.0, "log"]),
+            "random_strength": ("float", [0.5, 2.0]),
+            "bagging_temperature": ("float", [0.0, 5.0]),
         },
     },
     "random_forest": {
         "class": "src.model.random_forest_model.RandomForestModel",
         "dataset": "tree",
         "search_space": {
-            "n_estimators": ("categorical", [200, 400, 800, 1200]),
-            "max_depth": ("categorical", [5, 8, 12, 16]),
-            "min_samples_split": ("categorical", [2, 4, 6, 10]),
-            "min_samples_leaf": ("categorical", [1, 2, 4, 6]),
-            "max_features": ("categorical", ["sqrt", "log2", 0.7]),
+            "n_estimators": ("int", [200, 1600, 100]),
+            "max_depth": ("int", [5, 24, 1]),
+            "min_samples_split": ("int", [2, 12, 1]),
+            "min_samples_leaf": ("int", [1, 8, 1]),
+            "max_features": ("float", [0.4, 1.0]),
         },
     },
     # Econometric - Linear
@@ -97,7 +98,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": "src.model.ridge_classifier.RidgeClassifierModel",
         "dataset": "linear",
         "search_space": {
-            "alpha": ("categorical", [1e-4, 1e-3, 1e-2, 1e-1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 1e3]),
+            "alpha": ("float", [1e-4, 1e3, "log"]),
         },
     },
     "logistic": {
@@ -106,7 +107,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "search_space": {
             # C: inverse regularization (higher = less regularization)
             # For financial data: test range from strong reg (1e-3) to weak (100.0)
-            "C": ("categorical", [1e-3, 1e-2, 1e-1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 250.0]),
+            "C": ("float", [1e-3, 300.0, "log"]),
         },
     },
     # Deep Learning
@@ -114,12 +115,12 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": "src.model.lstm_model.LSTMModel",
         "dataset": "lstm",
         "search_space": {
-            "hidden_size": ("categorical", [32, 64, 96, 128]),
-            "num_layers": ("categorical", [1, 2, 3]),
-            "dropout": ("categorical", [0.0, 0.1, 0.2, 0.3]),
-            "learning_rate": ("categorical", [1e-4, 5e-4, 1e-3, 3e-3, 1e-2]),
-            "batch_size": ("categorical", [32, 64, 96]),
-            "sequence_length": ("categorical", [10, 20, 30, 40]),
+            "hidden_size": ("int", [32, 256, 16]),
+            "num_layers": ("int", [1, 4, 1]),
+            "dropout": ("float", [0.0, 0.5]),
+            "learning_rate": ("float", [1e-4, 1e-2, "log"]),
+            "batch_size": ("int", [32, 128, 16]),
+            "sequence_length": ("int", [10, 60, 5]),
         },
     },
 }
@@ -156,7 +157,7 @@ FOCAL_LOSS_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
 
 # Minimum prediction ratio for minority classes (guard against degenerate models)
 # If model predicts less than this fraction of long+short, apply penalty
-MIN_MINORITY_PREDICTION_RATIO: float = 0.10  # At least 10% of predictions should be long/short
+MIN_MINORITY_PREDICTION_RATIO: float = 0.05  # Allow rarer signals (was 10%)
 
 # Models that support focal loss (gradient boosting with custom objectives)
 FOCAL_LOSS_SUPPORTED_MODELS: List[str] = ["lightgbm"]
@@ -185,7 +186,7 @@ class OptimizationConfig:
     n_splits: int = 5
     min_train_size: int = 500
     vol_span: int = 100
-    data_fraction: float = 0.5
+    data_fraction: float = 1.0
     random_state: int = DEFAULT_RANDOM_STATE
     timeout: int | None = None
     parallelize_labeling: bool = True
