@@ -9,9 +9,10 @@ The primary model learns to predict:
 - 0 (Neutral): No significant move expected
 
 Pipeline:
-1. opti: Optimize primary model hyperparameters + triple barrier params
-2. train: Train primary model with optimized parameters
-3. eval: Evaluate primary model performance (TODO)
+1. Triple barrier labeling is done SEPARATELY by triple_barriere/relabel_datasets.py
+2. opti: Optimize primary model hyperparameters (uses pre-calculated labels)
+3. train: Train primary model with optimized parameters
+4. eval: Evaluate primary model performance (TODO)
 
 Reference: "Advances in Financial Machine Learning" by Marcos Lopez de Prado
 """
@@ -19,7 +20,7 @@ Reference: "Advances in Financial Machine Learning" by Marcos Lopez de Prado
 from src.labelling.label_primaire.utils import (
     # Registry
     MODEL_REGISTRY,
-    TRIPLE_BARRIER_SEARCH_SPACE,
+    RISK_REWARD_RATIO,
     # Dataclasses
     OptimizationConfig,
     OptimizationResult,
@@ -32,9 +33,6 @@ from src.labelling.label_primaire.utils import (
 )
 
 from src.labelling.label_primaire.opti import (
-    # Core De Prado functions
-    apply_pt_sl_on_t1,
-    get_events_primary,
     # Optimization
     optimize_model,
     WalkForwardCV,
@@ -47,11 +45,13 @@ from src.labelling.label_primaire.train import (
     TrainingResult,
 )
 
+# Fast Numba-optimized labeling (use this for triple-barrier events)
+from src.labelling.triple_barriere import get_events_primary_fast
+
 __all__ = [
-    # Core De Prado functions
+    # Core De Prado functions (Numba-optimized)
     "get_daily_volatility",
-    "apply_pt_sl_on_t1",
-    "get_events_primary",
+    "get_events_primary_fast",
     # Optimization
     "optimize_model",
     "OptimizationConfig",
@@ -68,5 +68,5 @@ __all__ = [
     "load_dollar_bars",
     # Registry
     "MODEL_REGISTRY",
-    "TRIPLE_BARRIER_SEARCH_SPACE",
+    "RISK_REWARD_RATIO",
 ]

@@ -8,13 +8,13 @@ Modules:
 --------
 - label_primaire: Primary model labeling pipeline (direction prediction)
 - label_meta: Meta-labeling for bet sizing (Chapter 3.6)
+- triple_barriere: Numba-optimized triple-barrier labeling and relabeling
 """
 
 from src.labelling.label_primaire import (
     # Core De Prado functions
     get_daily_volatility,
-    apply_pt_sl_on_t1,
-    get_events_primary,
+    get_events_primary_fast,
     # Optimization
     optimize_model,
     OptimizationConfig,
@@ -31,14 +31,13 @@ from src.labelling.label_primaire import (
     load_dollar_bars,
     # Registry
     MODEL_REGISTRY,
-    TRIPLE_BARRIER_SEARCH_SPACE,
+    RISK_REWARD_RATIO,
 )
 
 __all__ = [
-    # Core De Prado functions
+    # Core De Prado functions (Numba-optimized)
     "get_daily_volatility",
-    "apply_pt_sl_on_t1",
-    "get_events_primary",
+    "get_events_primary_fast",
     # Optimization
     "optimize_model",
     "OptimizationConfig",
@@ -55,5 +54,5 @@ __all__ = [
     "load_dollar_bars",
     # Registry
     "MODEL_REGISTRY",
-    "TRIPLE_BARRIER_SEARCH_SPACE",
+    "RISK_REWARD_RATIO",
 ]

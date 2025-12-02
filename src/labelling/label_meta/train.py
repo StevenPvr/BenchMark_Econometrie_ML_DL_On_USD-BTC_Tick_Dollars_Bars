@@ -1,17 +1,19 @@
 """
-Meta Model Training with Out-of-Sample Label Generation.
+Meta Model Training.
 
 This module implements the META model training pipeline that AVOIDS DATA LEAKAGE.
 The meta model learns to FILTER false positives from the primary model.
 
 Pipeline:
 1. Load trained PRIMARY model (generates direction: +1 Long, -1 Short)
-2. Generate OOS meta-labels on TRAIN using K-Fold Walk-Forward:
-   - For each fold k, train meta model on folds 1..k-1, predict on fold k
-   - Meta-label = 1 if primary's direction was correct, 0 otherwise
-3. Train final META model on entire TRAIN set (one-shot)
-4. Generate meta-labels on TEST using the final model
-5. Save all predictions for combined evaluation
+2. Load dataset with OOF predictions from primary model (avoids leakage)
+3. Calculate meta-labels: meta_label = 1 if (true_label × primary_prediction) > 0 else 0
+4. Train META model on entire TRAIN set (one-shot)
+5. Evaluate on TEST set
+6. Save model and predictions
+
+Note: No K-fold needed for meta model as it doesn't generate labels for downstream use.
+It uses OOF predictions from primary model, so no additional leakage prevention needed.
 
 Reference: "Advances in Financial Machine Learning" by Marcos Lopez de Prado, Chapter 3.6
 """
@@ -51,7 +53,7 @@ from src.labelling.label_meta.utils import (
     MODEL_REGISTRY,
     MetaOptimizationConfig,
     get_daily_volatility,
-    get_dataset_for_model,
+    get_labeled_dataset_for_primary_model,
     load_dollar_bars,
     load_model_class,
     load_primary_model,
@@ -65,86 +67,6 @@ from src.path import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# WALK-FORWARD K-FOLD CROSS-VALIDATION
-# =============================================================================
-
-
-class WalkForwardKFold:
-    """
-    Walk-Forward K-Fold Cross-Validation for time series.
-
-    For fold k, trains on ALL data BEFORE fold k (folds 1..k-1).
-    Never uses future data for training.
-    """
-
-    def __init__(
-        self,
-        n_splits: int = 5,
-        embargo_pct: float = 0.01,
-        min_train_size: int = 100,
-    ) -> None:
-        self.n_splits = n_splits
-        self.embargo_pct = embargo_pct
-        self.min_train_size = min_train_size
-
-    def split(
-        self,
-        X: pd.DataFrame,
-        y: pd.Series | None = None,
-        t1: pd.Series | None = None,
-    ) -> List[Tuple[np.ndarray, np.ndarray]]:
-        """Generate train/validation indices for each fold using walk-forward."""
-        n_samples = len(X)
-        indices = np.arange(n_samples)
-
-        fold_size = n_samples // self.n_splits
-        embargo_size = int(n_samples * self.embargo_pct)
-
-        splits = []
-
-        for fold_idx in range(self.n_splits):
-            val_start = fold_idx * fold_size
-            val_end = val_start + fold_size if fold_idx < self.n_splits - 1 else n_samples
-            val_indices = indices[val_start:val_end]
-
-            # Training: ALL data BEFORE this fold
-            train_end = val_start
-
-            # Apply embargo
-            if embargo_size > 0:
-                train_end = max(0, train_end - embargo_size)
-
-            train_indices = indices[:train_end]
-
-            # Apply purging if t1 is provided
-            if t1 is not None and len(train_indices) > 0:
-                train_indices = self._apply_purge(train_indices, val_indices, X, t1)
-
-            if len(train_indices) >= self.min_train_size and len(val_indices) > 0:
-                splits.append((train_indices, val_indices))
-
-        return splits
-
-    def _apply_purge(
-        self,
-        train_indices: np.ndarray,
-        val_indices: np.ndarray,
-        X: pd.DataFrame,
-        t1: pd.Series,
-    ) -> np.ndarray:
-        """Remove training samples whose labels overlap validation period."""
-        if len(val_indices) == 0:
-            return train_indices
-
-        val_start_time = X.index[val_indices[0]]
-        train_times = X.index[train_indices]
-        t1_train = t1.reindex(train_times)
-
-        overlap_mask = t1_train.notna() & (t1_train >= val_start_time)
-        return train_indices[~overlap_mask.to_numpy()]
 
 
 # =============================================================================
@@ -250,7 +172,7 @@ def load_optimized_params(
 
     return {
         "meta_model_params": opti_results["best_params"],
-        "triple_barrier_params": opti_results["best_triple_barrier_params"],
+        "triple_barrier_params": opti_results.get("best_triple_barrier_params", {}),
         "best_score": opti_results.get("best_score", None),
         "metric": opti_results.get("metric", "f1_score"),
     }
@@ -299,8 +221,8 @@ def compute_metrics(
 
 
 def _load_and_filter_features(model_name: str, split: str) -> pd.DataFrame:
-    """Load features and filter by split."""
-    features_df = get_dataset_for_model(model_name)
+    """Load features with OOF predictions and filter by split."""
+    features_df = get_labeled_dataset_for_primary_model(model_name)
 
     if "split" in features_df.columns:
         features_df = features_df[features_df["split"] == split].copy()
@@ -316,14 +238,33 @@ def _load_and_filter_features(model_name: str, split: str) -> pd.DataFrame:
     return cast(pd.DataFrame, features_df)
 
 
-def _remove_non_feature_cols(features_df: pd.DataFrame) -> pd.DataFrame:
-    """Remove non-feature columns."""
-    non_feature_cols = [
+def _remove_non_feature_cols(features_df: pd.DataFrame, keep_side: bool = False) -> pd.DataFrame:
+    """
+    Remove non-feature columns.
+
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        DataFrame with all columns.
+    keep_side : bool, optional
+        If True, keep 'side' column (needed for meta model), by default False.
+    """
+    non_feature_cols = {
         "bar_id", "timestamp_open", "timestamp_close",
         "datetime_open", "datetime_close",
-        "threshold_used", "log_return", "split", "label",
+        "threshold_used", "log_return", "split", "label", "t1",
+        "prediction",  # OOF predictions from primary model training
+    }
+
+    # Add 'side' to excluded columns only if not needed
+    if not keep_side:
+        non_feature_cols.add("side")
+
+    # Filter out prediction and probability columns
+    feature_cols = [
+        c for c in features_df.columns
+        if c not in non_feature_cols and not c.startswith("proba_")
     ]
-    feature_cols = [c for c in features_df.columns if c not in non_feature_cols]
     return cast(pd.DataFrame, features_df[feature_cols])
 
 
@@ -353,214 +294,95 @@ def _handle_missing_values(features_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_meta_data(
-    primary_model: BaseModel,
-    meta_model_name: str,
-    tb_params: Dict[str, Any],
-    vol_window: int = 100,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
+    primary_model_name: str,
+    filter_neutral_labels: bool = True,
+) -> Tuple[pd.DataFrame, pd.Series]:
     """
-    Prepare train/test data for meta model with labels.
+    Prepare TRAIN data only for meta model.
+
+    Meta labels are computed by comparing:
+    - Primary model OOF predictions (column "prediction")
+    - True triple barrier labels (column "label")
+
+    Meta label = 1 if (label × prediction) > 0 (primary was correct), else 0
 
     Returns
     -------
     Tuple containing:
-        X_train, X_test, y_train, y_test, t1_train, t1_test, side_train, side_test
+        X_train, y_train
     """
-    logger.info("Loading datasets...")
+    logger.info("Loading train dataset...")
 
-    # Load features
-    features_train = _load_and_filter_features(meta_model_name, TRAIN_SPLIT_LABEL)
-    features_test = _load_and_filter_features(meta_model_name, TEST_SPLIT_LABEL)
+    # Load features from PRIMARY model dataset (contains OOF predictions)
+    features_train = _load_and_filter_features(primary_model_name, TRAIN_SPLIT_LABEL)
 
     # Handle missing values
     features_train = _handle_missing_values(features_train)
-    features_test = _handle_missing_values(features_test)
 
-    # Get feature columns
-    X_train_raw = _remove_non_feature_cols(features_train)
-    X_test_raw = _remove_non_feature_cols(features_test)
+    if "label" not in features_train.columns:
+        raise ValueError("Train dataset must contain 'label' column (triple barrier labels).")
 
-    logger.info(f"Features: train={len(X_train_raw)}, test={len(X_test_raw)}")
-
-    # Load dollar bars
-    bars = load_dollar_bars()
-    close_raw = cast(pd.Series, bars["close"])
-
-    # Align close to features
-    close_train = _align_close_to_features(close_raw, features_train)
-    close_test = _align_close_to_features(close_raw, features_test)
-
-    volatility_train = get_daily_volatility(close_train, span=vol_window)
-    volatility_test = get_daily_volatility(close_test, span=vol_window)
-
-    # Generate PRIMARY model predictions (side)
-    logger.info("Generating primary model predictions (side)...")
-    side_train = pd.Series(
-        primary_model.predict(X_train_raw),
-        index=X_train_raw.index,
-        name="side",
-    )
-    side_test = pd.Series(
-        primary_model.predict(X_test_raw),
-        index=X_test_raw.index,
-        name="side",
-    )
-
-    # Filter to valid sides (+1 or -1)
-    side_train = side_train.loc[side_train.isin([1, -1])]
-    side_test = side_test.loc[side_test.isin([1, -1])]
-
-    logger.info(f"Side distribution train: {side_train.value_counts().to_dict()}")
-    logger.info(f"Side distribution test: {side_test.value_counts().to_dict()}")
-
-    # Generate META labels (bin: 1 if trade correct, 0 otherwise)
-    logger.info("Generating meta labels for train set...")
-    events_train = get_events_meta(
-        close=close_train,
-        t_events=pd.DatetimeIndex(side_train.index),
-        pt_mult=tb_params["pt_mult"],
-        sl_mult=tb_params["sl_mult"],
-        trgt=volatility_train,
-        max_holding=tb_params["max_holding"],
-        side=side_train,
-    )
-    if not events_train.empty:
-        events_train = get_bins(events_train, close_train)
-
-    logger.info("Generating meta labels for test set...")
-    events_test = get_events_meta(
-        close=close_test,
-        t_events=pd.DatetimeIndex(side_test.index),
-        pt_mult=tb_params["pt_mult"],
-        sl_mult=tb_params["sl_mult"],
-        trgt=volatility_test,
-        max_holding=tb_params["max_holding"],
-        side=side_test,
-    )
-    if not events_test.empty:
-        events_test = get_bins(events_test, close_test)
-
-    # Align features with events
-    common_train = X_train_raw.index.intersection(events_train.index)
-    common_test = X_test_raw.index.intersection(events_test.index)
-
-    X_train = X_train_raw.loc[common_train]
-    y_train = events_train.loc[common_train, "bin"]
-    t1_train = events_train.loc[common_train, "t1"]
-    side_train_aligned = side_train.loc[common_train]
-
-    X_test = X_test_raw.loc[common_test]
-    y_test = events_test.loc[common_test, "bin"]
-    t1_test = events_test.loc[common_test, "t1"]
-    side_test_aligned = side_test.loc[common_test]
-
-    logger.info(f"Final samples: train={len(X_train)}, test={len(X_test)}")
-
-    return (
-        X_train, X_test,
-        y_train, y_test,
-        t1_train, t1_test,
-        side_train_aligned, side_test_aligned,
-    )
-
-
-# =============================================================================
-# OUT-OF-SAMPLE LABEL GENERATION
-# =============================================================================
-
-
-def generate_oos_labels_train(
-    X: pd.DataFrame,
-    y: pd.Series,
-    t1: pd.Series,
-    model_class: Type[BaseModel],
-    model_params: Dict[str, Any],
-    n_splits: int = 5,
-    embargo_pct: float = 0.01,
-    min_train_size: int = 100,
-) -> Tuple[np.ndarray, np.ndarray | None, np.ndarray]:
-    """
-    Generate out-of-sample meta labels using Walk-Forward K-Fold.
-
-    Returns
-    -------
-    Tuple[np.ndarray, np.ndarray | None, np.ndarray]
-        - oos_labels: Out-of-sample predictions (0 or 1)
-        - oos_proba: Out-of-sample probabilities (or None)
-        - coverage_mask: Boolean mask indicating which samples have OOS labels
-    """
-    logger.info(f"Generating OOS meta labels with Walk-Forward K-Fold ({n_splits} splits)...")
-
-    n_samples = len(y)
-    oos_labels = np.full(n_samples, np.nan)
-    oos_proba = None
-    coverage_mask = np.zeros(n_samples, dtype=bool)
-
-    cv = WalkForwardKFold(
-        n_splits=n_splits,
-        embargo_pct=embargo_pct,
-        min_train_size=min_train_size,
-    )
-    splits = cv.split(X, y, t1=t1)
-
-    if len(splits) == 0:
-        logger.warning("No valid splits generated.")
-        return oos_labels, oos_proba, coverage_mask
-
-    logger.info(f"Generated {len(splits)} valid Walk-Forward splits")
-
-    for fold_idx, (train_idx, val_idx) in enumerate(splits):
-        train_start = X.index[train_idx[0]] if len(train_idx) > 0 else "N/A"
-        train_end = X.index[train_idx[-1]] if len(train_idx) > 0 else "N/A"
-        val_start = X.index[val_idx[0]] if len(val_idx) > 0 else "N/A"
-        val_end = X.index[val_idx[-1]] if len(val_idx) > 0 else "N/A"
-
-        logger.info(
-            f"Fold {fold_idx + 1}/{len(splits)}: "
-            f"train[{len(train_idx)}]={train_start} to {train_end}, "
-            f"val[{len(val_idx)}]={val_start} to {val_end}"
+    if "prediction" not in features_train.columns:
+        raise ValueError(
+            "Train dataset must contain 'prediction' column (OOF predictions from primary model).\n"
+            "Train the primary model first: python -m src.labelling.label_primaire.train"
         )
 
-        X_train_fold = X.iloc[train_idx]
-        y_train_fold = y.iloc[train_idx]
-        X_val_fold = X.iloc[val_idx]
+    # Calculate meta labels for TRAIN using OOF predictions
+    label_train = features_train["label"].to_numpy()
+    prediction_train = features_train["prediction"].to_numpy()
 
-        # Check for degenerate fold
-        unique_classes = y_train_fold.unique()
-        if len(unique_classes) < 2:
-            logger.warning(
-                f"Fold {fold_idx + 1}: Only {len(unique_classes)} class(es), skipping"
-            )
-            continue
+    y_train_meta = np.where(
+        label_train * prediction_train > 0,
+        1,  # Primary was correct
+        0   # Primary was incorrect
+    )
 
-        # Train model
-        model = model_class(**model_params)
-        model.fit(X_train_fold, y_train_fold)
+    # Filter neutral labels if configured
+    if filter_neutral_labels:
+        neutral_mask = label_train == 0
+        n_neutral = neutral_mask.sum()
+        if n_neutral > 0:
+            logger.info(f"Filtering {n_neutral} neutral labels from train")
+            valid_mask = ~neutral_mask
+            features_train = cast(pd.DataFrame, features_train[valid_mask].copy())
+            y_train_meta = y_train_meta[valid_mask]
 
-        # Predict
-        fold_preds = model.predict(X_val_fold)
-        oos_labels[val_idx] = fold_preds
-        coverage_mask[val_idx] = True
+    y_train = pd.Series(y_train_meta, index=features_train.index, name="meta_label")
 
-        # Get probabilities if available
-        fold_proba = None
-        try:
-            fold_proba = cast(Any, model).predict_proba(X_val_fold)
-            if oos_proba is None:
-                n_classes = fold_proba.shape[1]
-                oos_proba = np.full((n_samples, n_classes), np.nan)
-            oos_proba[val_idx] = fold_proba
-        except Exception:
-            pass
+    # Add 'side' as a feature (using OOF predictions from primary model)
+    features_train["side"] = features_train["prediction"].copy()
 
-        fold_label_counts = pd.Series(fold_preds).value_counts().to_dict()
-        logger.info(f"  -> Fold {fold_idx + 1} predictions: {fold_label_counts}")
+    # Get feature columns (KEEP 'side' column for meta model)
+    X_train = _remove_non_feature_cols(features_train, keep_side=True)
 
-    n_covered = coverage_mask.sum()
-    coverage_pct = n_covered / n_samples * 100
-    logger.info(f"OOS coverage: {n_covered}/{n_samples} ({coverage_pct:.1f}%)")
+    # Check for NaN values and identify problematic columns
+    nan_mask = cast(pd.Series, X_train.isna().any(axis=1))
+    n_nan = nan_mask.sum()
+    if n_nan > 0:
+        logger.warning(f"Found {n_nan} rows with NaN values")
+        # Identify which columns have NaN
+        nan_cols = X_train.columns[X_train.isna().any()].tolist()
+        logger.warning(f"Columns with NaN: {nan_cols}")
+        for col in nan_cols:
+            n_nan_col = X_train[col].isna().sum()
+            logger.warning(f"  {col}: {n_nan_col} NaN values ({n_nan_col/len(X_train)*100:.2f}%)")
 
-    return oos_labels, oos_proba, coverage_mask
+        # Check if it's the 'side' column (predictions)
+        if 'side' in nan_cols:
+            logger.error("'side' column has NaN! This should not happen on TRAIN split.")
+            logger.error("Checking 'prediction' column in features_train...")
+            logger.error(f"prediction NaN count: {features_train['prediction'].isna().sum()}")
+
+        # Drop rows with NaN for now
+        logger.warning(f"Dropping {n_nan} rows with NaN values")
+        X_train = cast(pd.DataFrame, X_train[~nan_mask].copy())
+        y_train = cast(pd.Series, y_train[~nan_mask])
+
+    logger.info(f"Features: train={len(X_train)}")
+    logger.info(f"Meta label distribution train: {y_train.value_counts().to_dict()}")
+
+    return X_train, y_train
 
 
 # =============================================================================
@@ -571,19 +393,19 @@ def generate_oos_labels_train(
 def train_meta_model(
     primary_model_name: str,
     meta_model_name: str,
-    n_splits: int = 5,
-    embargo_pct: float = 0.01,
-    min_train_size: int = 100,
     output_dir: Path | None = None,
 ) -> MetaTrainingResult:
     """
-    Full training pipeline for META model with OUT-OF-SAMPLE label generation.
+    Full training pipeline for META model.
 
     STEP 1: Load trained PRIMARY model
-    STEP 2: Generate OOS meta-labels on TRAIN using Walk-Forward K-Fold
-    STEP 3: Train FINAL meta model on entire TRAIN set (one-shot)
-    STEP 4: Generate meta-labels on TEST using final model
-    STEP 5: Save ALL outputs
+    STEP 2: Load dataset with OOF predictions from primary model
+    STEP 3: Calculate meta-labels (using OOF predictions to avoid leakage)
+    STEP 4: Train meta model on entire TRAIN set (one-shot)
+    STEP 5: Evaluate on TEST set
+    STEP 6: Save model and predictions
+
+    Note: No K-fold needed as meta model uses OOF predictions from primary.
     """
     if output_dir is None:
         output_dir = LABEL_META_TRAIN_DIR / f"{primary_model_name}_{meta_model_name}"
@@ -598,12 +420,16 @@ def train_meta_model(
     logger.info("\nLoading optimized parameters...")
     optimized = load_optimized_params(primary_model_name, meta_model_name)
     meta_model_params = optimized["meta_model_params"].copy()
-    tb_params = optimized["triple_barrier_params"]
+    tb_params = optimized.get("triple_barrier_params", {})
 
-    logger.info(f"Triple Barrier: {tb_params}")
     logger.info(f"Meta model params: {meta_model_params}")
 
     meta_model_params["random_state"] = DEFAULT_RANDOM_STATE
+
+    # Disable normalization for linear models (data already z-scored)
+    if meta_model_name in ["logistic", "ridge"]:
+        meta_model_params["normalize"] = False
+        logger.info("Normalization disabled (data already z-scored)")
 
     # Load models
     logger.info("\nLoading primary model...")
@@ -615,133 +441,48 @@ def train_meta_model(
     primary_model_path_train = LABEL_PRIMAIRE_TRAIN_DIR / primary_model_name / f"{primary_model_name}_model.joblib"
     primary_model_path = primary_model_path_main if primary_model_path_main.exists() else primary_model_path_train
 
-    # Prepare data
-    (
-        X_train, X_test,
-        y_train, y_test,
-        t1_train, t1_test,
-        side_train, side_test,
-    ) = prepare_meta_data(primary_model, meta_model_name, tb_params)
+    # Prepare data (TRAIN only)
+    X_train, y_train = prepare_meta_data(primary_model_name)
 
-    # Meta-label distributions (ground truth)
+    # Meta-label distributions
     train_label_counts = y_train.value_counts().to_dict()
-    test_label_counts = y_test.value_counts().to_dict()
 
     train_label_dist = {
         "total": len(y_train),
         "counts": {str(k): int(v) for k, v in train_label_counts.items()},
         "percentages": {str(k): v / len(y_train) * 100 for k, v in train_label_counts.items()},
     }
-    test_label_dist = {
-        "total": len(y_test),
-        "counts": {str(k): int(v) for k, v in test_label_counts.items()},
-        "percentages": {str(k): v / len(y_test) * 100 for k, v in test_label_counts.items()},
-    }
 
-    logger.info(f"\nMeta-Label Distribution (Ground Truth):")
+    logger.info(f"\nMeta-Label Distribution:")
     logger.info(f"  Train: {train_label_counts}")
-    logger.info(f"  Test: {test_label_counts}")
 
     # =========================================================================
-    # STEP 1: Generate OOS Labels on TRAIN (Walk-Forward K-Fold)
+    # STEP 1: Train Meta Model on TRAIN Set
     # =========================================================================
     logger.info(f"\n{'='*60}")
-    logger.info("STEP 1: OOS Meta-Label Generation on TRAIN")
+    logger.info("STEP 1: Train Meta Model on TRAIN Set")
     logger.info(f"{'='*60}")
 
-    oos_train_labels, oos_train_proba, train_coverage_mask = generate_oos_labels_train(
-        X_train, y_train, t1_train,
-        meta_model_class, meta_model_params,
-        n_splits=n_splits,
-        embargo_pct=embargo_pct,
-        min_train_size=min_train_size,
+    meta_model = meta_model_class(**meta_model_params)
+    meta_model.fit(X_train, y_train)
+    logger.info(f"Meta model trained on {len(X_train)} samples")
+
+    # =========================================================================
+    # STEP 2: Save Model
+    # =========================================================================
+    logger.info(f"\n{'='*60}")
+    logger.info("STEP 2: Save Model")
+    logger.info(f"{'='*60}")
+
+    # Save model with specific meta model name
+    meta_model_path = output_dir / f"{meta_model_name}_meta_model.joblib"
+    meta_model.save(meta_model_path)
+    logger.info(f"Meta model saved: {meta_model_path}")
+
+    # Empty metrics (evaluation is done in eval.py)
+    train_metrics = MetaEvaluationMetrics(
+        accuracy=0.0, precision=0.0, recall=0.0, f1=0.0, auc_roc=None
     )
-
-    # Evaluate OOS predictions on train
-    if train_coverage_mask.any():
-        y_train_covered = cast(np.ndarray, y_train.values[train_coverage_mask])
-        oos_preds_covered = cast(np.ndarray, oos_train_labels[train_coverage_mask].astype(int))
-        oos_proba_covered = (
-            oos_train_proba[train_coverage_mask]
-            if oos_train_proba is not None else None
-        )
-
-        train_metrics = compute_metrics(y_train_covered, oos_preds_covered, oos_proba_covered)
-        logger.info(f"\nTrain (OOS) Metrics: {train_metrics.to_dict()}")
-    else:
-        logger.warning("No OOS labels generated for train set!")
-        train_metrics = MetaEvaluationMetrics(
-            accuracy=0.0, precision=0.0, recall=0.0, f1=0.0, auc_roc=None
-        )
-
-    # =========================================================================
-    # STEP 2: Train FINAL Model on Entire TRAIN Set
-    # =========================================================================
-    logger.info(f"\n{'='*60}")
-    logger.info("STEP 2: Train FINAL Meta Model on Entire TRAIN Set")
-    logger.info(f"{'='*60}")
-
-    final_model = meta_model_class(**meta_model_params)
-    final_model.fit(X_train, y_train)
-    logger.info(f"Final meta model trained on {len(X_train)} samples")
-
-    # =========================================================================
-    # STEP 3: Generate Labels on TEST Set
-    # =========================================================================
-    logger.info(f"\n{'='*60}")
-    logger.info("STEP 3: Generate Meta-Labels on TEST Set (OOS)")
-    logger.info(f"{'='*60}")
-
-    test_preds = final_model.predict(X_test)
-    test_proba = None
-    try:
-        test_proba = cast(Any, final_model).predict_proba(X_test)
-    except Exception:
-        pass
-
-    test_metrics = compute_metrics(cast(np.ndarray, y_test.values), test_preds, test_proba)
-    logger.info(f"Test Metrics: {test_metrics.to_dict()}")
-
-    # =========================================================================
-    # STEP 4: Save ALL Outputs
-    # =========================================================================
-    logger.info(f"\n{'='*60}")
-    logger.info("STEP 4: Save All Outputs")
-    logger.info(f"{'='*60}")
-
-    # Save OOS predictions for train
-    oos_train_df = pd.DataFrame({
-        "datetime": X_train.index,
-        "side": side_train.values,
-        "y_true_meta": y_train.values,
-        "y_pred_meta_oos": oos_train_labels,
-        "has_oos_label": train_coverage_mask,
-    })
-    if oos_train_proba is not None:
-        for i in range(oos_train_proba.shape[1]):
-            oos_train_df[f"proba_class_{i}"] = oos_train_proba[:, i]
-    oos_train_path = output_dir / "oos_train_meta_labels.parquet"
-    oos_train_df.to_parquet(oos_train_path, index=False)
-    logger.info(f"OOS train labels saved: {oos_train_path}")
-
-    # Save predictions for test
-    test_df = pd.DataFrame({
-        "datetime": X_test.index,
-        "side": side_test.values,
-        "y_true_meta": y_test.values,
-        "y_pred_meta_oos": test_preds,
-    })
-    if test_proba is not None:
-        for i in range(test_proba.shape[1]):
-            test_df[f"proba_class_{i}"] = test_proba[:, i]
-    test_path = output_dir / "oos_test_meta_labels.parquet"
-    test_df.to_parquet(test_path, index=False)
-    logger.info(f"OOS test labels saved: {test_path}")
-
-    # Save final model
-    meta_model_path = output_dir / "final_meta_model.joblib"
-    final_model.save(meta_model_path)
-    logger.info(f"Final meta model saved: {meta_model_path}")
 
     # Build result
     result = MetaTrainingResult(
@@ -750,16 +491,16 @@ def train_meta_model(
         meta_model_params=meta_model_params,
         triple_barrier_params=tb_params,
         train_samples=len(X_train),
-        test_samples=len(X_test),
+        test_samples=0,
         train_metrics=train_metrics.to_dict(),
-        test_metrics=test_metrics.to_dict(),
+        test_metrics={},
         meta_label_distribution_train=train_label_dist,
-        meta_label_distribution_test=test_label_dist,
-        n_folds=n_splits,
+        meta_label_distribution_test={},
+        n_folds=0,  # No K-fold used
         primary_model_path=str(primary_model_path),
         meta_model_path=str(meta_model_path),
-        oof_predictions_path=str(oos_train_path),
-        test_predictions_path=str(test_path),
+        oof_predictions_path="",  # No predictions saved (done in eval.py)
+        test_predictions_path="",  # No predictions saved (done in eval.py)
     )
 
     results_path = output_dir / "training_results.json"
@@ -798,7 +539,7 @@ def select_models() -> Tuple[str, str]:
     available = get_available_meta_optimizations()
 
     print("\n" + "=" * 60)
-    print("META MODEL TRAINING (OOS Label Generation)")
+    print("META MODEL TRAINING")
     print("=" * 60)
     print("\nThe meta model filters false positives from the primary model.")
     print("\nOptimizations disponibles:")
@@ -830,37 +571,22 @@ def select_models() -> Tuple[str, str]:
 def print_results(result: MetaTrainingResult) -> None:
     """Print formatted results."""
     print("\n" + "=" * 60)
-    print(f"RESULTATS: {result.primary_model_name} -> {result.meta_model_name}")
+    print(f"TRAINING COMPLETE: {result.primary_model_name} -> {result.meta_model_name}")
     print("=" * 60)
 
-    print(f"\nEchantillons: Train={result.train_samples}, Test={result.test_samples}")
+    print(f"\nEchantillons: Train={result.train_samples}")
 
-    print("\n--- Distribution Meta-Labels ---")
-    print("Train:")
+    print("\n--- Distribution Meta-Labels (Train) ---")
     for label, count in result.meta_label_distribution_train["counts"].items():
         pct = result.meta_label_distribution_train["percentages"][label]
         print(f"  Meta={label}: {count} ({pct:.1f}%)")
-    print("Test:")
-    for label, count in result.meta_label_distribution_test["counts"].items():
-        pct = result.meta_label_distribution_test["percentages"][label]
-        print(f"  Meta={label}: {count} ({pct:.1f}%)")
-
-    print("\n--- Metriques de Performance ---")
-    print("Train (OOS - Walk-Forward K-Fold):")
-    for metric, value in result.train_metrics.items():
-        if value is not None:
-            print(f"  {metric}: {value:.4f}")
-
-    print("Test (OOS):")
-    for metric, value in result.test_metrics.items():
-        if value is not None:
-            print(f"  {metric}: {value:.4f}")
 
     print("\n--- Fichiers Sauvegardes ---")
     print(f"  Primary model: {result.primary_model_path}")
     print(f"  Meta model: {result.meta_model_path}")
-    print(f"  OOS Train: {result.oof_predictions_path}")
-    print(f"  OOS Test: {result.test_predictions_path}")
+
+    print("\nPour evaluer le modele, lancer:")
+    print("  python -m src.labelling.label_meta.eval")
 
     print("=" * 60)
 
@@ -875,15 +601,9 @@ def main() -> None:
     primary_model_name, meta_model_name = select_models()
     print(f"\nSelectionne: Primary={primary_model_name}, Meta={meta_model_name}")
 
-    n_splits = int(input("Nombre de folds K-Fold [5]: ").strip() or "5")
-    embargo_input = input("Embargo (%) [1.0]: ").strip() or "1.0"
-    embargo_pct = float(embargo_input) / 100
-    min_train_size = int(input("Taille min train [100]: ").strip() or "100")
-
     print("\n" + "-" * 40)
     print(f"Primary: {primary_model_name}")
     print(f"Meta: {meta_model_name}")
-    print(f"K-Fold: {n_splits}, Embargo: {embargo_pct * 100:.1f}%")
     print("-" * 40)
 
     confirm = input("\nLancer? (O/n): ").strip().lower()
@@ -896,9 +616,6 @@ def main() -> None:
     result = train_meta_model(
         primary_model_name=primary_model_name,
         meta_model_name=meta_model_name,
-        n_splits=n_splits,
-        embargo_pct=embargo_pct,
-        min_train_size=min_train_size,
     )
 
     print_results(result)

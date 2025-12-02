@@ -24,6 +24,7 @@ class RidgeClassifierModel(BaseModel):
         alpha: float = 1.0,
         fit_intercept: bool = True,
         normalize: bool = True,
+        class_weight: dict | str | None = None,
         **kwargs: Any,
     ) -> None:
         """
@@ -37,17 +38,21 @@ class RidgeClassifierModel(BaseModel):
             Whether to calculate the intercept.
         normalize : bool, default=True
             Whether to normalize features before training.
+        solver : str, default="lsqr"
+            RidgeClassifier solver ("auto", "svd", "cholesky", "lsqr", "sag", "saga").
         """
         super().__init__(
             name="RidgeClassifier",
             alpha=alpha,
             fit_intercept=fit_intercept,
             normalize=normalize,
+            class_weight=class_weight,
             **kwargs,
         )
         self.alpha = alpha
         self.fit_intercept = fit_intercept
         self.normalize = normalize
+        self.class_weight = class_weight
         self.scaler: StandardScaler | None = None
         self.model: RidgeClassifier | None = None
         self.classes_: np.ndarray | None = None
@@ -58,6 +63,7 @@ class RidgeClassifierModel(BaseModel):
             "alpha": self.alpha,
             "fit_intercept": self.fit_intercept,
             "normalize": self.normalize,
+            "class_weight": self.class_weight,
         }
 
     def set_params(self, **params: Any) -> "RidgeClassifierModel":
@@ -68,6 +74,8 @@ class RidgeClassifierModel(BaseModel):
             self.fit_intercept = params["fit_intercept"]
         if "normalize" in params:
             self.normalize = params["normalize"]
+        if "class_weight" in params:
+            self.class_weight = params["class_weight"]
         return self
 
     def fit(
@@ -90,6 +98,7 @@ class RidgeClassifierModel(BaseModel):
             alpha=self.alpha,
             fit_intercept=self.fit_intercept,
             solver="lsqr",  # Iterative solver, optimal for large dense datasets
+            class_weight=self.class_weight,
         )
         self.model.fit(X_arr, y_arr)
         self.is_fitted = True

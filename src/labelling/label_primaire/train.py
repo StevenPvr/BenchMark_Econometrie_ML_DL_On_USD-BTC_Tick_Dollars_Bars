@@ -31,6 +31,86 @@ from typing import Any, Dict, List, cast
 
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
+from sklearn.model_selection import TimeSeriesSplit  # type: ignore[import-untyped]
+
+
+# =============================================================================
+# WALK-FORWARD CV FOR OOF PREDICTIONS
+# =============================================================================
+
+
+class WalkForwardCV:
+    """Walk-Forward Cross-Validation with purging and embargo."""
+
+    def __init__(
+        self,
+        n_splits: int = 5,
+        min_train_size: int = 500,
+        embargo_pct: float = 0.01,
+    ) -> None:
+        self.n_splits = n_splits
+        self.min_train_size = min_train_size
+        self.embargo_pct = embargo_pct
+
+    def split(
+        self,
+        X: pd.DataFrame,
+        events: pd.DataFrame,
+    ) -> List[tuple[np.ndarray, np.ndarray]]:
+        """Generate train/val indices with purging."""
+        n_samples = len(X)
+        embargo_size = int(n_samples * self.embargo_pct)
+        base_splitter = TimeSeriesSplit(n_splits=self.n_splits)
+
+        splits = []
+        for train_idx, val_idx in base_splitter.split(np.arange(n_samples)):
+            split = self._process_split(train_idx, val_idx, X, events, embargo_size)
+            if split is not None:
+                splits.append(split)
+
+        return splits
+
+    def _process_split(
+        self,
+        train_idx: np.ndarray,
+        val_idx: np.ndarray,
+        X: pd.DataFrame,
+        events: pd.DataFrame,
+        embargo_size: int,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Process a single CV split with purging and embargo."""
+        if len(train_idx) < self.min_train_size or len(val_idx) == 0:
+            return None
+
+        # Purge: remove overlapping training samples
+        if "t1" in events.columns:
+            train_idx = self._apply_purging(train_idx, val_idx, X, events)
+
+        # Embargo: gap between train and val
+        if embargo_size > 0 and len(train_idx) > embargo_size:
+            train_idx = train_idx[:-embargo_size]
+
+        if len(train_idx) >= self.min_train_size:
+            return (train_idx, val_idx)
+        return None
+
+    def _apply_purging(
+        self,
+        train_idx: np.ndarray,
+        val_idx: np.ndarray,
+        X: pd.DataFrame,
+        events: pd.DataFrame,
+    ) -> np.ndarray:
+        """Remove training samples whose labels overlap with validation."""
+        val_start = X.index[val_idx[0]]
+        t1_series = events.iloc[train_idx]["t1"]
+        overlap_mask = t1_series.notna() & (t1_series >= val_start)
+        return train_idx[~overlap_mask.to_numpy()]
+
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
 
 
 def _optimize_dtypes(df: pd.DataFrame) -> pd.DataFrame:
@@ -56,9 +136,7 @@ from src.labelling.label_primaire.utils import (
     get_dataset_for_model,
     get_daily_volatility,
 )
-from src.labelling.label_primaire.opti import (
-    get_events_primary,
-)
+from src.labelling.triple_barriere import get_events_primary_fast
 from src.model.base import BaseModel
 from src.path import (
     DOLLAR_BARS_PARQUET,
@@ -88,6 +166,8 @@ class TrainingConfig:
     parallelize_labeling: bool = True  # Use multiprocessing for label generation
     parallel_min_events: int = 10_000  # Minimum events to trigger parallel path
     n_jobs: int | None = -1  # Use all CPU cores
+    n_splits_oof: int = 5  # Number of splits for OOF predictions
+    min_train_size_oof: int = 500  # Minimum training size per fold
 
 
 @dataclass
@@ -150,7 +230,7 @@ def _generate_events_chunk(
     tb_params: Dict[str, Any],
 ) -> pd.DataFrame:
     """Generate triple-barrier events for a chunk of timestamps."""
-    return get_events_primary(
+    return get_events_primary_fast(
         close=close,
         t_events=t_events_chunk,
         pt_mult=tb_params["pt_mult"],
@@ -290,7 +370,8 @@ def load_optimized_params(
 
     return {
         "model_params": opti_results["best_params"],
-        "triple_barrier_params": opti_results["best_triple_barrier_params"],
+        # Triple-barrier params may be absent when labels are precomputed
+        "triple_barrier_params": opti_results.get("best_triple_barrier_params", {}),
         "best_score": opti_results["best_score"],
         "metric": opti_results["metric"],
     }
@@ -385,10 +466,9 @@ def train_model(
     logger.info("Loading optimized parameters...")
     optimized = load_optimized_params(model_name, opti_dir)
     model_params = optimized["model_params"]
-    tb_params = optimized["triple_barrier_params"]
+    tb_params = optimized.get("triple_barrier_params", {})
 
     logger.info(f"Best optimization score ({optimized['metric']}): {optimized['best_score']:.4f}")
-    logger.info(f"Triple Barrier params: {tb_params}")
     logger.info(f"Model params: {model_params}")
 
     # Load model class
@@ -397,154 +477,30 @@ def train_model(
     # Determine paths
     base_features_path = get_features_path(model_name)
     labeled_features_path = get_labeled_features_path(model_name)
-    label_meta_path = _label_metadata_path(labeled_features_path)
 
-    # Check if we can reuse existing labeled file
-    label_meta = _load_label_metadata(label_meta_path)
-    labels_match_params = bool(label_meta is not None and label_meta.get("tb_params") == tb_params)
-    need_regeneration = True
+    # Load dataset with precomputed labels (always use base path for training)
+    # The model-specific path will be created after training with predictions
+    data_path = base_features_path
+    logger.info(f"Loading labeled dataset from {data_path}")
+    full_df = pd.read_parquet(data_path)
+    full_df = _optimize_dtypes(full_df)  # float64 -> float32
+    if "datetime_close" in full_df.columns:
+        full_df = full_df.set_index("datetime_close")
+    full_df = full_df.sort_index()
 
-    # Initialize variables to ensure they're always defined
-    full_df = pd.DataFrame()
-    events = pd.DataFrame()
-
-    if labeled_features_path.exists() and labels_match_params:
-        # Fast path: load existing labeled file directly
-        logger.info("Loading existing labeled dataset (params match)...")
-        labeled_df = pd.read_parquet(labeled_features_path)
-
-        # Check for duplicates - if found, delete and regenerate
-        n_duplicates = labeled_df.duplicated().sum()
-        if n_duplicates > 0:
-            logger.warning(f"Found {n_duplicates} duplicates in labeled file, deleting and regenerating")
-            del labeled_df
-            labeled_features_path.unlink()  # Delete corrupted file
-            if label_meta_path.exists():
-                label_meta_path.unlink()
-            labels_match_params = False
-        elif "label" in labeled_df.columns and bool(labeled_df["label"].notna().any()):
-            labeled_df = _optimize_dtypes(labeled_df)  # float64 -> float32
-            logger.info(f"Reusing existing labels from {labeled_features_path}")
-            if "datetime_close" in labeled_df.columns:
-                labeled_df = labeled_df.set_index("datetime_close")
-            full_df = labeled_df
-            events = pd.DataFrame({"label": full_df["label"]})
-            need_regeneration = False
-
-    if need_regeneration:
-        # Slow path: generate labels from scratch
-        logger.info("Loading base dataset and generating labels...")
-
-        full_df = pd.read_parquet(base_features_path)
-        full_df = _optimize_dtypes(full_df)  # float64 -> float32
-        if "datetime_close" in full_df.columns:
-            full_df = full_df.set_index("datetime_close")
-        full_df = full_df.sort_index()
-
-        # Load dollar bars - only extract close prices then free memory
-        if not DOLLAR_BARS_PARQUET.exists():
-            raise FileNotFoundError(
-                f"Dollar bars file not found: {DOLLAR_BARS_PARQUET}. "
-                "Please run data preparation first: python -m src.data_preparation.main"
-            )
-
-        dollar_bars = pd.read_parquet(DOLLAR_BARS_PARQUET, columns=["datetime_close", "close"])
-        close_prices = cast(pd.Series, dollar_bars.set_index("datetime_close")["close"].sort_index())
-        close_prices = cast(pd.Series, close_prices[~close_prices.index.duplicated(keep="first")])
-        del dollar_bars  # Free memory immediately
-        gc.collect()
-
-        # Align indices
-        common_idx = full_df.index.intersection(close_prices.index)
-        full_df = full_df.loc[common_idx]
-        close_prices = close_prices.loc[common_idx].astype(np.float32)
-
-        logger.info(f"Dataset shape: {full_df.shape}")
-
-        def _generate_split_labels(
-            t_events: pd.DatetimeIndex,
-            close_series: pd.Series,
-            split_name: str,
-        ) -> pd.DataFrame:
-            """Generate labels for a single split without leaking beyond its bounds."""
-            if len(t_events) == 0:
-                logger.warning("No events to label for split '%s'", split_name)
-                return pd.DataFrame()
-
-            # Restrict close prices to the split window to avoid peeking into next split
-            split_close = close_series.loc[
-                (close_series.index >= t_events.min()) &
-                (close_series.index <= t_events.max())
-            ]
-
-            if split_close.index.has_duplicates:
-                split_close = split_close.loc[~split_close.index.duplicated(keep="first")]
-
-            volatility_split = get_daily_volatility(split_close, span=config.vol_window)
-
-            return _generate_events(
-                close=split_close,
-                t_events=t_events,
-                tb_params=tb_params,
-                volatility=volatility_split,
-                config=config,
-            )
-
-        logger.info("Generating triple barrier labels split by data partition (avoid leakage)...")
-
-        full_df = full_df.drop(columns=["label", "label_x", "label_y"], errors="ignore")
-        events_list: list[pd.DataFrame] = []
-
-        if "split" in full_df.columns:
-            train_mask = full_df["split"] == TRAIN_SPLIT_LABEL
-            test_mask = full_df["split"] != TRAIN_SPLIT_LABEL
-
-            if train_mask.any():
-                t_events_train = pd.DatetimeIndex(full_df.index[train_mask])
-                events_train = _generate_split_labels(t_events_train, close_prices, "train")
-                events_list.append(events_train)
-                if not events_train.empty and "label" in events_train.columns:
-                    labels_train = events_train["label"].reindex(t_events_train)
-                else:
-                    labels_train = pd.Series(np.nan, index=t_events_train)
-                full_df.loc[train_mask, "label"] = labels_train
-
-            if test_mask.any():
-                t_events_test = pd.DatetimeIndex(full_df.index[test_mask])
-                events_test = _generate_split_labels(t_events_test, close_prices, "test")
-                events_list.append(events_test)
-                if not events_test.empty and "label" in events_test.columns:
-                    labels_test = events_test["label"].reindex(t_events_test)
-                else:
-                    labels_test = pd.Series(np.nan, index=t_events_test)
-                full_df.loc[test_mask, "label"] = labels_test
-        else:
-            # Fallback: single split (previous behavior)
-            t_events_all = pd.DatetimeIndex(full_df.index)
-            events_all = _generate_split_labels(t_events_all, close_prices, "all")
-            events_list.append(events_all)
-            full_df["label"] = events_all["label"].reindex(full_df.index)
-
-        # Free close_prices - no longer needed
-        del close_prices
-        gc.collect()
-
-        # Combine events for persistence and sanity logging
-        valid_events = [ev for ev in events_list if ev is not None and not ev.empty]
-        if not valid_events:
-            logger.warning("No events generated; setting label column to NaN")
-            full_df["label"] = np.nan
-            events = pd.DataFrame(columns=["t1", "trgt", "ret", "label"])  # type: ignore[call-arg]
-        else:
-            events = pd.concat(valid_events).sort_index()
-            logger.info("Generated %d events across splits", len(events))
-
-        # Save labeled dataset
-        logger.info(f"Saving labels to {labeled_features_path}")
-        full_df.reset_index().rename(columns={"index": "datetime_close"}).to_parquet(
-            labeled_features_path, index=False
+    # Validate presence of label
+    if "label" not in full_df.columns:
+        raise ValueError(
+            "Dataset must contain a 'label' column. "
+            "Provide pre-labeled data (label + t1 optional)."
         )
-        _save_label_metadata(label_meta_path, tb_params)
+
+    # Build events from existing columns (label + optional t1)
+    if "t1" in full_df.columns:
+        events = full_df[["label", "t1"]].copy()
+    else:
+        logger.warning("No 't1' column found; events will contain only labels.")
+        events = full_df[["label"]].copy()
 
     # Prepare training data (TRAIN split only)
     # Extract only TRAIN split, then free full_df
@@ -556,7 +512,7 @@ def train_model(
         non_feature_cols = {
             "bar_id", "timestamp_open", "timestamp_close",
             "datetime_open", "datetime_close", "threshold_used",
-            "log_return", "split", "label",
+            "log_return", "split", "label", "t1",
         }
         feature_cols = [c for c in full_df.columns if c not in non_feature_cols]
         X_train = full_df.loc[train_mask, feature_cols].copy()
@@ -566,7 +522,7 @@ def train_model(
         non_feature_cols = {
             "bar_id", "timestamp_open", "timestamp_close",
             "datetime_open", "datetime_close", "threshold_used",
-            "log_return", "split", "label",
+            "log_return", "split", "label", "t1",
         }
         feature_cols = [c for c in full_df.columns if c not in non_feature_cols]
         X_train = full_df[feature_cols].copy()
@@ -607,7 +563,7 @@ def train_model(
         model_params["n_jobs"] = -1
 
     # Add class weight if supported and requested
-    if config.use_class_weight and model_name in ["lightgbm", "xgboost", "random_forest"]:
+    if config.use_class_weight and model_name in ["lightgbm", "xgboost", "random_forest", "ridge", "logistic"]:
         class_counts = y_train.value_counts()
         total_samples = len(y_train)
         class_weight = {
@@ -624,8 +580,10 @@ def train_model(
 
     logger.info("Model training complete")
 
-    # Free training data - model is trained
+    # Keep training sample count before freeing memory
     n_train_samples = len(X_train)
+
+    # Free training data - model is trained
     del X_train, y_train
     gc.collect()
     logger.info("Released training data from memory")
@@ -633,6 +591,171 @@ def train_model(
     # Save model
     model_path = output_dir / f"{model_name}_model.joblib"
     model.save(model_path)
+
+    # =========================================================================
+    # GENERATE OUT-OF-FOLD (OOF) PREDICTIONS ON TRAIN SPLIT
+    # =========================================================================
+    logger.info("Generating out-of-fold (OOF) predictions on train split...")
+
+    # Reload full dataset to prepare OOF predictions
+    full_df = pd.read_parquet(data_path)
+    full_df = _optimize_dtypes(full_df)
+    if "datetime_close" in full_df.columns:
+        full_df = full_df.set_index("datetime_close")
+    full_df = full_df.sort_index()
+
+    # Extract train split for OOF predictions
+    if "split" in full_df.columns:
+        train_mask = full_df["split"] == TRAIN_SPLIT_LABEL
+        train_df = cast(pd.DataFrame, full_df[train_mask].copy())
+    else:
+        # No split column - use all data (shouldn't happen in normal flow)
+        train_df = full_df.copy()
+        logger.warning("No 'split' column found, using all data for OOF predictions")
+
+    # Prepare features and labels for OOF
+    X_train_oof = cast(pd.DataFrame, train_df[feature_cols])
+    y_train_oof = cast(pd.Series, train_df["label"])
+
+    # Filter out NaN labels
+    valid_mask = ~y_train_oof.isna()
+    X_train_oof = cast(pd.DataFrame, X_train_oof[valid_mask])
+    y_train_oof = cast(pd.Series, y_train_oof[valid_mask].astype(np.int8))
+
+    # Build events for purging (needs t1 and label)
+    if "t1" in train_df.columns:
+        events_oof = train_df.loc[valid_mask, ["label", "t1"]].copy()
+    else:
+        events_oof = train_df.loc[valid_mask, ["label"]].copy()
+
+    logger.info(f"Performing {config.n_splits_oof}-fold CV for OOF predictions on {len(X_train_oof)} samples...")
+
+    # Initialize OOF prediction arrays
+    oof_predictions = np.full(len(X_train_oof), np.nan, dtype=np.float32)
+    n_classes = len(np.unique(y_train_oof))
+    oof_probas = np.full((len(X_train_oof), n_classes), np.nan, dtype=np.float32)
+
+    # Create WalkForwardCV splitter
+    cv = WalkForwardCV(
+        n_splits=config.n_splits_oof,
+        min_train_size=config.min_train_size_oof,
+        embargo_pct=0.01,
+    )
+
+    splits = cv.split(X_train_oof, events_oof)
+    logger.info(f"Generated {len(splits)} valid CV splits")
+
+    if len(splits) == 0:
+        logger.warning("No valid CV splits generated, skipping OOF predictions")
+    else:
+        # Train models for each fold and collect OOF predictions
+        X_train_values = X_train_oof.to_numpy()
+        y_train_values = y_train_oof.to_numpy()
+
+        for fold_idx, (train_idx, val_idx) in enumerate(splits):
+            logger.info(f"  Fold {fold_idx + 1}/{len(splits)}: train={len(train_idx)}, val={len(val_idx)}")
+
+            # Extract fold data
+            X_fold_train = X_train_values[train_idx]
+            y_fold_train = y_train_values[train_idx]
+            X_fold_val = X_train_values[val_idx]
+
+            # Create and train fold model with same params
+            fold_model = model_class(**model_params)
+            fold_model.fit(X_fold_train, y_fold_train)
+
+            # Predict on validation fold (OOF)
+            oof_predictions[val_idx] = fold_model.predict(X_fold_val)
+
+            # Try to get probabilities
+            try:
+                oof_probas[val_idx] = cast(Any, fold_model).predict_proba(X_fold_val)
+            except Exception:
+                pass
+
+            # Free fold model
+            del fold_model
+            gc.collect()
+
+        logger.info("OOF predictions complete")
+
+        # ====================================================================
+        # PREDICT ON REMAINING SAMPLES (LAST FOLD)
+        # ====================================================================
+        # Identify samples without OOF predictions (last fold in TimeSeriesSplit)
+        missing_mask = np.isnan(oof_predictions)
+        n_missing = np.sum(missing_mask)
+
+        if n_missing > 0:
+            logger.info(f"Generating predictions for remaining {n_missing} samples (last fold)...")
+
+            # Train a model on all samples that have OOF predictions
+            # This maintains OOF principle: we don't use target samples in training
+            available_mask = ~missing_mask
+            X_available = X_train_values[available_mask]
+            y_available = y_train_values[available_mask]
+            X_missing = X_train_values[missing_mask]
+
+            # Train model on available data
+            last_fold_model = model_class(**model_params)
+            last_fold_model.fit(X_available, y_available)
+
+            # Predict on missing samples
+            oof_predictions[missing_mask] = last_fold_model.predict(X_missing)
+
+            # Try to get probabilities
+            try:
+                oof_probas[missing_mask] = cast(Any, last_fold_model).predict_proba(X_missing)
+            except Exception:
+                pass
+
+            # Free model
+            del last_fold_model
+            gc.collect()
+
+            logger.info(f"Last fold predictions complete: {n_missing} samples covered")
+
+    # =========================================================================
+    # RETRAIN FINAL MODEL ON FULL TRAIN SPLIT
+    # =========================================================================
+    logger.info("Retraining final model on full train split...")
+
+    # The model is already trained on the full train split (before OOF)
+    # We keep the already trained model as the final model
+    logger.info("Final model already trained on full train split")
+
+    # =========================================================================
+    # SAVE DATASET WITH OOF PREDICTIONS
+    # =========================================================================
+    logger.info("Saving dataset with OOF predictions...")
+
+    # Add OOF predictions to train split only (test will be NaN)
+    # Initialize prediction columns with NaN
+    full_df["prediction"] = np.nan
+    for i in range(n_classes):
+        full_df[f"proba_{i}"] = np.nan
+
+    # Fill in OOF predictions for train split
+    # Map OOF predictions back to original full_df indices
+    train_valid_idx = train_df.loc[valid_mask].index
+    full_df.loc[train_valid_idx, "prediction"] = oof_predictions
+    for i in range(n_classes):
+        full_df.loc[train_valid_idx, f"proba_{i}"] = oof_probas[:, i]
+
+    # Save the full dataset with OOF predictions to model-specific file
+    logger.info(f"Saving dataset with OOF predictions to {labeled_features_path}")
+    labeled_features_path.parent.mkdir(parents=True, exist_ok=True)
+    full_df.to_parquet(labeled_features_path)
+    logger.info(f"Dataset with OOF predictions saved to {labeled_features_path}")
+
+    # Log statistics
+    n_oof_valid = np.sum(~np.isnan(oof_predictions))
+    logger.info(f"OOF predictions: {n_oof_valid}/{len(oof_predictions)} valid samples ({n_oof_valid/len(oof_predictions)*100:.1f}%)")
+
+    # Free memory
+    del full_df, train_df, X_train_oof, y_train_oof, events_oof, oof_predictions, oof_probas
+    gc.collect()
+    logger.info("Released datasets from memory")
 
     # Save events (labels) for reference
     events_path = output_dir / f"{model_name}_events.parquet"

@@ -125,7 +125,11 @@ class XGBoostModel(BaseModel):
             ]
             fit_params["eval_set"] = mapped_eval_set
         if effective_early_stopping is not None:
-            fit_params["early_stopping_rounds"] = effective_early_stopping
+            # Newer xgboost uses attribute-based early stopping
+            self.model.set_params(early_stopping_rounds=effective_early_stopping)
+
+        # Forward any extra kwargs (e.g., callbacks)
+        fit_params.update(kwargs)
 
         self.model.fit(X, y_mapped, **fit_params)
         self.is_fitted = True

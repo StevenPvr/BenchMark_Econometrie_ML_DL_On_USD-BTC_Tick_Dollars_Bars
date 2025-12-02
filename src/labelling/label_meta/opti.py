@@ -67,7 +67,7 @@ from src.labelling.label_meta.utils import (
 
 # Suppress warnings during optimization
 warnings.filterwarnings("ignore", category=UserWarning)
-optuna.logging.set_verbosity(optuna.logging.WARNING)
+optuna.logging.set_verbosity(optuna.logging.INFO)
 
 logger = logging.getLogger(__name__)
 
@@ -320,69 +320,6 @@ class WalkForwardCV:
 # =============================================================================
 
 
-def _sample_barrier_params(trial: optuna.Trial) -> Dict[str, Any]:
-    """Sample triple barrier parameters from search space."""
-    params = {}
-    for name, (_, choices) in TRIPLE_BARRIER_SEARCH_SPACE.items():
-        params[name] = trial.suggest_categorical(name, choices)
-    return params
-
-
-def _process_chunk_events_meta(
-    chunk: pd.DatetimeIndex,
-    close: pd.Series,
-    volatility: pd.Series,
-    side_predictions: pd.Series,
-    tb_params: Dict[str, Any],
-) -> pd.DataFrame:
-    """Process a chunk of events for meta-labeling (module-level for pickling)."""
-    ev = get_events_meta(
-        close=close,
-        t_events=chunk,
-        pt_mult=tb_params["pt_mult"],
-        sl_mult=tb_params["sl_mult"],
-        trgt=volatility,
-        max_holding=tb_params["max_holding"],
-        side=side_predictions,
-    )
-    if not ev.empty:
-        ev = get_bins(ev, close)
-    return ev
-
-
-def _generate_trial_events_meta(
-    features_df: pd.DataFrame,
-    close: pd.Series,
-    volatility: pd.Series,
-    side_predictions: pd.Series,
-    tb_params: Dict[str, Any],
-    config: MetaOptimizationConfig,
-) -> pd.DataFrame:
-    """Generate meta events with given barrier parameters (optionally in parallel)."""
-    t_events = pd.DatetimeIndex(features_df.index)
-
-    if (not config.parallelize_labeling) or len(t_events) < max(config.parallel_min_events, 1):
-        return _process_chunk_events_meta(t_events, close, volatility, side_predictions, tb_params)
-
-    n_jobs = _resolve_n_jobs(config.n_jobs)
-    event_chunks = _split_t_events(t_events, n_jobs)
-    if len(event_chunks) <= 1:
-        return _process_chunk_events_meta(t_events, close, volatility, side_predictions, tb_params)
-
-    with ProcessPoolExecutor(max_workers=len(event_chunks)) as executor:
-        futures = [
-            executor.submit(_process_chunk_events_meta, chunk, close, volatility, side_predictions, tb_params)
-            for chunk in event_chunks
-        ]
-        results = [f.result() for f in futures]
-
-    non_empty = [df for df in results if df is not None and not df.empty]
-    if not non_empty:
-        return pd.DataFrame()
-
-    return pd.concat(non_empty).sort_index()
-
-
 def _validate_meta_events(
     events: pd.DataFrame,
     config: MetaOptimizationConfig,
@@ -505,28 +442,19 @@ def _run_cv_scoring_meta(
 def create_objective(
     config: MetaOptimizationConfig,
     features_df: pd.DataFrame,
-    close: pd.Series,
-    volatility: pd.Series,
-    side_predictions: pd.Series,
+    labels: pd.Series,
+    events: pd.DataFrame,
     meta_model_class: Type[BaseModel],
     meta_search_space: Dict[str, Any],
 ) -> Callable[[optuna.Trial], float]:
     """Create Optuna objective for meta model optimization."""
 
     def objective(trial: optuna.Trial) -> float:
-        # Sample and generate events
-        tb_params = _sample_barrier_params(trial)
-        events = _generate_trial_events_meta(
-            features_df, close, volatility, side_predictions, tb_params, config
-        )
-
-        # Validate events
+        # Prepare data
         is_valid, reason = _validate_meta_events(events, config)
         if not is_valid:
-            logger.debug(reason)
             raise optuna.TrialPruned(reason)
 
-        # Prepare data
         X, y, events_aligned = _align_features_events_meta(features_df, events, config)
         if X is None or y is None or events_aligned is None:
             raise optuna.TrialPruned("PRUNED: alignment failed")
@@ -599,12 +527,17 @@ def _subsample_features(
 
 def _get_feature_columns(features_df: pd.DataFrame) -> List[str]:
     """Get list of feature columns."""
-    non_feature_cols = [
+    non_feature_cols = {
         "bar_id", "timestamp_open", "timestamp_close",
         "datetime_open", "datetime_close",
-        "threshold_used", "log_return", "split", "label",
+        "threshold_used", "log_return", "split", "label", "t1", "side",
+        "prediction",  # OOF predictions from primary model training
+    }
+    # Filter out prediction and probability columns
+    return [
+        c for c in features_df.columns
+        if c not in non_feature_cols and not c.startswith("proba_")
     ]
-    return [c for c in features_df.columns if c not in non_feature_cols]
 
 
 def _align_close_to_features(
@@ -679,12 +612,17 @@ def _generate_primary_side_predictions(config: MetaOptimizationConfig) -> pd.Ser
     if primary_df.index.has_duplicates:
         primary_df = cast(pd.DataFrame, primary_df[~primary_df.index.duplicated(keep="first")])
 
-    non_feature_cols = [
+    non_feature_cols = {
         "bar_id", "timestamp_open", "timestamp_close",
         "datetime_open", "datetime_close",
-        "threshold_used", "log_return", "split", "label",
+        "threshold_used", "log_return", "split", "label", "t1",
+        "prediction",  # OOF predictions from primary model training
+    }
+    # Filter out prediction and probability columns
+    feature_cols = [
+        c for c in primary_df.columns
+        if c not in non_feature_cols and not c.startswith("proba_")
     ]
-    feature_cols = [c for c in primary_df.columns if c not in non_feature_cols]
     X_primary = cast(pd.DataFrame, primary_df[feature_cols])
 
     primary_model = load_primary_model(config.primary_model_name)
@@ -699,38 +637,69 @@ def _generate_primary_side_predictions(config: MetaOptimizationConfig) -> pd.Ser
 
 def _prepare_meta_data(
     config: MetaOptimizationConfig,
-) -> Tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
-    """Prepare features, close, volatility and side predictions."""
-    # Load meta model's features (train split only)
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+    """
+    Prepare features, labels and events for meta model.
+
+    Meta labels are computed by comparing:
+    - Primary model predictions (side) from column "prediction" (OOF)
+    - True labels from column "label" (triple barrier)
+
+    Meta label = 1 if (label × prediction) > 0 (primary was correct), else 0
+    """
     meta_features_df = _load_and_filter_features(config)
     meta_features_df = _subsample_features(meta_features_df, config)
 
-    # Generate side predictions from the trained primary model (no ground-truth labels)
-    side_predictions_primary = _generate_primary_side_predictions(config)
+    # Validate required columns
+    if "label" not in meta_features_df.columns:
+        raise ValueError(
+            "Meta dataset must contain 'label' column (triple barrier labels from primary model)."
+        )
+    if "prediction" not in meta_features_df.columns:
+        raise ValueError(
+            "Meta dataset must contain 'prediction' column (OOF predictions from primary model training).\n"
+            "Train the primary model first: python -m src.labelling.label_primaire.train"
+        )
 
-    # Align indices between meta features and primary side predictions
-    common_idx = meta_features_df.index.intersection(side_predictions_primary.index)
-    meta_features_df = meta_features_df.loc[common_idx]
-    side_predictions = side_predictions_primary.loc[common_idx]
+    # Calculate meta labels: 1 if primary prediction was correct, 0 otherwise
+    # Meta label = 1 if (true_label × predicted_side) > 0
+    label_values = meta_features_df["label"].to_numpy()
+    prediction_values = meta_features_df["prediction"].to_numpy()
 
-    # Filter to valid sides (+1/-1) and keep aligned features
-    valid_sides_mask = side_predictions.isin([1, -1])
-    meta_features_df = meta_features_df.loc[valid_sides_mask]
-    side_predictions = side_predictions.loc[valid_sides_mask]
+    meta_labels = np.where(
+        label_values * prediction_values > 0,
+        1,  # Primary model was correct
+        0   # Primary model was incorrect
+    )
 
-    # Extract feature columns for the meta model
+    # Filter neutral labels (label=0) if configured
+    if config.filter_neutral_labels:
+        neutral_mask = label_values == 0
+        n_neutral = neutral_mask.sum()
+        if n_neutral > 0:
+            logger.info(f"Filtering {n_neutral} neutral labels (label=0)")
+            valid_mask = ~neutral_mask
+            meta_features_df = cast(pd.DataFrame, meta_features_df[valid_mask].copy())
+            meta_labels = meta_labels[valid_mask]
+
+    # Add primary predictions as "side" feature for meta model
+    meta_features_df["side"] = meta_features_df["prediction"]
+
+    # Build events dataframe
+    events_cols = {"bin": meta_labels}
+    if "t1" in meta_features_df.columns:
+        events_cols["t1"] = meta_features_df["t1"].to_numpy()
+    events = pd.DataFrame(events_cols, index=meta_features_df.index)
+
+    # Extract features (includes "side" from primary model)
     feature_cols = _get_feature_columns(meta_features_df)
     X_meta_features = cast(pd.DataFrame, meta_features_df[feature_cols])
+    y = cast(pd.Series, events["bin"].astype(np.int8))
 
-    # Load market data
-    bars = load_dollar_bars()
-    close_prices = cast(pd.Series, bars["close"])
-    close = _align_close_to_features(close_prices, meta_features_df)
-    volatility = get_daily_volatility(close, span=config.vol_span)
+    logger.info(f"Meta label distribution: {y.value_counts().to_dict()}")
+    logger.info(f"Meta samples: {len(y)}")
 
-    logger.info(f"Side distribution: {side_predictions.value_counts().to_dict()}")
-
-    return X_meta_features, close, volatility, side_predictions
+    return X_meta_features, y, events
 
 
 # =============================================================================
@@ -755,12 +724,12 @@ def optimize_meta_model(
     meta_model_class = load_model_class(meta_model_name)
     meta_search_space = MODEL_REGISTRY[meta_model_name]["search_space"]
 
-    # Load features and side labels (from primary model's labeled dataset)
-    X_features, close, volatility, side = _prepare_meta_data(config)
+    # Load features and precomputed labels
+    X_features, labels, events = _prepare_meta_data(config)
 
     study = _create_study(config)
     objective = create_objective(
-        config, X_features, close, volatility, side, meta_model_class, meta_search_space
+        config, X_features, labels, events, meta_model_class, meta_search_space
     )
     study.optimize(objective, n_trials=config.n_trials, timeout=config.timeout, show_progress_bar=True)
 

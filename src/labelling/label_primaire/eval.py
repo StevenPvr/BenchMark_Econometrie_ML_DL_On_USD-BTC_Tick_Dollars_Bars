@@ -259,7 +259,6 @@ def compute_shap_values(
             explainer = shap.LinearExplainer(
                 underlying_model,
                 X_transformed,
-                feature_perturbation="interventional",
             )
             shap_values = explainer.shap_values(X_transformed)
         else:
@@ -612,12 +611,17 @@ def evaluate_model(model_name: str) -> EvaluationResult:
     train_df, test_df = load_data(model_name)
 
     # Prepare features
-    non_feature_cols = [
+    non_feature_cols = {
         "bar_id", "timestamp_open", "timestamp_close",
         "datetime_open", "datetime_close", "threshold_used",
-        "log_return", "split", "label",
+        "log_return", "split", "label", "t1",
+        "prediction",  # OOF predictions from train.py
+    }
+    # Filter out prediction columns (prediction, proba_*)
+    feature_cols = [
+        c for c in train_df.columns
+        if c not in non_feature_cols and not c.startswith("proba_")
     ]
-    feature_cols = [c for c in train_df.columns if c not in non_feature_cols]
 
     # Filter valid labels
     train_valid = train_df[~train_df["label"].isna()].copy()
@@ -714,12 +718,17 @@ def run_shap_analysis(
     _, test_df = load_data(model_name)
 
     # Prepare features
-    non_feature_cols = [
+    non_feature_cols = {
         "bar_id", "timestamp_open", "timestamp_close",
         "datetime_open", "datetime_close", "threshold_used",
-        "log_return", "split", "label",
+        "log_return", "split", "label", "t1",
+        "prediction",  # OOF predictions from train.py
+    }
+    # Filter out prediction columns (prediction, proba_*)
+    feature_cols = [
+        c for c in test_df.columns
+        if c not in non_feature_cols and not c.startswith("proba_")
     ]
-    feature_cols = [c for c in test_df.columns if c not in non_feature_cols]
     test_valid = test_df[~test_df["label"].isna()].copy()
     X_test = cast(pd.DataFrame, test_valid[feature_cols])
 

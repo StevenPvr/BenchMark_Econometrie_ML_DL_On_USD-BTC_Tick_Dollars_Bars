@@ -32,6 +32,13 @@ from src.path import (
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+# Risk/reward ratio for profit-taking (pt_mult = RISK_REWARD_RATIO * sl_mult)
+RISK_REWARD_RATIO: float = 1.5
+
 
 # =============================================================================
 # MODEL REGISTRY
@@ -39,24 +46,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     # Machine Learning - Gradient Boosting
-    "lightgbm": {
-        "class": "src.model.lightgbm_model.LightGBMModel",
-        "dataset": "tree",
-        "search_space": {
-            # Wider / finer ranges; see _sample_model_params for type handling
-            "n_estimators": ("int", [200, 1400, 50]),  # step 50
-            "max_depth": ("int", [3, 12, 1]),
-            "num_leaves": ("int", [31, 511, 8]),
-            "learning_rate": ("float", [0.005, 0.2, "log"]),  # log scale
-            "subsample": ("float", [0.5, 1.0]),
-            "subsample_freq": ("int", [0, 5, 1]),
-            "colsample_bytree": ("float", [0.5, 1.0]),
-            "min_child_samples": ("int", [5, 150, 5]),
-            "min_split_gain": ("float", [0.0, 0.3]),
-            "reg_alpha": ("float", [1e-4, 1.0, "log"]),
-            "reg_lambda": ("float", [1e-4, 1.0, "log"]),
-        },
-    },
     "xgboost": {
         "class": "src.model.xgboost_model.XGBoostModel",
         "dataset": "tree",
@@ -68,18 +57,6 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "colsample_bytree": ("float", [0.5, 1.0]),
             "reg_alpha": ("float", [1e-4, 1.0, "log"]),
             "reg_lambda": ("float", [1e-4, 1.0, "log"]),
-        },
-    },
-    "catboost": {
-        "class": "src.model.catboost_model.CatBoostModel",
-        "dataset": "tree",
-        "search_space": {
-            "iterations": ("int", [200, 1200, 100]),
-            "depth": ("int", [4, 12, 1]),
-            "learning_rate": ("float", [0.01, 0.2]),
-            "l2_leaf_reg": ("float", [0.1, 10.0, "log"]),
-            "random_strength": ("float", [0.5, 2.0]),
-            "bagging_temperature": ("float", [0.0, 5.0]),
         },
     },
     "random_forest": {
@@ -99,6 +76,7 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "dataset": "linear",
         "search_space": {
             "alpha": ("float", [1e-4, 1e3, "log"]),
+            "fit_intercept": ("categorical", [True, False]),
         },
     },
     "logistic": {
@@ -125,50 +103,53 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# Triple barrier search space for primary model
-# Extended ranges for broader exploration (1764 combinations)
-# Cache mechanism in opti.py prevents redundant label computations
-# Constraints: min 10% neutral, min 15% for +1/-1 (avoid extreme values)
-TRIPLE_BARRIER_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
-    # Profit-taking multiplier: avoid < 0.6 (too tight, imbalanced labels)
-    "pt_mult": ("categorical", [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5]),
-    # Stop-loss multiplier: avoid < 0.6 (too tight, imbalanced labels)
-    "sl_mult": ("categorical", [0.6, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5]),
-    # Minimum return threshold: balanced range to ensure ~10-30% neutrals
-    "min_return": ("categorical", [0.00005, 0.0001, 0.00015, 0.0002, 0.00025, 0.0003]),
-    # Maximum holding period in bars: extended range
-    "max_holding": ("categorical", [15, 30, 50, 80, 120, 180]),
-}
-
 # Focal loss search space for class imbalance handling
 # gamma: focusing parameter (higher = more focus on hard examples)
 # use_focal_loss: whether to use focal loss vs standard cross-entropy
 FOCAL_LOSS_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = {
     # Focusing parameter: 0=CE, 1=light, 2=standard, 3-5=aggressive
-    "focal_gamma": ("categorical", [0.0, 1.0, 2.0, 3.0, 5.0]),
+    "focal_gamma": ("categorical", [1.0, 2.0, 3.0]),
     # Whether to use focal loss (False = standard loss with class weights)
-    "use_focal_loss": ("categorical", [True, False]),
-    # Boost factor for minority class weights in MCC scoring
-    # 1.0 = standard balanced weights
-    # 1.25-1.5 = moderate boost (recommended)
-    # 2.0 = strong boost (risk of model predicting only neutral to avoid penalties)
-    "minority_weight_boost": ("categorical", [1.0, 1.25, 1.5, 1.75, 2.0]),
+    "use_focal_loss": ("categorical", [True]),
 }
 
 # Minimum prediction ratio for minority classes (guard against degenerate models)
 # If model predicts less than this fraction of long+short, apply penalty
-MIN_MINORITY_PREDICTION_RATIO: float = 0.05  # Allow rarer signals (was 10%)
+MIN_MINORITY_PREDICTION_RATIO: float = 0.1  # Allow rarer signals (was 10%)
+
+# Hard floor on per-class F1 during CV; below this a fold is pruned
+MIN_PER_CLASS_F1_REQUIRED: float = 0.0
+
+# =============================================================================
+# COMPOSITE SCORE WEIGHTS
+# =============================================================================
+# The composite score replaces MCC + F1_weighted with a more interpretable metric:
+#   score = α * F1_directional + β * F1_neutral + δ * F1_min - γ * sign_error_rate
+#
+# Where:
+# - F1_directional = mean(F1_-1, F1_+1) : ability to predict direction
+# - F1_neutral = F1_0 : ability to identify neutral/no-trade zones
+# - F1_min = min(F1_-1, F1_0, F1_+1): forces learning of all 3 classes
+# - sign_error_rate = (predict +1 when true -1 OR predict -1 when true +1) / total
+#
+# Sign errors are the worst: they mean trading in the wrong direction!
+
+COMPOSITE_SCORE_WEIGHTS: Dict[str, float] = {
+    "alpha": 0.45,  # Weight for directional F1 (most important: predict direction)
+    "beta": 0.20,   # Weight for neutral F1 (avoid false signals)
+    "delta": 0.25,  # Weight for the worst class F1 to force learning all classes
+    "gamma": 0.20,  # Softer sign error penalty (avoid fleeing to class 0)
+}
 
 # Models that support focal loss (gradient boosting with custom objectives)
-FOCAL_LOSS_SUPPORTED_MODELS: List[str] = ["lightgbm"]
+FOCAL_LOSS_SUPPORTED_MODELS: List[str] = []
 
 # Models that support class_weight parameter directly
 # Note: Ridge (sklearn.linear_model.RidgeClassifier) does not support class_weight
 CLASS_WEIGHT_SUPPORTED_MODELS: List[str] = [
-    "lightgbm",
-    "catboost",
     "random_forest",
     "logistic",
+    "ridge",
 ]
 
 
@@ -179,36 +160,166 @@ CLASS_WEIGHT_SUPPORTED_MODELS: List[str] = [
 
 @dataclass
 class OptimizationConfig:
-    """Configuration for primary model optimization."""
+    """Configuration for primary model optimization.
+
+    Note: Labels are pre-calculated by relabel_datasets.py. This optimization
+    only tunes model hyperparameters, not triple-barrier parameters.
+    """
 
     model_name: str
     n_trials: int = 50
     n_splits: int = 5
     min_train_size: int = 500
-    vol_span: int = 100
-    data_fraction: float = 1.0
+    data_fraction: float = 1  # Use full dataset (labels are pre-calculated)
     random_state: int = DEFAULT_RANDOM_STATE
     timeout: int | None = None
-    parallelize_labeling: bool = True
-    parallel_min_events: int = 10_000
-    n_jobs: int | None = None
+    early_stopping_rounds: int = 50
     # Focal loss configuration
-    use_focal_loss: bool = True  # Enable focal loss for supported models
-    focal_gamma: float = 2.0  # Focusing parameter (0=CE, 2=standard, 5=aggressive)
-    optimize_focal_params: bool = True  # Include focal params in Optuna search
+    use_focal_loss: bool = False  # Focal loss disabled (no supported models in pipeline)
+    focal_gamma: float = 2.0  # Kept for compatibility
+    optimize_focal_params: bool = False  # No focal search by default
     # Class weight configuration
     use_class_weights: bool = True  # Use balanced class weights
-    # Minority class weight boost for MCC scoring (1.0 = balanced, >1 = penalize minority errors more)
-    minority_weight_boost: float = 1.25  # Conservative default to avoid degenerate predictions
+
+
+@dataclass
+class CompositeScoreMetrics:
+    """Metrics for the composite score computation.
+
+    The composite score is designed for primary model optimization:
+    - Rewards correct directional predictions (F1 for +1 and -1)
+    - Rewards correct neutral identification (F1 for 0)
+    - Rewards the worst-performing class (F1_min) to force learning all 3 classes
+    - Penalizes sign errors (predicting +1 when true is -1, or vice versa)
+    """
+
+    f1_minus1: float  # F1 for class -1 (Short)
+    f1_zero: float    # F1 for class 0 (Neutral)
+    f1_plus1: float   # F1 for class +1 (Long)
+    f1_min: float     # Worst per-class F1 (enforces learning of all classes)
+    sign_error_rate: float  # Rate of sign errors (worst kind of error)
+    composite_score: float  # Final composite score
+    n_sign_errors: int  # Count of sign errors
+    n_total: int  # Total predictions
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "f1_minus1": self.f1_minus1,
+            "f1_zero": self.f1_zero,
+            "f1_plus1": self.f1_plus1,
+            "f1_min": self.f1_min,
+            "sign_error_rate": self.sign_error_rate,
+            "composite_score": self.composite_score,
+            "n_sign_errors": self.n_sign_errors,
+            "n_total": self.n_total,
+        }
+
+
+def compute_composite_score(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    weights: Dict[str, float] | None = None,
+) -> CompositeScoreMetrics:
+    """
+    Compute composite score for primary model optimization.
+
+    The score combines:
+    - F1 for directional classes (-1, +1): ability to predict market direction
+    - F1 for neutral class (0): ability to avoid false signals
+    - Minimum F1 across classes to prevent collapse of one class
+    - Sign error penalty: trading in the wrong direction is the worst error
+
+    Formula:
+        score = α * F1_directional + β * F1_neutral + δ * F1_min - γ * sign_error_rate
+
+    Where:
+        - F1_directional = (F1_-1 + F1_+1) / 2
+        - F1_min = min(F1_-1, F1_0, F1_+1)
+        - sign_error_rate = (predict +1 when true -1 + predict -1 when true +1) / total
+
+    Parameters
+    ----------
+    y_true : np.ndarray
+        True labels (-1, 0, +1).
+    y_pred : np.ndarray
+        Predicted labels (-1, 0, +1).
+    weights : Dict[str, float] | None
+        Override weights for alpha, beta, delta, gamma. Uses COMPOSITE_SCORE_WEIGHTS if None.
+
+    Returns
+    -------
+    CompositeScoreMetrics
+        Dataclass containing all metrics and the final composite score.
+    """
+    from sklearn.metrics import f1_score as sklearn_f1_score
+
+    if weights is None:
+        weights = COMPOSITE_SCORE_WEIGHTS
+
+    alpha = weights.get("alpha", 0.5)
+    beta = weights.get("beta", 0.2)
+    delta = weights.get("delta", 0.0)
+    gamma = weights.get("gamma", 0.3)
+
+    n_total = len(y_true)
+
+    # Compute F1 per class (with zero_division handling)
+    # labels=[-1, 0, 1] ensures consistent ordering even if some classes are missing
+    f1_per_class = sklearn_f1_score(
+        y_true, y_pred,
+        labels=[-1, 0, 1],
+        average=None,  # type: ignore[arg-type]  # None is valid for per-class scores
+        zero_division=0.0  # type: ignore[arg-type]  # float is valid for zero_division
+    )
+
+    # f1_per_class is ndarray when average=None
+    f1_minus1 = float(f1_per_class[0])  # type: ignore[index]  # ndarray indexing
+    f1_zero = float(f1_per_class[1])    # type: ignore[index]  # ndarray indexing
+    f1_plus1 = float(f1_per_class[2])   # type: ignore[index]  # ndarray indexing
+    f1_min = min(f1_minus1, f1_zero, f1_plus1)
+
+    # Compute sign errors: predict +1 when true -1, or predict -1 when true +1
+    # These are the worst errors: we would trade in the opposite direction!
+    sign_errors_mask = (
+        ((y_pred == 1) & (y_true == -1)) |  # Predicted Long, was Short
+        ((y_pred == -1) & (y_true == 1))    # Predicted Short, was Long
+    )
+    n_sign_errors = int(np.sum(sign_errors_mask))
+    sign_error_rate = n_sign_errors / n_total if n_total > 0 else 0.0
+
+    # Compute composite score
+    f1_directional = (f1_minus1 + f1_plus1) / 2.0
+    composite_score = (
+        alpha * f1_directional +
+        beta * f1_zero +
+        delta * f1_min -
+        gamma * sign_error_rate
+    )
+
+    return CompositeScoreMetrics(
+        f1_minus1=f1_minus1,
+        f1_zero=f1_zero,
+        f1_plus1=f1_plus1,
+        f1_min=f1_min,
+        sign_error_rate=sign_error_rate,
+        composite_score=composite_score,
+        n_sign_errors=n_sign_errors,
+        n_total=n_total,
+    )
 
 
 @dataclass
 class OptimizationResult:
-    """Result of the optimization process."""
+    """Result of the optimization process.
+
+    Note: Triple-barrier parameters are no longer optimized here. They are
+    pre-computed by relabel_datasets.py. This result contains only model
+    hyperparameters and focal loss configuration.
+    """
 
     model_name: str
     best_params: Dict[str, Any]
-    best_triple_barrier_params: Dict[str, Any]
     best_score: float
     metric: str
     n_trials: int
@@ -221,7 +332,6 @@ class OptimizationResult:
         return {
             "model_name": self.model_name,
             "best_params": self.best_params,
-            "best_triple_barrier_params": self.best_triple_barrier_params,
             "best_focal_loss_params": self.best_focal_loss_params,
             "best_score": self.best_score,
             "metric": self.metric,
@@ -320,194 +430,3 @@ def get_daily_volatility(
     """
     log_returns = np.log(close / close.shift(1))
     return log_returns.ewm(span=span, min_periods=min_periods).std()
-
-
-# =============================================================================
-# BARRIER HELPERS
-# =============================================================================
-
-
-def compute_barriers(
-    events: pd.DataFrame,
-    pt_mult: float,
-    sl_mult: float,
-) -> pd.DataFrame:
-    """
-    Compute profit-taking and stop-loss barrier levels.
-
-    Parameters
-    ----------
-    events : pd.DataFrame
-        Events with 'trgt' (volatility threshold) column.
-    pt_mult : float
-        Profit-taking multiplier.
-    sl_mult : float
-        Stop-loss multiplier.
-
-    Returns
-    -------
-    pd.DataFrame
-        Events with 'pt' and 'sl' columns added.
-    """
-    out = events.copy()
-
-    if pt_mult > 0:
-        out["pt"] = pt_mult * out["trgt"]
-    else:
-        out["pt"] = pd.Series(index=events.index, dtype=float)
-
-    if sl_mult > 0:
-        out["sl"] = -sl_mult * out["trgt"]
-    else:
-        out["sl"] = pd.Series(index=events.index, dtype=float)
-
-    return out
-
-
-def is_valid_barrier(value: Any) -> bool:
-    """Check if a barrier value is valid (not None/NaN)."""
-    if value is None:
-        return False
-    if isinstance(value, (int, float)) and pd.isna(value):
-        return False
-    return True
-
-
-def find_barrier_touch(
-    path_ret: pd.Series,
-    pt_barrier: float | None,
-    sl_barrier: float | None,
-) -> pd.Timestamp | None:
-    """
-    Find the first barrier touch in a price path.
-
-    Parameters
-    ----------
-    path_ret : pd.Series
-        Returns relative to entry price.
-    pt_barrier : float or None
-        Profit-taking barrier level.
-    sl_barrier : float or None
-        Stop-loss barrier level.
-
-    Returns
-    -------
-    pd.Timestamp or None
-        Timestamp of first barrier touch, or None.
-    """
-    # Check profit-taking
-    if is_valid_barrier(pt_barrier) and pt_barrier is not None and pt_barrier > 0:
-        pt_touches = cast(pd.Series, path_ret[path_ret >= pt_barrier])
-        if len(pt_touches) > 0:
-            first_touch = pt_touches.index[0]
-            # Ensure first_touch is a valid timestamp
-            try:
-                if (first_touch is not None and
-                    not (isinstance(first_touch, (int, float)) and pd.isna(first_touch))):
-                    try:
-                        return cast(pd.Timestamp, pd.to_datetime(first_touch))
-                    except (ValueError, TypeError, OSError):
-                        pass
-            except (ValueError, TypeError):
-                pass
-
-    # Check stop-loss
-    if is_valid_barrier(sl_barrier) and sl_barrier is not None and sl_barrier < 0:
-        sl_touches = cast(pd.Series, path_ret[path_ret <= sl_barrier])
-        if len(sl_touches) > 0:
-            first_touch = sl_touches.index[0]
-            # Ensure first_touch is a valid timestamp
-            try:
-                if (first_touch is not None and
-                    not (isinstance(first_touch, (int, float)) and pd.isna(first_touch))):
-                    try:
-                        return cast(pd.Timestamp, pd.to_datetime(first_touch))
-                    except (ValueError, TypeError, OSError):
-                        pass
-            except (ValueError, TypeError):
-                pass
-
-    return None
-
-
-def compute_return_and_label(
-    close: pd.Series,
-    t0: pd.Timestamp,
-    t1: pd.Timestamp,
-    min_return: float,
-) -> Tuple[float, int]:
-    """
-    Compute return and label for a single event.
-
-    Parameters
-    ----------
-    close : pd.Series
-        Close prices.
-    t0 : pd.Timestamp
-        Entry timestamp.
-    t1 : pd.Timestamp
-        Exit timestamp.
-    min_return : float
-        Minimum return threshold.
-
-    Returns
-    -------
-    Tuple[float, int]
-        (return, label) where label is +1, -1, or 0.
-    """
-    try:
-        price_t0 = close.loc[t0]
-        price_t1 = close.loc[t1]
-        ret = (price_t1 - price_t0) / price_t0
-
-        if abs(ret) < min_return:
-            label = 0
-        elif ret > 0:
-            label = 1
-        else:
-            label = -1
-
-        return ret, label
-    except (KeyError, TypeError):
-        return np.nan, 0
-
-
-def set_vertical_barriers(
-    t_events: pd.DatetimeIndex,
-    close_idx: pd.Index,
-    max_holding: int,
-) -> pd.Series:
-    """
-    Set vertical (time) barriers for all events.
-
-    Parameters
-    ----------
-    t_events : pd.DatetimeIndex
-        Event timestamps.
-    close_idx : pd.Index
-        Close price index.
-    max_holding : int
-        Maximum holding period in bars.
-
-    Returns
-    -------
-    pd.Series
-        Series with t1 values for each event.
-    """
-    # Initialize with correct dtype to avoid FutureWarning
-    # close_idx may be timezone-aware (datetime64[ns, UTC])
-    if isinstance(close_idx, pd.DatetimeIndex) and close_idx.tz is not None:
-        t1_series = pd.Series(pd.NaT, index=t_events, dtype=close_idx.dtype)
-    else:
-        t1_series = pd.Series(pd.NaT, index=t_events, dtype="datetime64[ns]")
-
-    for loc in t_events:
-        try:
-            t0_pos = close_idx.get_loc(loc)
-            if isinstance(t0_pos, int):
-                t1_pos = min(t0_pos + max_holding, len(close_idx) - 1)
-                t1_series.loc[loc] = close_idx[t1_pos]
-        except (KeyError, TypeError):
-            pass  # Already initialized with NaT
-
-    return t1_series

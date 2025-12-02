@@ -25,16 +25,15 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 import logging
-import multiprocessing
 import os
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Tuple, Type, cast
 
 import numpy as np
 import optuna
 import pandas as pd  # type: ignore[import-untyped]
-from sklearn.metrics import f1_score, matthews_corrcoef  # type: ignore[import-untyped]
 from sklearn.model_selection import TimeSeriesSplit  # type: ignore[import-untyped]
 from sklearn.utils.class_weight import compute_class_weight  # type: ignore[import-untyped]
 
@@ -45,25 +44,20 @@ from src.path import LABEL_PRIMAIRE_OPTI_DIR
 from src.labelling.label_primaire.utils import (
     # Registry and search spaces
     MODEL_REGISTRY,
-    TRIPLE_BARRIER_SEARCH_SPACE,
     FOCAL_LOSS_SEARCH_SPACE,
     FOCAL_LOSS_SUPPORTED_MODELS,
     CLASS_WEIGHT_SUPPORTED_MODELS,
     MIN_MINORITY_PREDICTION_RATIO,
+    COMPOSITE_SCORE_WEIGHTS,
     # Dataclasses
     OptimizationConfig,
     OptimizationResult,
+    CompositeScoreMetrics,
+    # Functions
+    compute_composite_score,
     # Data loading
     load_model_class,
     get_dataset_for_model,
-    load_dollar_bars,
-    # Volatility
-    get_daily_volatility,
-    # Barrier helpers
-    compute_barriers,
-    find_barrier_touch,
-    compute_return_and_label,
-    set_vertical_barriers,
 )
 from src.labelling.label_primaire.focal_loss import (
     create_focal_loss_objective,
@@ -72,214 +66,36 @@ from src.labelling.label_primaire.focal_loss import (
 
 # Suppress warnings during optimization
 warnings.filterwarnings("ignore", category=UserWarning)
-optuna.logging.set_verbosity(optuna.logging.WARNING)
+optuna.logging.set_verbosity(optuna.logging.INFO)
 
 logger = logging.getLogger(__name__)
 
-
 # =============================================================================
-# TRIPLE BARRIER LABELING
+# LABEL VALIDATION CONSTANTS
 # =============================================================================
 
-MIN_LABEL_RATIO_POS_NEG = 0.10  # Require at least 10% for -1 and 1 (was 15%)
-MIN_LABEL_RATIO_NEUTRAL = 0.05  # Require at least 5% for 0 (was 10%)
-PARALLEL_MIN_EVENTS = 10_000
-
-# Type alias for events cache key
-EventsCacheKey = Tuple[float, float, float, int]  # (pt_mult, sl_mult, min_return, max_holding)
-
-
-def _resolve_n_jobs(requested: int | None) -> int:
-    """Return a valid worker count capped to available CPU cores."""
-    max_cores = multiprocessing.cpu_count()
-    if requested is None or requested <= 0:
-        return max_cores
-    return min(requested, max_cores)
-
-
-def _split_t_events(t_events: pd.DatetimeIndex, n_splits: int) -> List[pd.DatetimeIndex]:
-    """Split events into roughly equal chunks while preserving order."""
-    chunks = np.array_split(t_events, n_splits)
-    return [pd.DatetimeIndex(chunk) for chunk in chunks if len(chunk) > 0]
-
-
-def _generate_events_chunk(
-    close: pd.Series,
-    t_events_chunk: pd.DatetimeIndex,
-    volatility: pd.Series,
-    tb_params: Dict[str, Any],
-) -> pd.DataFrame:
-    """Generate triple-barrier events for a chunk of timestamps."""
-    return get_events_primary(
-        close=close,
-        t_events=t_events_chunk,
-        pt_mult=tb_params["pt_mult"],
-        sl_mult=tb_params["sl_mult"],
-        trgt=volatility,
-        max_holding=tb_params["max_holding"],
-        min_return=tb_params["min_return"],
+# Minimum proportion of labels per class for validation
+MIN_LABEL_RATIO_POS_NEG: float = 0.05  # 5% minimum for +1/-1 classes
+MIN_LABEL_RATIO_NEUTRAL: float = 0.10  # 10% minimum for neutral (0) class
+# Columns that should never be used as model features
+NON_FEATURE_COLS = [
+    "bar_id",
+    "timestamp_open",
+    "timestamp_close",
+    "datetime_open",
+    "datetime_close",
+    "threshold_used",
+    "log_return",
+    "split",
+    "label",
+    "t1",  # Barrier touch time (datetime, not a feature)
+]
+# Ensure root logger prints INFO when not already configured (for CLI use)
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
     )
-
-
-def _get_path_returns(
-    close: pd.Series,
-    t0: pd.Timestamp,
-    t1: pd.Timestamp,
-) -> pd.Series | None:
-    """Get returns relative to entry price for a price path."""
-    # Ensure t0 and t1 are timestamps
-    if not isinstance(t0, pd.Timestamp) or not isinstance(t1, pd.Timestamp):
-        return None
-    """Get returns relative to entry price for a price path."""
-    try:
-        path = close.loc[t0:t1]
-        if len(path) < 2:
-            return None
-        entry_price = path.iloc[0]
-        return (path / entry_price) - 1
-    except (KeyError, TypeError):
-        return None
-
-
-def _update_barrier_touches(close: pd.Series, events: pd.DataFrame) -> pd.DataFrame:
-    """Update t1 based on barrier touches for each event."""
-    for loc, row in events.iterrows():
-        t1 = row["t1"]
-        if t1 is None or (isinstance(t1, (int, float)) and pd.isna(t1)):
-            continue
-
-        # Ensure t1 is a timestamp
-        if not isinstance(t1, pd.Timestamp):
-            continue
-
-        try:
-            # loc should be a timestamp from DataFrame index
-            path_ret = _get_path_returns(close, loc, t1)  # type: ignore
-        except (ValueError, TypeError):
-            continue
-        if path_ret is None:
-            continue
-
-        # Ensure barrier values are numeric
-        pt_val = row["pt"]
-        sl_val = row["sl"]
-        pt_barrier = float(pt_val) if isinstance(pt_val, (int, float)) and not pd.isna(pt_val) else None
-        sl_barrier = float(sl_val) if isinstance(sl_val, (int, float)) and not pd.isna(sl_val) else None
-
-        touch_time = find_barrier_touch(path_ret, pt_barrier, sl_barrier)
-        if touch_time is not None:
-            events.loc[loc, "t1"] = touch_time
-
-    return events
-
-
-def apply_pt_sl_on_t1(
-    close: pd.Series,
-    events: pd.DataFrame,
-    pt_mult: float,
-    sl_mult: float,
-) -> pd.DataFrame:
-    """
-    Apply profit-taking and stop-loss barriers on events.
-
-    This is applyPtSlOnT1 from De Prado. For PRIMARY model,
-    barriers are symmetric (no side consideration).
-    """
-    out = compute_barriers(events, pt_mult, sl_mult)
-    out = _update_barrier_touches(close, out)
-    return out
-
-
-def _filter_valid_events(
-    t_events: pd.DatetimeIndex,
-    trgt: pd.Series,
-) -> pd.DatetimeIndex:
-    """Filter events to those with valid target volatility."""
-    t_events = t_events[t_events.isin(trgt.index)]
-    t_events = t_events[trgt.loc[t_events].notna()]
-    return t_events
-
-
-def _build_events_dataframe(
-    t_events: pd.DatetimeIndex,
-    trgt: pd.Series,
-    close_idx: pd.Index,
-    max_holding: int,
-) -> pd.DataFrame:
-    """Build initial events DataFrame with vertical barriers."""
-    events = pd.DataFrame(index=t_events)
-    events["trgt"] = trgt.loc[t_events].values
-    events["t1"] = set_vertical_barriers(t_events, close_idx, max_holding)
-
-    # Remove invalid events
-    valid_mask = events["t1"].notna()
-    result = events[valid_mask]
-    assert isinstance(result, pd.DataFrame), "result must be a DataFrame"
-    return result
-
-
-def _compute_labels(
-    events: pd.DataFrame,
-    close: pd.Series,
-    min_return: float,
-) -> pd.DataFrame:
-    """Compute return and label for all events."""
-    events["ret"] = np.nan
-    events["label"] = 0
-
-    for loc, row in events.iterrows():
-        t1 = row["t1"]
-        if t1 is None or (isinstance(t1, (int, float)) and pd.isna(t1)):
-            continue
-
-        # Ensure t1 is a timestamp
-        if isinstance(t1, pd.Timestamp):
-            try:
-                # loc should be a timestamp from DataFrame index
-                ret, label = compute_return_and_label(close, loc, t1, min_return)  # type: ignore
-            except (ValueError, TypeError):
-                ret, label = np.nan, 0
-        else:
-            ret, label = np.nan, 0
-        events.loc[loc, "ret"] = ret
-        events.loc[loc, "label"] = label
-
-    return events
-
-
-def get_events_primary(
-    close: pd.Series,
-    t_events: pd.DatetimeIndex,
-    pt_mult: float,
-    sl_mult: float,
-    trgt: pd.Series,
-    max_holding: int,
-    min_return: float = 0.0,
-) -> pd.DataFrame:
-    """
-    Generate events for PRIMARY model training.
-
-    Labels are direction-based: +1 (Long), -1 (Short), 0 (Neutral).
-    """
-    # Filter to valid events
-    t_events = _filter_valid_events(t_events, trgt)
-    if len(t_events) == 0:
-        return pd.DataFrame()
-
-    # Build events DataFrame
-    events = _build_events_dataframe(t_events, trgt, close.index, max_holding)
-    if events.empty:
-        return pd.DataFrame()
-
-    # Apply horizontal barriers
-    events = apply_pt_sl_on_t1(close, events, pt_mult, sl_mult)
-
-    # Compute labels
-    events = _compute_labels(events, close, min_return)
-
-    result = events[["t1", "trgt", "ret", "label"]]
-    assert isinstance(result, pd.DataFrame), "result must be a DataFrame"
-    return result
 
 
 # =============================================================================
@@ -361,54 +177,7 @@ class WalkForwardCV:
 # =============================================================================
 
 
-def _sample_barrier_params(trial: optuna.Trial) -> Dict[str, Any]:
-    """Sample triple barrier parameters from search space."""
-    params = {}
-    for name, (_, choices) in TRIPLE_BARRIER_SEARCH_SPACE.items():
-        params[name] = trial.suggest_categorical(name, choices)
-    return params
-
-
-def _generate_trial_events(
-    features_df: pd.DataFrame,
-    close: pd.Series,
-    volatility: pd.Series,
-    tb_params: Dict[str, Any],
-    config: OptimizationConfig,
-) -> pd.DataFrame:
-    """Generate events with given barrier parameters (optionally in parallel)."""
-    t_events = pd.DatetimeIndex(features_df.index)
-
-    if (not config.parallelize_labeling) or config.parallel_min_events <= 0 or len(t_events) < max(config.parallel_min_events, 1):
-        return _generate_events_chunk(close, t_events, volatility, tb_params)
-
-    n_jobs = _resolve_n_jobs(getattr(config, "n_jobs", None))
-    event_chunks = _split_t_events(t_events, n_jobs)
-
-    if len(event_chunks) <= 1:
-        return _generate_events_chunk(close, t_events, volatility, tb_params)
-
-    with ProcessPoolExecutor(max_workers=len(event_chunks)) as executor:
-        futures = [
-            executor.submit(
-                _generate_events_chunk,
-                close,
-                chunk,
-                volatility,
-                tb_params,
-            )
-            for chunk in event_chunks
-        ]
-        results = [future.result() for future in futures]
-
-    non_empty = [df for df in results if df is not None and not df.empty]
-    if not non_empty:
-        return pd.DataFrame()
-
-    return pd.concat(non_empty).sort_index()
-
-
-def _validate_events(
+def _validate_labels(
     events: pd.DataFrame, 
     config: OptimizationConfig,
     trial_number: int | None = None,
@@ -530,8 +299,8 @@ def _sample_model_params(
 
 
 def _evaluate_fold(
-    X: pd.DataFrame,
-    y: pd.Series,
+    X: pd.DataFrame | np.ndarray,
+    y: pd.Series | np.ndarray,
     train_idx: np.ndarray,
     val_idx: np.ndarray,
     model_class: Type[BaseModel],
@@ -541,9 +310,14 @@ def _evaluate_fold(
     use_focal_loss: bool = False,
     focal_gamma: float = 2.0,
     use_class_weights: bool = True,
-    minority_weight_boost: float = 1.0,
-) -> Tuple[float | None, float | None, str]:
-    """Evaluate a single CV fold with focal loss and class weight support.
+    early_stopping_rounds: int | None = None,
+) -> Tuple[CompositeScoreMetrics | None, str]:
+    """Evaluate a single CV fold with composite score.
+
+    The composite score combines:
+    - F1 for each class (-1, 0, +1)
+    - Minimum F1 across classes (F1_min) to avoid collapsing a class
+    - Penalty for sign errors (predicting +1 when true is -1, or vice versa)
 
     Parameters
     ----------
@@ -569,37 +343,55 @@ def _evaluate_fold(
         Focal loss gamma parameter.
     use_class_weights : bool, default=True
         Whether to use balanced class weights.
-    minority_weight_boost : float, default=1.0
-        Multiplier for minority class weights (-1, +1) in MCC scoring.
-        1.0 = balanced, >1.0 = penalize minority class errors more.
 
     Returns
     -------
-    Tuple[float | None, float | None, str]
-        (mcc, f1_weighted, reason) - None scores mean the fold is invalid.
+    Tuple[CompositeScoreMetrics | None, str]
+        (metrics, reason) - None metrics mean the fold is invalid.
     """
     model_prefix = f"[{model_name}] " if model_name else ""
     fold_prefix = f"Fold {fold_idx}: " if fold_idx is not None else ""
 
     try:
-        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
-        X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
+        if isinstance(X, pd.DataFrame):
+            X_train = X.iloc[train_idx].to_numpy()
+            X_val = X.iloc[val_idx].to_numpy()
+        else:
+            X_train = cast(np.ndarray, X)[train_idx]
+            X_val = cast(np.ndarray, X)[val_idx]
 
-        if len(y_train.unique()) < 2:
+        if isinstance(y, pd.Series):
+            y_train = y.iloc[train_idx].to_numpy()
+            y_val = y.iloc[val_idx].to_numpy()
+        else:
+            y_train = cast(np.ndarray, y)[train_idx]
+            y_val = cast(np.ndarray, y)[val_idx]
+
+        classes = np.unique(y_train)
+        if len(classes) < 2:
             reason = (
                 f"{model_prefix}{fold_prefix}SKIP: only 1 class in training set "
-                f"(classes: {y_train.unique().tolist()})"
+                f"(classes: {classes.tolist()})"
             )
             logger.debug(reason)
-            return None, None, reason
+            return None, reason
 
-        # Compute class weights for scoring and model training
-        classes = np.unique(y_train)
+        # Compute class weights for model training
         cw = compute_class_weight("balanced", classes=classes, y=y_train)
         weight_map = dict(zip(classes, cw))
+        # Guard: if validation contains labels unseen in training, skip this fold
+        unseen_labels = set(np.unique(y_val)) - set(classes.tolist())
+        if unseen_labels:
+            reason = (
+                f"{model_prefix}{fold_prefix}SKIP: val labels unseen in train {sorted(unseen_labels)} "
+                f"(train classes: {classes.tolist()})"
+            )
+            logger.debug(reason)
+            return None, reason
 
         # Make a copy of model params to modify
         final_model_params = model_params.copy()
+        es_rounds = early_stopping_rounds if early_stopping_rounds and early_stopping_rounds > 0 else None
 
         # Apply class weights to model if supported
         if use_class_weights and model_name in CLASS_WEIGHT_SUPPORTED_MODELS:
@@ -612,6 +404,10 @@ def _evaluate_fold(
                 final_model_params["class_weight"] = weight_map
             elif model_name in ("logistic", "ridge"):
                 final_model_params["class_weight"] = weight_map
+
+        # For XGBoost, early stopping is configured via model params (not fit kwargs)
+        if model_name == "xgboost" and es_rounds:
+            final_model_params["early_stopping_rounds"] = es_rounds
 
         # Apply focal loss for LightGBM if enabled
         if use_focal_loss and model_name in FOCAL_LOSS_SUPPORTED_MODELS:
@@ -628,7 +424,27 @@ def _evaluate_fold(
 
         # Train and predict
         model = model_class(**final_model_params)
-        model.fit(X_train, y_train)
+        fit_kwargs: Dict[str, Any] = {}
+
+        if model_name == "xgboost":
+            fit_kwargs["eval_set"] = [(X_val, y_val)]
+            fit_kwargs["verbose"] = False
+        elif model_name == "catboost":
+            fit_kwargs["eval_set"] = (X_val, y_val)
+            if es_rounds:
+                fit_kwargs["early_stopping_rounds"] = es_rounds
+            fit_kwargs["verbose"] = False
+        elif model_name == "lightgbm":
+            fit_kwargs["eval_set"] = [(X_val, y_val)]
+            if es_rounds:
+                try:
+                    import lightgbm as lgb  # type: ignore
+                    fit_kwargs["callbacks"] = [lgb.early_stopping(es_rounds, verbose=False)]
+                except Exception:
+                    fit_kwargs["early_stopping_rounds"] = es_rounds
+            fit_kwargs["verbose"] = -1
+
+        model.fit(X_train, y_train, **fit_kwargs)
         y_pred = model.predict(X_val)
 
         # Check if model predicts only one class (degenerate case)
@@ -639,28 +455,13 @@ def _evaluate_fold(
                 f"(predicted: {unique_preds.tolist()}, true classes: {np.unique(y_val).tolist()})"
             )
             logger.debug(reason)
-            return None, None, reason
+            return None, reason
 
-        # Apply minority_weight_boost to scoring weights
-        # Boost weights for minority classes (-1 and +1), keep neutral (0) unchanged
-        scoring_weight_map = weight_map.copy()
-        for cls in [-1, 1]:
-            if cls in scoring_weight_map:
-                scoring_weight_map[cls] *= minority_weight_boost
-
-        # Weighted MCC with boosted minority weights
-        sample_weights = np.array([scoring_weight_map.get(c, 1.0) for c in y_val])
-        score_mcc = matthews_corrcoef(y_val, y_pred, sample_weight=sample_weights)
-        score_f1w = f1_score(y_val, y_pred, average="weighted", zero_division="warn")
-
-        # Handle NaN MCC (can happen with degenerate predictions)
-        if np.isnan(score_mcc):
-            reason = (
-                f"{model_prefix}{fold_prefix}SKIP: MCC is NaN "
-                f"(likely degenerate predictions or labels)"
-            )
-            logger.debug(reason)
-            return None, None, reason
+        # Compute composite score with F1 per class and sign error penalty
+        metrics = compute_composite_score(
+            y_true=np.array(y_val),
+            y_pred=np.array(y_pred),
+        )
 
         # Guard against degenerate models that predict too few minority classes
         # If model predicts less than MIN_MINORITY_PREDICTION_RATIO of long/short,
@@ -669,24 +470,48 @@ def _evaluate_fold(
         minority_pred_ratio = n_minority_preds / len(y_pred)
 
         if minority_pred_ratio < MIN_MINORITY_PREDICTION_RATIO:
-            # Apply penalty: reduce scores proportionally to how far below threshold
+            # Apply penalty: reduce composite score proportionally
             penalty_factor = minority_pred_ratio / MIN_MINORITY_PREDICTION_RATIO
-            score_mcc *= penalty_factor
-            score_f1w *= penalty_factor
+            penalized_score = metrics.composite_score * penalty_factor
             logger.debug(
                 f"{model_prefix}{fold_prefix}PENALTY: minority predictions "
                 f"{minority_pred_ratio:.1%} < {MIN_MINORITY_PREDICTION_RATIO:.1%}, "
                 f"penalty_factor={penalty_factor:.2f}"
             )
+            # Create new metrics with penalized score
+            metrics = CompositeScoreMetrics(
+                f1_minus1=metrics.f1_minus1,
+                f1_zero=metrics.f1_zero,
+                f1_plus1=metrics.f1_plus1,
+                f1_min=metrics.f1_min,
+                sign_error_rate=metrics.sign_error_rate,
+                composite_score=penalized_score,
+                n_sign_errors=metrics.n_sign_errors,
+                n_total=metrics.n_total,
+            )
 
-        return score_mcc, score_f1w, "OK"
+        return metrics, "OK"
 
     except Exception as e:
         reason = (
             f"{model_prefix}{fold_prefix}FAILED: {type(e).__name__}: {str(e)}"
         )
         logger.debug(reason)
-        return None, None, reason
+        return None, reason
+
+
+@dataclass
+class CVScoringResult:
+    """Result of cross-validation scoring with composite metrics."""
+
+    composite_score: float  # Mean composite score across folds
+    f1_minus1: float        # Mean F1 for class -1
+    f1_zero: float          # Mean F1 for class 0
+    f1_plus1: float         # Mean F1 for class +1
+    f1_min: float           # Mean of the worst-class F1 across folds
+    sign_error_rate: float  # Mean sign error rate
+    n_valid_folds: int      # Number of valid folds
+    n_total_folds: int      # Total number of folds
 
 
 def _run_cv_scoring(
@@ -701,11 +526,15 @@ def _run_cv_scoring(
     use_focal_loss: bool = False,
     focal_gamma: float = 2.0,
     use_class_weights: bool = True,
-    minority_weight_boost: float = 1.0,
-) -> Tuple[float, float, float, int, int, str]:
-    """Run walk-forward CV and return mean scores.
+) -> CVScoringResult:
+    """Run walk-forward CV and return composite score metrics.
 
     Early pruning: raises TrialPruned at the first failed fold.
+
+    The composite score combines:
+    - F1 for each class (-1, 0, +1)
+    - Minimum F1 across classes to enforce coverage of all labels
+    - Penalty for sign errors (worst kind of prediction error)
 
     Parameters
     ----------
@@ -731,13 +560,11 @@ def _run_cv_scoring(
         Focal loss gamma parameter.
     use_class_weights : bool, default=True
         Whether to use balanced class weights.
-    minority_weight_boost : float, default=1.0
-        Multiplier for minority class weights in MCC scoring.
 
     Returns
     -------
-    Tuple[float, float, float, int, int, str]
-        (objective, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason)
+    CVScoringResult
+        Dataclass with composite score and per-class metrics.
 
     Raises
     ------
@@ -765,48 +592,55 @@ def _run_cv_scoring(
         )
         raise optuna.TrialPruned(f"{trial_prefix}PRUNED")
 
-    cv_scores_mcc: list[float] = []
-    cv_scores_f1w: list[float] = []
+    # Collect metrics from all folds
+    fold_metrics: list[CompositeScoreMetrics] = []
+    # Convert once to numpy to avoid repeated pandas slicing
+    X_values = X.to_numpy()
+    y_values = y.to_numpy()
 
     for fold_idx, (train_idx, val_idx) in enumerate(splits):
-        score_mcc, score_f1w, fold_reason = _evaluate_fold(
-            X, y, train_idx, val_idx, model_class, model_params,
+        metrics, fold_reason = _evaluate_fold(
+            X_values, y_values, train_idx, val_idx, model_class, model_params,
             model_name=model_name,
             fold_idx=fold_idx,
             use_focal_loss=use_focal_loss,
             focal_gamma=focal_gamma,
             use_class_weights=use_class_weights,
-            minority_weight_boost=minority_weight_boost,
+            early_stopping_rounds=config.early_stopping_rounds,
         )
 
         # Early pruning: fail fast on first invalid fold
-        if score_mcc is None or score_f1w is None:
-            reason = f"{trial_prefix}PRUNED at fold {fold_idx + 1}"
-            logger.debug(reason)
+        if metrics is None:
+            reason = f"{trial_prefix}PRUNED at fold {fold_idx + 1}: {fold_reason}"
+            logger.info(reason)
             raise optuna.TrialPruned(reason)
 
-        cv_scores_mcc.append(score_mcc)
-        cv_scores_f1w.append(score_f1w)
+        fold_metrics.append(metrics)
 
-    mean_mcc = float(np.mean(cv_scores_mcc))
-    mean_f1w = float(np.mean(cv_scores_f1w))
-    objective_score = (0.7 * mean_mcc) + (0.3 * mean_f1w)
-    reason = (
-        f"{trial_prefix}OBJ={objective_score:.4f} "
-        f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}, w=0.7/0.3; "
-        f"{len(cv_scores_mcc)}/{len(splits)} folds)"
+    # Compute mean metrics across folds
+    mean_composite = float(np.mean([m.composite_score for m in fold_metrics]))
+    mean_f1_m1 = float(np.mean([m.f1_minus1 for m in fold_metrics]))
+    mean_f1_0 = float(np.mean([m.f1_zero for m in fold_metrics]))
+    mean_f1_p1 = float(np.mean([m.f1_plus1 for m in fold_metrics]))
+    mean_f1_min = float(np.mean([m.f1_min for m in fold_metrics]))
+    mean_sign_err = float(np.mean([m.sign_error_rate for m in fold_metrics]))
+
+    logger.debug(
+        f"{trial_prefix}COMPOSITE={mean_composite:.4f} "
+        f"(F1[-1]={mean_f1_m1:.3f}, F1[0]={mean_f1_0:.3f}, F1[+1]={mean_f1_p1:.3f}, "
+        f"F1_min={mean_f1_min:.3f}, SignErr={mean_sign_err:.1%}; "
+        f"{len(fold_metrics)}/{len(splits)} folds)"
     )
-    logger.debug(reason)
-    return objective_score, mean_mcc, mean_f1w, len(cv_scores_mcc), len(splits), reason
 
-
-def _make_cache_key(tb_params: Dict[str, Any]) -> EventsCacheKey:
-    """Create a hashable cache key from barrier parameters."""
-    return (
-        tb_params["pt_mult"],
-        tb_params["sl_mult"],
-        tb_params["min_return"],
-        tb_params["max_holding"],
+    return CVScoringResult(
+        composite_score=mean_composite,
+        f1_minus1=mean_f1_m1,
+        f1_zero=mean_f1_0,
+        f1_plus1=mean_f1_p1,
+        f1_min=mean_f1_min,
+        sign_error_rate=mean_sign_err,
+        n_valid_folds=len(fold_metrics),
+        n_total_folds=len(splits),
     )
 
 
@@ -826,7 +660,7 @@ def _sample_focal_loss_params(
     Returns
     -------
     Dict[str, Any]
-        Focal loss parameters: use_focal_loss, focal_gamma, minority_weight_boost.
+        Focal loss parameters: use_focal_loss, focal_gamma.
     """
     params: Dict[str, Any] = {}
 
@@ -843,39 +677,30 @@ def _sample_focal_loss_params(
         params["use_focal_loss"] = config.use_focal_loss
         params["focal_gamma"] = config.focal_gamma
 
-    # Always sample minority_weight_boost if optimize_focal_params is enabled
-    # (applies to all models for MCC scoring, not just focal loss supported ones)
-    if config.optimize_focal_params:
-        params["minority_weight_boost"] = trial.suggest_categorical(
-            "minority_weight_boost", FOCAL_LOSS_SEARCH_SPACE["minority_weight_boost"][1]
-        )
-    else:
-        params["minority_weight_boost"] = config.minority_weight_boost
-
     return params
 
 
 def create_objective(
     config: OptimizationConfig,
-    features_df: pd.DataFrame,
-    close: pd.Series,
-    volatility: pd.Series,
+    X: pd.DataFrame,
+    y: pd.Series,
+    events: pd.DataFrame,
     model_class: Type[BaseModel],
     model_search_space: Dict[str, Any],
     verbose: bool = True,
 ) -> Callable[[optuna.Trial], float]:
-    """Create Optuna objective for joint optimization.
+    """Create Optuna objective for model hyperparameter optimization.
 
     Parameters
     ----------
     config : OptimizationConfig
         Optimization configuration.
-    features_df : pd.DataFrame
-        Feature DataFrame.
-    close : pd.Series
-        Close prices.
-    volatility : pd.Series
-        Volatility estimates.
+    X : pd.DataFrame
+        Feature DataFrame (already aligned with labels).
+    y : pd.Series
+        Pre-calculated labels from relabel_datasets.py.
+    events : pd.DataFrame
+        Events DataFrame for purging (contains t1 column).
     model_class : Type[BaseModel]
         Model class to optimize.
     model_search_space : Dict[str, Any]
@@ -886,89 +711,57 @@ def create_objective(
 
     Notes
     -----
-    - Events are cached by barrier parameters to avoid redundant labeling.
-      With 1764 possible barrier combinations, this significantly speeds up
-      optimization when n_trials exceeds the number of unique combinations.
-    - Trials are PRUNED (not just scored -inf) if not all n_splits folds
-      are successfully validated.
+    - Labels are PRE-CALCULATED by relabel_datasets.py. This function only
+      optimizes model hyperparameters, not triple-barrier parameters.
+    - Trials are PRUNED if not all n_splits folds are successfully validated.
     - Focal loss parameters are optimized for supported models (LightGBM).
     - Class weights are applied to supported models for imbalanced classes.
     """
     log_level = logging.INFO if verbose else logging.DEBUG
 
-    # Cache for events: avoids recomputing labels for same barrier params
-    events_cache: Dict[EventsCacheKey, pd.DataFrame] = {}
-    cache_hits = [0]  # Use list to allow mutation in closure
+    # Pre-compute label distribution for logging
+    label_counts = y.value_counts()
+    n_total = len(y)
+    pct_m1 = (label_counts.get(-1, 0) or 0) / n_total * 100 if n_total > 0 else 0.0
+    pct_0 = (label_counts.get(0, 0) or 0) / n_total * 100 if n_total > 0 else 0.0
+    pct_p1 = (label_counts.get(1, 0) or 0) / n_total * 100 if n_total > 0 else 0.0
+
+    logger.info(
+        f"Label distribution: -1={pct_m1:.1f}% 0={pct_0:.1f}% +1={pct_p1:.1f}% "
+        f"(n={n_total:,})"
+    )
 
     def objective(trial: optuna.Trial) -> float:
         trial_num = trial.number
 
-        # Sample barrier parameters
-        tb_params = _sample_barrier_params(trial)
-        cache_key = _make_cache_key(tb_params)
-
-        # Check cache first
-        if cache_key in events_cache:
-            events = events_cache[cache_key]
-            cache_hits[0] += 1
-            logger.debug(
-                f"[Trial {trial_num}] Cache HIT for barrier params "
-                f"(hits: {cache_hits[0]}, cached: {len(events_cache)})"
-            )
-        else:
-            events = _generate_trial_events(
-                features_df, close, volatility, tb_params, config
-            )
-            events_cache[cache_key] = events
-            logger.debug(
-                f"[Trial {trial_num}] Cache MISS - computed and cached "
-                f"(cached: {len(events_cache)})"
-            )
-
-        # Validate events
-        is_valid, reason = _validate_events(events, config, trial_num)
-        if not is_valid:
-            logger.log(log_level, reason)
-            raise optuna.TrialPruned(reason)
-
-        # Prepare data
-        X, y, events_aligned, reason = _align_features_events(
-            features_df, events, config, trial_num
-        )
-        if X is None or y is None or events_aligned is None:
-            logger.log(log_level, reason)
-            raise optuna.TrialPruned(reason)
-
         # Sample model params
         model_params = _sample_model_params(trial, model_search_space, config)
 
-        # Sample focal loss params (for supported models) and minority weight boost
+        # Sample focal loss params (for supported models)
         focal_params = _sample_focal_loss_params(trial, config)
         use_focal_loss = focal_params.get("use_focal_loss", config.use_focal_loss)
         focal_gamma = focal_params.get("focal_gamma", config.focal_gamma)
-        minority_weight_boost = focal_params.get("minority_weight_boost", config.minority_weight_boost)
 
-        # Run CV with focal loss, class weights, and minority weight boost
+        # Run CV with composite score (F1 per class + sign error penalty)
         # Note: _run_cv_scoring raises TrialPruned on first failed fold (early pruning)
-        score_obj, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason = _run_cv_scoring(
-            X, y, events_aligned, model_class, model_params, config, trial_num,
+        cv_result = _run_cv_scoring(
+            X, y, events, model_class, model_params, config, trial_num,
             model_name=config.model_name,
             use_focal_loss=use_focal_loss,
             focal_gamma=focal_gamma,
             use_class_weights=config.use_class_weights,
-            minority_weight_boost=minority_weight_boost,
         )
 
         # Log successful trial (all folds passed)
         focal_info = f", focal={use_focal_loss}, γ={focal_gamma}" if use_focal_loss else ""
-        boost_info = f", boost={minority_weight_boost}" if minority_weight_boost != 1.0 else ""
         logger.info(
-            f"[Trial {trial_num}] OK: OBJ={score_obj:.4f} "
-            f"(MCC={mean_mcc:.4f}, F1w={mean_f1w:.4f}{focal_info}{boost_info}; "
-            f"{n_valid_folds}/{n_total_folds} folds)"
+            f"[Trial {trial_num}] OK: SCORE={cv_result.composite_score:.4f} "
+            f"(F1[-1]={cv_result.f1_minus1:.3f}, F1[0]={cv_result.f1_zero:.3f}, "
+            f"F1[+1]={cv_result.f1_plus1:.3f}, F1_min={cv_result.f1_min:.3f}, "
+            f"SignErr={cv_result.sign_error_rate:.1%}{focal_info})"
         )
 
-        return score_obj
+        return cv_result.composite_score
 
     return objective
 
@@ -997,12 +790,7 @@ def _handle_missing_values(
         DataFrame with NaN values filled with median.
     """
     # Identify feature columns (exclude non-feature columns)
-    non_feature_cols = [
-        "bar_id", "timestamp_open", "timestamp_close",
-        "datetime_open", "datetime_close",
-        "threshold_used", "log_return", "split", "label",
-    ]
-    feature_cols = [c for c in features_df.columns if c not in non_feature_cols]
+    feature_cols = [c for c in features_df.columns if c not in NON_FEATURE_COLS]
     
     if len(feature_cols) == 0:
         return features_df
@@ -1055,6 +843,22 @@ def _handle_missing_values(
     return cast(pd.DataFrame, features_df)
 
 
+def _downcast_feature_columns(features_df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast numeric feature columns to float32/int32 to speed up fit/predict."""
+    feature_cols = [c for c in features_df.columns if c not in NON_FEATURE_COLS]
+    if not feature_cols:
+        return features_df
+
+    df_copy = features_df.copy()
+    for col in feature_cols:
+        col_series = df_copy[col]
+        if pd.api.types.is_float_dtype(col_series):
+            df_copy[col] = col_series.astype(np.float32)
+        elif pd.api.types.is_integer_dtype(col_series):
+            df_copy[col] = col_series.astype(np.int32)
+    return df_copy
+
+
 def _load_and_filter_features(
     model_name: str,
     config: OptimizationConfig,
@@ -1081,6 +885,8 @@ def _load_and_filter_features(
 
     # Handle missing values (fill with median)
     features_df = _handle_missing_values(features_df, model_name)
+    # Downcast numeric feature columns for faster fit/predict
+    features_df = _downcast_feature_columns(features_df)
 
     return features_df
 
@@ -1095,62 +901,84 @@ def _subsample_features(
             int(len(features_df) * config.data_fraction),
             config.min_train_size * (config.n_splits + 1)
         )
-        features_df = features_df.iloc[:cutoff]
+        features_df = cast(pd.DataFrame, features_df.iloc[:cutoff])
         logger.info(f"Subsampled to {len(features_df)} rows")
     return features_df
 
 
 def _remove_non_feature_cols(features_df: pd.DataFrame) -> pd.DataFrame:
     """Remove non-feature columns from DataFrame."""
-    non_feature_cols = [
-        "bar_id", "timestamp_open", "timestamp_close",
-        "datetime_open", "datetime_close",
-        "threshold_used", "log_return", "split", "label",
-    ]
-    feature_cols = [c for c in features_df.columns if c not in non_feature_cols]
+    feature_cols = [c for c in features_df.columns if c not in NON_FEATURE_COLS]
     result = features_df[feature_cols]
     assert isinstance(result, pd.DataFrame), "result must be a DataFrame"
     return result
 
 
-def _align_close_to_features(
-    close: pd.Series,
-    features_df: pd.DataFrame,
-) -> pd.Series:
-    """Align close prices to feature window."""
-    # Ensure close is a Series
-    assert isinstance(close, pd.Series), "close must be a pandas Series"
-    """Align close prices to feature window."""
-    close = close.loc[
-        (close.index >= features_df.index[0]) &
-        (close.index <= features_df.index[-1])
-    ]
-    if close.index.has_duplicates:
-        close = close.loc[~close.index.duplicated(keep="first")]
-    return close
-
-
 def _prepare_optimization_data(
     config: OptimizationConfig,
     model_name: str,
-) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
-    """Load and prepare data for optimization."""
+) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+    """Load and prepare data for optimization.
+
+    Returns
+    -------
+    Tuple[pd.DataFrame, pd.Series, pd.DataFrame]
+        (X, y, events) where:
+        - X: Feature matrix
+        - y: Pre-calculated labels
+        - events: DataFrame with t1 column for purging
+    """
     logger.info("Loading datasets...")
     features_df = _load_and_filter_features(model_name, config)
-    features_df = _subsample_features(features_df, config)
-    features_df = _remove_non_feature_cols(features_df)
 
-    bars = load_dollar_bars()
-    close_raw = bars["close"]
-    assert isinstance(close_raw, pd.Series), "close must be a pandas Series"
-    close_aligned = _align_close_to_features(close_raw, features_df)
-    assert isinstance(close_aligned, pd.Series), "aligned close must be a pandas Series"
-    close = cast(pd.Series, close_aligned)
+    # Verify labels exist
+    if "label" not in features_df.columns:
+        raise ValueError(
+            f"Dataset for {model_name} does not contain 'label' column. "
+            "Labels must be pre-calculated by relabel_datasets.py"
+        )
 
-    volatility = get_daily_volatility(close, span=config.vol_span)
+    # Filter out rows with NaN labels
+    n_before = len(features_df)
+    features_df = cast(pd.DataFrame, features_df[features_df["label"].notna()].copy())
+    n_after = len(features_df)
+    if n_before != n_after:
+        logger.info(
+            f"Filtered {n_before - n_after:,} rows with NaN labels "
+            f"({n_after:,}/{n_before:,} remaining)"
+        )
 
-    logger.info(f"Features shape: {features_df.shape}")
-    return features_df, close, volatility
+    if len(features_df) == 0:
+        raise ValueError(
+            f"No valid labels found in dataset for {model_name}. "
+            "Run relabel_datasets.py first to generate labels."
+        )
+
+    # Extract labels and events for purging
+    y = features_df["label"].copy()
+
+    # Create events DataFrame for purging (needs t1 column)
+    # t1 represents the barrier touch time, used for purging overlapping samples
+    if "t1" in features_df.columns:
+        events = features_df[["label", "t1"]].copy()
+    else:
+        # If no t1 column, create dummy events without purging capability
+        logger.warning(
+            "Dataset does not contain 't1' column. Purging will be disabled."
+        )
+        events = features_df[["label"]].copy()
+
+    # Subsample if configured
+    features_df = cast(pd.DataFrame, _subsample_features(cast(pd.DataFrame, features_df), config))
+    y = y.loc[features_df.index]
+    events = events.loc[features_df.index]
+
+    # Remove non-feature columns
+    X = _remove_non_feature_cols(features_df)
+
+    logger.info(f"Features shape: {X.shape}, Labels: {len(y)}")
+    logger.info(f"Label distribution: {y.value_counts().to_dict()}")
+    return X, y, events
 
 
 def _create_study(config: OptimizationConfig) -> optuna.Study:
@@ -1168,15 +996,19 @@ def _build_result(
     config: OptimizationConfig,
 ) -> OptimizationResult:
     """Build optimization result from study."""
-    best_trial = study.best_trial
-    tb_keys = set(TRIPLE_BARRIER_SEARCH_SPACE.keys())
+    try:
+        best_trial = study.best_trial
+    except ValueError as exc:
+        raise ValueError(
+            "No Optuna trials completed successfully; inspect pruning reasons above "
+            "or relax constraints (labels, F1 floor, CV splits)."
+        ) from exc
     focal_keys = set(FOCAL_LOSS_SEARCH_SPACE.keys())
 
-    best_tb = {k: v for k, v in best_trial.params.items() if k in tb_keys}
     best_focal = {k: v for k, v in best_trial.params.items() if k in focal_keys}
     best_model = {
         k: v for k, v in best_trial.params.items()
-        if k not in tb_keys and k not in focal_keys
+        if k not in focal_keys
     }
 
     # If focal loss params were not optimized, use config defaults
@@ -1186,21 +1018,29 @@ def _build_result(
             "focal_gamma": config.focal_gamma,
         }
 
+    # Build metric description with weights
+    weights = COMPOSITE_SCORE_WEIGHTS
+    delta = weights.get("delta", 0.0)
+    metric_desc = (
+        f"composite_score(α={weights['alpha']:.2f}*F1_dir + "
+        f"β={weights['beta']:.2f}*F1_0 + δ={delta:.2f}*F1_min "
+        f"- γ={weights['gamma']:.2f}*sign_err)"
+    )
+
     return OptimizationResult(
         model_name=model_name,
         best_params=best_model,
-        best_triple_barrier_params=best_tb,
         best_focal_loss_params=best_focal,
         best_score=best_trial.value if best_trial.value is not None else float("nan"),
-        metric="weighted_mcc_0.7_f1w_0.3",
+        metric=metric_desc,
         n_trials=len(study.trials),
     )
 
 
 def _log_result(result: OptimizationResult) -> None:
     """Log optimization results."""
-    logger.info(f"Best score: {result.best_score:.4f}")
-    logger.info(f"Best TB params: {result.best_triple_barrier_params}")
+    logger.info(f"Best composite score: {result.best_score:.4f}")
+    logger.info(f"Metric: {result.metric}")
     logger.info(f"Best focal loss params: {result.best_focal_loss_params}")
     logger.info(f"Best model params: {result.best_params}")
 
@@ -1214,21 +1054,31 @@ def optimize_model(
     model_name: str,
     config: OptimizationConfig | None = None,
 ) -> OptimizationResult:
-    """Run optimization for a primary model."""
+    """Run optimization for a primary model.
+
+    Note: Labels must be pre-calculated by relabel_datasets.py before running
+    this optimization. This function only optimizes model hyperparameters.
+    """
     if config is None:
         config = OptimizationConfig(model_name=model_name)
 
     logger.info(f"Starting PRIMARY optimization for {model_name}")
+    logger.info("Note: Using pre-calculated labels from dataset")
 
     # Load model and data
     model_class = load_model_class(model_name)
     model_search_space = MODEL_REGISTRY[model_name]["search_space"]
-    features_df, close, volatility = _prepare_optimization_data(config, model_name)
+    X, y, events = _prepare_optimization_data(config, model_name)
+
+    # Validate labels before starting
+    is_valid, reason = _validate_labels(events, config)
+    if not is_valid:
+        raise ValueError(f"Invalid labels in dataset: {reason}")
 
     # Run Optuna
     study = _create_study(config)
     objective = create_objective(
-        config, features_df, close, volatility, model_class, model_search_space
+        config, X, y, events, model_class, model_search_space
     )
     study.optimize(
         objective, n_trials=config.n_trials, timeout=config.timeout, show_progress_bar=True
@@ -1507,10 +1357,7 @@ def _print_final_summary(all_results: List[OptimizationResult]) -> None:
 
     for result in sorted_results:
         print(f"\n{result.model_name.upper()}")
-        print(f"  Score (MCC): {result.best_score:.4f}")
-        print(f"  Triple Barrier:")
-        for k, v in result.best_triple_barrier_params.items():
-            print(f"    {k}: {v}")
+        print(f"  Score: {result.best_score:.4f}")
         if result.best_focal_loss_params:
             print(f"  Focal Loss:")
             for k, v in result.best_focal_loss_params.items():

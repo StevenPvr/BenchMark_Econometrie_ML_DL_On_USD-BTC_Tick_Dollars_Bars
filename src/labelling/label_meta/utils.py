@@ -39,23 +39,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "lightgbm": {
-        "class": "src.model.lightgbm_model.LightGBMModel",
-        "dataset": "tree",
-        "search_space": {
-            "n_estimators": ("categorical", [200, 400, 800, 1200]),
-            "max_depth": ("categorical", [3, 5, 7, 9]),
-            "num_leaves": ("categorical", [31, 63, 127, 255]),
-            "learning_rate": ("categorical", [0.01, 0.02, 0.05, 0.1]),
-            "subsample": ("categorical", [0.6, 0.75, 0.9, 1.0]),
-            "subsample_freq": ("categorical", [0, 1]),
-            "colsample_bytree": ("categorical", [0.6, 0.75, 0.9, 1.0]),
-            "min_child_samples": ("categorical", [5, 10, 20, 50]),
-            "min_split_gain": ("categorical", [0.0, 0.05, 0.1, 0.2]),
-            "reg_alpha": ("categorical", [1e-4, 1e-3, 1e-2, 0.1, 1.0]),
-            "reg_lambda": ("categorical", [1e-4, 1e-3, 1e-2, 0.1, 1.0]),
-        },
-    },
     "xgboost": {
         "class": "src.model.xgboost_model.XGBoostModel",
         "dataset": "tree",
@@ -69,34 +52,23 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "reg_lambda": ("categorical", [0.0, 1e-3, 1e-2, 0.1, 1.0]),
         },
     },
-    "catboost": {
-        "class": "src.model.catboost_model.CatBoostModel",
-        "dataset": "tree",
-        "search_space": {
-            "iterations": ("categorical", [200, 400, 800]),
-            "depth": ("categorical", [4, 6, 8, 10]),
-            "learning_rate": ("categorical", [0.02, 0.05, 0.1]),
-            "l2_leaf_reg": ("categorical", [0.5, 1.0, 3.0, 5.0]),
-            "random_strength": ("categorical", [0.5, 1.0, 1.5]),
-            "bagging_temperature": ("categorical", [0.0, 0.5, 1.0, 3.0]),
-        },
-    },
-    "random_forest": {
+    "randomforest": {
         "class": "src.model.random_forest_model.RandomForestModel",
         "dataset": "tree",
         "search_space": {
-            "n_estimators": ("categorical", [200, 400, 800, 1200]),
-            "max_depth": ("categorical", [5, 8, 12, 16]),
-            "min_samples_split": ("categorical", [2, 4, 6, 10]),
-            "min_samples_leaf": ("categorical", [1, 2, 4, 6]),
-            "max_features": ("categorical", ["sqrt", "log2", 0.7]),
+            "n_estimators": ("categorical", [100, 200, 400, 800]),
+            "max_depth": ("categorical", [3, 5, 7, 9, 12]),
+            "min_samples_split": ("categorical", [2, 5, 10, 20]),
+            "min_samples_leaf": ("categorical", [1, 2, 4, 8]),
+            "max_features": ("categorical", ["sqrt", "log2", None]),
         },
     },
     "ridge": {
         "class": "src.model.ridge_classifier.RidgeClassifierModel",
         "dataset": "linear",
         "search_space": {
-            "alpha": ("categorical", [1e-4, 1e-3, 1e-2, 1e-1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 1e3]),
+            # alpha: regularization strength (higher = more regularization)
+            "alpha": ("categorical", [1e-3, 1e-2, 1e-1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0]),
         },
     },
     "logistic": {
@@ -139,6 +111,7 @@ class MetaOptimizationConfig:
     parallelize_labeling: bool = True
     parallel_min_events: int = 10_000
     n_jobs: int | None = None
+    filter_neutral_labels: bool = True  # Filter label=0 (neutral) when computing meta labels
 
 
 @dataclass
@@ -291,15 +264,17 @@ def get_meta_labeled_dataset(
     Load the meta-labeled dataset for a primary/meta model combination.
 
     Returns the dataset and its path.
-    If the file doesn't exist, returns the base dataset (without labels) and the path.
+    If the file doesn't exist, returns the labeled dataset from the primary model
+    which contains the labels (column "label") needed for meta-labeling.
     """
     labeled_path = get_meta_labeled_dataset_path(primary_model_name, meta_model_name)
 
     if labeled_path.exists():
         return pd.read_parquet(labeled_path), labeled_path
 
-    # File doesn't exist, return base dataset
-    return get_dataset_for_model(meta_model_name), labeled_path
+    # File doesn't exist, return primary model's labeled dataset
+    # This contains the "label" column with the primary model's triple barrier labels
+    return get_labeled_dataset_for_primary_model(primary_model_name), labeled_path
 
 
 def load_dollar_bars() -> pd.DataFrame:

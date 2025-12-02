@@ -19,6 +19,16 @@ Reference: "Advances in Financial Machine Learning" by Marcos Lopez de Prado, Ch
 
 from __future__ import annotations
 
+
+import sys
+from pathlib import Path
+
+# Add project root to Python path for direct execution.
+_script_dir = Path(__file__).parent
+_project_root = _script_dir.parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 import json
 import logging
 import sys
@@ -39,14 +49,9 @@ from sklearn.metrics import (  # type: ignore[import-untyped]
 
 from src.constants import TEST_SPLIT_LABEL
 from src.labelling.label_meta.utils import (
-    MODEL_REGISTRY,
-    get_dataset_for_model,
     get_labeled_dataset_for_primary_model,
-    load_dollar_bars,
     load_primary_model,
-    get_daily_volatility,
 )
-from src.labelling.label_meta.opti import get_events_meta, get_bins
 from src.model.base import BaseModel
 from src.path import (
     LABEL_META_TRAIN_DIR,
@@ -236,7 +241,7 @@ def compute_trading_metrics(
 def load_meta_model(primary_model_name: str, meta_model_name: str) -> BaseModel:
     """Load a trained meta model."""
     model_dir = LABEL_META_TRAIN_DIR / f"{primary_model_name}_{meta_model_name}"
-    model_path = model_dir / "final_meta_model.joblib"
+    model_path = model_dir / f"{meta_model_name}_meta_model.joblib"
 
     if not model_path.exists():
         raise FileNotFoundError(
@@ -270,12 +275,14 @@ def get_available_trained_meta_models() -> List[Tuple[str, str]]:
     models = []
     for subdir in LABEL_META_TRAIN_DIR.iterdir():
         if subdir.is_dir():
-            model_file = subdir / "final_meta_model.joblib"
-            if model_file.exists():
-                parts = subdir.name.split("_")
-                if len(parts) >= 2:
-                    primary = parts[0]
-                    meta = "_".join(parts[1:])
+            # Parse directory name: primary_meta
+            parts = subdir.name.split("_")
+            if len(parts) >= 2:
+                primary = parts[0]
+                meta = "_".join(parts[1:])
+                # Check if model file exists with meta model name
+                model_file = subdir / f"{meta}_meta_model.joblib"
+                if model_file.exists():
                     models.append((primary, meta))
     return models
 
@@ -311,14 +318,33 @@ def _load_and_filter_features(primary_model_name: str) -> pd.DataFrame:
     return cast(pd.DataFrame, features_df)
 
 
-def _remove_non_feature_cols(features_df: pd.DataFrame) -> pd.DataFrame:
-    """Remove non-feature columns."""
-    non_feature_cols = [
+def _remove_non_feature_cols(features_df: pd.DataFrame, keep_side: bool = False) -> pd.DataFrame:
+    """
+    Remove non-feature columns.
+
+    Parameters
+    ----------
+    features_df : pd.DataFrame
+        DataFrame with all columns.
+    keep_side : bool, optional
+        If True, keep 'side' column (needed for meta model), by default False.
+    """
+    non_feature_cols = {
         "bar_id", "timestamp_open", "timestamp_close",
         "datetime_open", "datetime_close",
-        "threshold_used", "log_return", "split", "label",
+        "threshold_used", "log_return", "split", "label", "t1",
+        "prediction",  # OOF predictions from primary model training
+    }
+
+    # Add 'side' to excluded columns only if not needed
+    if not keep_side:
+        non_feature_cols.add("side")
+
+    # Filter out prediction and probability columns
+    feature_cols = [
+        c for c in features_df.columns
+        if c not in non_feature_cols and not c.startswith("proba_")
     ]
-    feature_cols = [c for c in features_df.columns if c not in non_feature_cols]
     return cast(pd.DataFrame, features_df[feature_cols])
 
 
@@ -342,10 +368,17 @@ def prepare_test_data(
     primary_model_name: str,
     meta_model_name: str,
     tb_params: Dict[str, Any],
-    vol_window: int = 100,
+    filter_neutral_labels: bool = True,
 ) -> pd.DataFrame:
     """
     Prepare TEST data with all predictions and actual returns.
+
+    Workflow:
+    1. Load test features from primary model dataset (with labels)
+    2. Predict with primary model → side
+    3. Calculate meta labels: meta_label = 1 if (label × side) > 0 else 0
+    4. Predict with meta model (features + side) → take_trade
+    5. Evaluate both meta model and combined system
 
     Parameters
     ----------
@@ -358,9 +391,9 @@ def prepare_test_data(
     meta_model_name : str
         Name of the meta model.
     tb_params : Dict[str, Any]
-        Triple barrier parameters.
-    vol_window : int, optional
-        Volatility window span, by default 100.
+        Triple barrier parameters (not used, kept for compatibility).
+    filter_neutral_labels : bool, optional
+        Filter neutral labels (label=0), by default True.
 
     Returns
     -------
@@ -369,81 +402,95 @@ def prepare_test_data(
         - side: Primary model direction prediction (+1/-1)
         - take_trade: Meta model filter prediction (0/1)
         - position: Combined position (side × take_trade)
-        - y_true_meta: Actual meta label (was trade profitable?)
+        - y_true_meta: Actual meta label (was primary correct?)
         - actual_return: Actual return from the trade
     """
     logger.info("Loading TEST data...")
 
     features_df = _load_and_filter_features(primary_model_name)
     features_df = _handle_missing_values(features_df)
-    X_test = _remove_non_feature_cols(features_df)
 
-    logger.info(f"TEST samples: {len(X_test)}")
+    # Validate required columns
+    if "label" not in features_df.columns:
+        raise ValueError("Test dataset must contain 'label' column (triple barrier labels)")
 
-    # Load dollar bars for returns
-    bars = load_dollar_bars()
-    close = bars["close"]
+    logger.info(f"TEST samples: {len(features_df)}")
 
-    # Align close to features
-    close = close.loc[
-        (close.index >= X_test.index[0]) &
-        (close.index <= X_test.index[-1])
-    ]
-    if close.index.has_duplicates:
-        close = close.loc[~close.index.duplicated(keep="first")]
-
-    volatility = get_daily_volatility(close, span=vol_window)
-
-    # Generate PRIMARY model predictions (side)
-    logger.info("Generating primary model predictions...")
+    # STEP 1: Generate PRIMARY model predictions (side)
+    logger.info("STEP 1: Generating primary model predictions (side)...")
+    X_test_for_primary = _remove_non_feature_cols(features_df)
     side_predictions = pd.Series(
-        primary_model.predict(X_test),
-        index=X_test.index,
+        primary_model.predict(X_test_for_primary),
+        index=X_test_for_primary.index,
         name="side",
     )
 
     # Filter to valid sides (+1 or -1)
     valid_sides = side_predictions.isin([1, -1])
     side_predictions = side_predictions.loc[valid_sides]
-    X_test_valid = X_test.loc[valid_sides]
+    features_df_valid = features_df.loc[valid_sides].copy()
 
     logger.info(f"Valid side predictions: {len(side_predictions)}")
     logger.info(f"Side distribution: {side_predictions.value_counts().to_dict()}")
 
-    # Generate META model predictions (take_trade)
-    logger.info("Generating meta model predictions...")
+    # STEP 2: Calculate TRUE meta labels from dataset
+    logger.info("STEP 2: Calculating true meta labels from dataset...")
+    label_test = features_df_valid["label"].values
+
+    y_true_meta = np.where(
+        label_test * side_predictions.values > 0,
+        1,  # Primary was correct
+        0   # Primary was incorrect
+    )
+
+    # Filter neutral labels if configured
+    if filter_neutral_labels:
+        neutral_mask = label_test == 0
+        n_neutral = neutral_mask.sum()
+        if n_neutral > 0:
+            logger.info(f"Filtering {n_neutral} neutral labels from test")
+            valid_mask = ~neutral_mask
+            features_df_valid = features_df_valid[valid_mask].copy()
+            side_predictions = side_predictions[valid_mask]
+            y_true_meta = y_true_meta[valid_mask]
+
+    # STEP 3: Generate META model predictions (take_trade)
+    logger.info("STEP 3: Generating meta model predictions (take_trade)...")
+
+    # Add 'side' column to features for meta model
+    features_df_valid["side"] = side_predictions.values
+
+    # Get features for meta model (KEEP 'side' column)
+    X_test_for_meta = _remove_non_feature_cols(features_df_valid, keep_side=True)
+
     meta_predictions = pd.Series(
-        meta_model.predict(X_test_valid),
-        index=X_test_valid.index,
+        meta_model.predict(X_test_for_meta),
+        index=X_test_for_meta.index,
         name="take_trade",
     )
 
     logger.info(f"Meta distribution: {meta_predictions.value_counts().to_dict()}")
+    logger.info(f"Meta true labels distribution: {pd.Series(y_true_meta).value_counts().to_dict()}")
 
-    # Generate actual meta labels (ground truth)
-    logger.info("Generating actual meta labels...")
-    events = get_events_meta(
-        close=close,
-        t_events=pd.DatetimeIndex(side_predictions.index),
-        pt_mult=tb_params["pt_mult"],
-        sl_mult=tb_params["sl_mult"],
-        trgt=volatility,
-        max_holding=tb_params["max_holding"],
-        side=side_predictions,
-    )
-    if not events.empty:
-        events = get_bins(events, close)
+    # STEP 4: Get actual returns from dataset (no need to recalculate triple barrier)
+    logger.info("STEP 4: Getting actual returns from dataset...")
 
     # Align all data
-    common_idx = side_predictions.index.intersection(events.index)
-    common_idx = common_idx.intersection(meta_predictions.index)
+    common_idx = side_predictions.index.intersection(meta_predictions.index)
 
     result_df = pd.DataFrame({
         "side": side_predictions.loc[common_idx].values,
         "take_trade": meta_predictions.loc[common_idx].values,
-        "y_true_meta": events.loc[common_idx, "bin"].values,
-        "actual_return": events.loc[common_idx, "ret"].values,
+        "y_true_meta": y_true_meta[side_predictions.index.get_indexer(common_idx)],
     }, index=common_idx)
+
+    # Get actual returns from the dataset (log_return column)
+    if "log_return" in features_df.columns:
+        returns_aligned = features_df.loc[common_idx, "log_return"]
+        result_df["actual_return"] = returns_aligned.values
+    else:
+        logger.warning("No 'log_return' column in dataset, returns will be NaN")
+        result_df["actual_return"] = np.nan
 
     # Compute combined position
     result_df["position"] = result_df["side"] * result_df["take_trade"]
@@ -491,7 +538,7 @@ def evaluate_combined(
     primary_model_path_main = LABEL_PRIMAIRE_TRAIN_DIR / primary_model_name / f"{primary_model_name}_final_model.joblib"
     primary_model_path_train = LABEL_PRIMAIRE_TRAIN_DIR / primary_model_name / f"{primary_model_name}_model.joblib"
     primary_model_path = primary_model_path_main if primary_model_path_main.exists() else primary_model_path_train
-    meta_model_path = LABEL_META_TRAIN_DIR / f"{primary_model_name}_{meta_model_name}" / "final_meta_model.joblib"
+    meta_model_path = LABEL_META_TRAIN_DIR / f"{primary_model_name}_{meta_model_name}" / f"{meta_model_name}_meta_model.joblib"
 
     # Load training results for TB params
     training_results = load_meta_training_results(primary_model_name, meta_model_name)
@@ -508,10 +555,10 @@ def evaluate_combined(
     logger.info(f"Predictions saved: {predictions_path}")
 
     # =========================================================================
-    # META MODEL METRICS
+    # META MODEL CLASSIFICATION METRICS
     # =========================================================================
     logger.info(f"\n{'='*60}")
-    logger.info("META MODEL FILTERING PERFORMANCE")
+    logger.info("META MODEL CLASSIFICATION PERFORMANCE")
     logger.info(f"{'='*60}")
 
     y_true_meta = test_df["y_true_meta"].values.astype(int)
@@ -527,65 +574,53 @@ def evaluate_combined(
     logger.info(f"Meta Precision: {meta_precision:.4f}")
     logger.info(f"Meta Recall: {meta_recall:.4f}")
     logger.info(f"Meta F1: {meta_f1:.4f}")
-    logger.info(f"\nConfusion Matrix (Meta):")
+    logger.info(f"\nConfusion Matrix:")
     logger.info(f"  TN={meta_cm[0][0]}, FP={meta_cm[0][1]}")
     logger.info(f"  FN={meta_cm[1][0]}, TP={meta_cm[1][1]}")
 
-    # =========================================================================
-    # TRADING METRICS: PRIMARY ONLY
-    # =========================================================================
-    logger.info(f"\n{'='*60}")
-    logger.info("TRADING METRICS: PRIMARY MODEL ONLY")
-    logger.info(f"{'='*60}")
+    # Calculate class distribution
+    n_total = len(y_true_meta)
+    n_take_predicted = y_pred_meta.sum()
+    n_skip_predicted = n_total - n_take_predicted
+    n_take_actual = y_true_meta.sum()
+    n_skip_actual = n_total - n_take_actual
 
-    actual_returns = cast(np.ndarray, test_df["actual_return"].values)
-    positions_primary = cast(np.ndarray, test_df["position_primary_only"].values)
-
-    primary_metrics = compute_trading_metrics(actual_returns, positions_primary)
-    logger.info(f"Trades: {primary_metrics.n_trades}")
-    logger.info(f"Win Rate: {primary_metrics.win_rate:.2%}")
-    logger.info(f"Total Return: {primary_metrics.total_return:.4f}")
-    logger.info(f"Mean Return: {primary_metrics.mean_return:.6f}")
-    if primary_metrics.sharpe_ratio:
-        logger.info(f"Sharpe Ratio: {primary_metrics.sharpe_ratio:.2f}")
+    logger.info(f"\nClass Distribution:")
+    logger.info(f"  Predicted: Skip={n_skip_predicted} ({n_skip_predicted/n_total*100:.1f}%), Take={n_take_predicted} ({n_take_predicted/n_total*100:.1f}%)")
+    logger.info(f"  Actual:    Skip={n_skip_actual} ({n_skip_actual/n_total*100:.1f}%), Take={n_take_actual} ({n_take_actual/n_total*100:.1f}%)")
 
     # =========================================================================
-    # TRADING METRICS: PRIMARY + META (FILTERED)
+    # WIN RATE ANALYSIS
     # =========================================================================
     logger.info(f"\n{'='*60}")
-    logger.info("TRADING METRICS: PRIMARY + META (FILTERED)")
+    logger.info("WIN RATE ANALYSIS")
     logger.info(f"{'='*60}")
 
-    positions_combined = cast(np.ndarray, test_df["position"].values)
+    # Calculate win rate for primary model predictions (side)
+    # A "win" is when side prediction matches the actual label
+    side_predictions = test_df["side"].to_numpy()
+    actual_labels = test_df["y_true_meta"].to_numpy()
 
-    combined_metrics = compute_trading_metrics(actual_returns, positions_combined)
-    logger.info(f"Trades: {combined_metrics.n_trades}")
-    logger.info(f"Win Rate: {combined_metrics.win_rate:.2%}")
-    logger.info(f"Total Return: {combined_metrics.total_return:.4f}")
-    logger.info(f"Mean Return: {combined_metrics.mean_return:.6f}")
-    if combined_metrics.sharpe_ratio:
-        logger.info(f"Sharpe Ratio: {combined_metrics.sharpe_ratio:.2f}")
+    # Primary model win rate (on all predictions)   
+    primary_correct = (side_predictions * actual_labels) > 0
+    primary_win_rate = primary_correct.sum() / len(primary_correct)
 
-    # =========================================================================
-    # IMPROVEMENT ANALYSIS
-    # =========================================================================
-    logger.info(f"\n{'='*60}")
-    logger.info("IMPROVEMENT ANALYSIS")
-    logger.info(f"{'='*60}")
+    # Meta filtered win rate (only on trades where take_trade=1)
+    take_mask = y_pred_meta == 1
+    if take_mask.sum() > 0:
+        filtered_correct = primary_correct[take_mask]
+        filtered_win_rate = filtered_correct.sum() / len(filtered_correct)
+        win_rate_improvement = filtered_win_rate - primary_win_rate
+    else:
+        filtered_win_rate = 0.0
+        win_rate_improvement = 0.0
 
-    trades_filtered = primary_metrics.n_trades - combined_metrics.n_trades
-    trades_filtered_pct = trades_filtered / primary_metrics.n_trades * 100 if primary_metrics.n_trades > 0 else 0
-
-    win_rate_improvement = combined_metrics.win_rate - primary_metrics.win_rate
-
-    logger.info(f"Trades filtered: {trades_filtered} ({trades_filtered_pct:.1f}%)")
+    logger.info(f"Primary model win rate (all predictions): {primary_win_rate:.2%}")
+    logger.info(f"Filtered win rate (meta take_trade=1): {filtered_win_rate:.2%}")
     logger.info(f"Win rate improvement: {win_rate_improvement:+.2%}")
+    logger.info(f"Trades filtered: {n_skip_predicted} ({n_skip_predicted/n_total*100:.1f}%)")
 
-    if primary_metrics.total_return != 0:
-        return_improvement = (combined_metrics.total_return - primary_metrics.total_return) / abs(primary_metrics.total_return) * 100
-        logger.info(f"Return improvement: {return_improvement:+.1f}%")
-
-    # Build result
+    # Build result (classification metrics + win rate)
     result = CombinedEvaluationResult(
         primary_model_name=primary_model_name,
         meta_model_name=meta_model_name,
@@ -594,9 +629,9 @@ def evaluate_combined(
         meta_precision=meta_precision,
         meta_recall=meta_recall,
         meta_f1=meta_f1,
-        primary_only_metrics=primary_metrics.to_dict(),
-        combined_metrics=combined_metrics.to_dict(),
-        trades_filtered_pct=trades_filtered_pct,
+        primary_only_metrics={"win_rate": primary_win_rate},
+        combined_metrics={"win_rate": filtered_win_rate},
+        trades_filtered_pct=n_skip_predicted / n_total * 100,
         win_rate_improvement=win_rate_improvement,
         meta_confusion_matrix=meta_cm,
         primary_model_path=str(primary_model_path),
@@ -668,14 +703,14 @@ def print_comparison_table(result: CombinedEvaluationResult) -> None:
 
 
 def print_evaluation_results(result: CombinedEvaluationResult) -> None:
-    """Print complete evaluation results."""
+    """Print classification metrics and win rate."""
     print("\n" + "=" * 70)
-    print(f"EVALUATION RESULTS: {result.primary_model_name} + {result.meta_model_name}")
+    print(f"META MODEL EVALUATION: {result.primary_model_name} + {result.meta_model_name}")
     print("=" * 70)
 
     print(f"\nTest Samples: {result.n_test_samples}")
 
-    print("\n--- Meta Model Performance ---")
+    print("\n--- Classification Metrics ---")
     print(f"  Accuracy:  {result.meta_accuracy:.4f}")
     print(f"  Precision: {result.meta_precision:.4f}")
     print(f"  Recall:    {result.meta_recall:.4f}")
@@ -687,10 +722,17 @@ def print_evaluation_results(result: CombinedEvaluationResult) -> None:
     print(f"    Actual 0:   {cm[0][0]:>6}   {cm[0][1]:>6}")
     print(f"    Actual 1:   {cm[1][0]:>6}   {cm[1][1]:>6}")
 
-    print_comparison_table(result)
+    print("\n--- Win Rate Analysis ---")
+    primary_wr = result.primary_only_metrics.get("win_rate", 0.0)
+    filtered_wr = result.combined_metrics.get("win_rate", 0.0)
+    print(f"  Primary model (all):      {primary_wr:.2%}")
+    print(f"  Filtered (take_trade=1):  {filtered_wr:.2%}")
+    print(f"  Improvement:              {result.win_rate_improvement:+.2%}")
+    print(f"  Trades filtered:          {result.trades_filtered_pct:.1f}%")
 
     print("\n--- Fichiers ---")
     print(f"  Predictions: {result.predictions_path}")
+    print(f"  Results: {result.predictions_path.replace('test_predictions.parquet', 'evaluation_results.json')}")
 
     print("=" * 70)
 
