@@ -10,6 +10,8 @@ from src.features.entropy import (
     compute_shannon_entropy,
     compute_approximate_entropy,
     compute_sample_entropy,
+)
+from src.features.entropy_core import (
     _compute_shannon_entropy,
     _discretize_returns,
     _rolling_shannon_entropy,

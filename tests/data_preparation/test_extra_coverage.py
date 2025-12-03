@@ -527,7 +527,7 @@ class TestRunDollarBarsPipelineBatchEdgeCases:
         output_path = tmp_path / "output.parquet"
 
         # Mock _process_batch_with_state to return no bars
-        with patch("src.data_preparation.preparation._process_batch_with_state") as mock_process:
+        with patch("src.data_preparation.pipeline._process_batch_with_state") as mock_process:
             mock_state = _BarAccumulatorState()
             mock_state.n_ticks = 0  # No incomplete final bar
             mock_process.return_value = ([], mock_state)
@@ -553,7 +553,7 @@ class TestRunDollarBarsPipelineBatchEdgeCases:
         output_path = tmp_path / "output.parquet"
 
         # Mock to simulate incomplete final bar scenario
-        with patch("src.data_preparation.preparation._process_batch_with_state") as mock_process:
+        with patch("src.data_preparation.pipeline._process_batch_with_state") as mock_process:
             # First call returns some bars
             bars = [{
                 "bar_id": 0,

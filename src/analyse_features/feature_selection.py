@@ -22,24 +22,13 @@ from __future__ import annotations
 
 import gc
 from pathlib import Path
-import sys
-
-# Add project root to Python path for direct execution.
-_script_dir = Path(__file__).parent
-_project_root = _script_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
 from typing import Any, cast
 
 import pandas as pd  # type: ignore[import-untyped]
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
-# Batch size for parquet writing
-SAVE_BATCH_SIZE = 500_000
-
-from src.analyse_features.config import TARGET_COLUMN
+from src.analyse_features.config import SAVE_BATCH_SIZE, TARGET_COLUMN
 from src.config_logging import get_logger
 
 logger = get_logger(__name__)

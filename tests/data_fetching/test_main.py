@@ -1,287 +1,409 @@
+"""Tests for data_fetching.main module."""
+
+from __future__ import annotations
+
+import json
+import sys
+from importlib import import_module
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
-import sys
-import json
-import time
-from unittest.mock import MagicMock, patch, mock_open
-from datetime import datetime
 
-from src.data_fetching import main as main_module
-from src.data_fetching.main import (
-    _load_dates_state,
-    _save_dates_state,
-    _increment_dates,
-    _validate_dependencies,
-    _log_header,
-    _log_footer,
-    main,
-    main_loop,
-)
+# Import the module properly (not via __init__.py which exports the function)
+main_module = import_module("src.data_fetching.main")
+
+# Now import functions from the module
+_compute_retry_delay = main_module._compute_retry_delay
+_increment_dates = main_module._increment_dates
+_load_dates_state = main_module._load_dates_state
+_log_footer = main_module._log_footer
+_log_header = main_module._log_header
+_save_dates_state = main_module._save_dates_state
+_validate_dependencies = main_module._validate_dependencies
+main = main_module.main
+main_loop = main_module.main_loop
+
 
 # --- Fixtures & Mocks ---
 
+
 @pytest.fixture
-def mock_logger():
-    with patch('src.data_fetching.main.logger') as mock:
+def mock_logger() -> MagicMock:
+    """Mock the logger."""
+    with patch.object(main_module, "logger") as mock:
         yield mock
 
-# --- Tests ---
 
-def test_load_dates_state_exists():
-    state_content = json.dumps({'start_date': '2023-01-01', 'end_date': '2023-01-05'})
-    with patch('src.data_fetching.main.DATES_STATE_FILE') as mock_path:
-        mock_path.exists.return_value = True
-        with patch('builtins.open', mock_open(read_data=state_content)):
-            start, end = _load_dates_state()
-            assert start == '2023-01-01'
-            assert end == '2023-01-05'
+# --- State File Tests ---
 
-def test_load_dates_state_missing(mock_logger):
-    with patch('src.data_fetching.main.DATES_STATE_FILE') as mock_path:
-        mock_path.exists.return_value = False
-        with patch('src.data_fetching.main.START_DATE', '2020-01-01'), \
-             patch('src.data_fetching.main.END_DATE', '2020-02-01'):
-            start, end = _load_dates_state()
-            assert start == '2020-01-01'
-            assert end == '2020-02-01'
-    # Ensure no warning was logged for missing file (as it just checks exists())
-    # actually logic says: if exists, try read. if fail read, log warning. if not exists, fallback.
-    # so here it just falls back.
 
-def test_load_dates_state_corrupt(mock_logger):
-    with patch('src.data_fetching.main.DATES_STATE_FILE') as mock_path:
-        mock_path.exists.return_value = True
-        with patch('builtins.open', mock_open(read_data="{invalid json")):
-            with patch('src.data_fetching.main.START_DATE', '2020-01-01'), \
-                 patch('src.data_fetching.main.END_DATE', '2020-02-01'):
+def test_load_dates_state_exists() -> None:
+    """Test loading dates state from existing file."""
+    state_content = json.dumps({"start_date": "2023-01-01", "end_date": "2023-01-05"})
+    mock_path = MagicMock()
+    mock_path.exists.return_value = True
+    mock_path.open = mock_open(read_data=state_content)
+
+    with patch.object(main_module, "DATES_STATE_FILE", mock_path):
+        start, end = _load_dates_state()
+        assert start == "2023-01-01"
+        assert end == "2023-01-05"
+
+
+def test_load_dates_state_missing(mock_logger: MagicMock) -> None:
+    """Test loading dates state when file is missing."""
+    mock_path = MagicMock()
+    mock_path.exists.return_value = False
+
+    with patch.object(main_module, "DATES_STATE_FILE", mock_path):
+        with patch.object(main_module, "START_DATE", "2020-01-01"):
+            with patch.object(main_module, "END_DATE", "2020-02-01"):
                 start, end = _load_dates_state()
-                assert start == '2020-01-01'
-                assert end == '2020-02-01'
+                assert start == "2020-01-01"
+                assert end == "2020-02-01"
+
+
+def test_load_dates_state_corrupt(mock_logger: MagicMock) -> None:
+    """Test loading dates state with corrupted file."""
+    mock_path = MagicMock()
+    mock_path.exists.return_value = True
+    mock_path.open = mock_open(read_data="{invalid json")
+
+    with patch.object(main_module, "DATES_STATE_FILE", mock_path):
+        with patch.object(main_module, "START_DATE", "2020-01-01"):
+            with patch.object(main_module, "END_DATE", "2020-02-01"):
+                start, end = _load_dates_state()
+                assert start == "2020-01-01"
+                assert end == "2020-02-01"
                 mock_logger.warning.assert_called_once()
 
-def test_save_dates_state():
-    with patch('src.data_fetching.main.DATES_STATE_FILE') as mock_path:
-        mock_path.parent.mkdir = MagicMock()
-        with patch('builtins.open', mock_open()) as mock_file:
-            _save_dates_state('2023-01-01', '2023-01-05')
 
-            mock_path.parent.mkdir.assert_called_with(parents=True, exist_ok=True)
-            mock_file.assert_called_with(mock_path, 'w')
+def test_save_dates_state() -> None:
+    """Test saving dates state."""
+    mock_path = MagicMock()
+    mock_path.parent.mkdir = MagicMock()
+    mock_path.open = mock_open()
 
-            handle = mock_file()
-            written_content = "".join(call.args[0] for call in handle.write.call_args_list)
-            data = json.loads(written_content)
-            assert data['start_date'] == '2023-01-01'
-            assert data['end_date'] == '2023-01-05'
+    with patch.object(main_module, "DATES_STATE_FILE", mock_path):
+        _save_dates_state("2023-01-01", "2023-01-05")
 
-def test_increment_dates():
+        mock_path.parent.mkdir.assert_called_with(parents=True, exist_ok=True)
+        mock_path.open.assert_called_with("w")
+
+        handle = mock_path.open()
+        written_content = "".join(call.args[0] for call in handle.write.call_args_list)
+        data = json.loads(written_content)
+        assert data["start_date"] == "2023-01-01"
+        assert data["end_date"] == "2023-01-05"
+
+
+# --- Date Increment Tests ---
+
+
+def test_increment_dates() -> None:
+    """Test date increment functionality."""
     current_end = "2023-01-10"
-    with patch('src.data_fetching.main.AUTO_INCREMENT_DAYS', 5):
+    with patch.object(main_module, "FETCHING_AUTO_INCREMENT_DAYS", 5):
         new_start, new_end = _increment_dates(current_end)
         assert new_start == "2023-01-10"
         assert new_end == "2023-01-15"
 
-def test_validate_dependencies_success():
-    with patch.dict(sys.modules, {'ccxt': MagicMock(), 'pandas': MagicMock(), 'pyarrow': MagicMock()}):
+
+def test_increment_dates_month_boundary() -> None:
+    """Test date increment across month boundary."""
+    current_end = "2023-01-30"
+    with patch.object(main_module, "FETCHING_AUTO_INCREMENT_DAYS", 5):
+        new_start, new_end = _increment_dates(current_end)
+        assert new_start == "2023-01-30"
+        assert new_end == "2023-02-04"
+
+
+# --- Dependency Validation Tests ---
+
+
+def test_validate_dependencies_success() -> None:
+    """Test successful dependency validation."""
+    with patch.dict(
+        sys.modules, {"ccxt": MagicMock(), "pandas": MagicMock(), "pyarrow": MagicMock()}
+    ):
         _validate_dependencies()
 
-def test_validate_dependencies_missing_ccxt():
-    with patch.dict(sys.modules):
-        sys.modules.pop('ccxt', None)
-        # We need to ensure import raises ImportError.
-        # mocking builtins.__import__ is one way, but simpler is using a side_effect on a fresh mock
-        # However, since we are in a live env, simply popping might not be enough if it reloads.
-        # Let's try to mock the module as None or raise ImportError
-        with patch('builtins.__import__', side_effect=ImportError("No module named 'ccxt'")):
-             with pytest.raises(RuntimeError, match="ccxt library not available"):
-                _validate_dependencies()
 
-# Since mocking __import__ affects everything, we must be careful.
-# Better strategy for dependency testing:
-def test_validate_dependencies_failures(mock_logger):
-    # Mocking locally to the function
+def test_validate_dependencies_missing_ccxt() -> None:
+    """Test dependency validation with missing ccxt."""
     original_import = __import__
 
-    def mock_import(name, *args, **kwargs):
-        if name == 'ccxt':
+    def mock_import(name: str, *args, **kwargs):
+        if name == "ccxt":
             raise ImportError("No module named ccxt")
         return original_import(name, *args, **kwargs)
 
-    with patch('builtins.__import__', side_effect=mock_import):
+    with patch("builtins.__import__", side_effect=mock_import):
         with pytest.raises(RuntimeError, match="ccxt library not available"):
-             _validate_dependencies()
+            _validate_dependencies()
+
+
+def test_validate_dependencies_failures(mock_logger: MagicMock) -> None:
+    """Test dependency validation failures."""
+    original_import = __import__
+
+    def mock_import_ccxt(name: str, *args, **kwargs):
+        if name == "ccxt":
+            raise ImportError("No module named ccxt")
+        return original_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=mock_import_ccxt):
+        with pytest.raises(RuntimeError, match="ccxt library not available"):
+            _validate_dependencies()
         assert mock_logger.error.call_count >= 1
 
-    def mock_import_pd(name, *args, **kwargs):
-        if name == 'pandas':
+    def mock_import_pd(name: str, *args, **kwargs):
+        if name == "pandas":
             raise ImportError("No module named pandas")
-        if name == 'ccxt':
-             return MagicMock()
+        if name == "ccxt":
+            return MagicMock()
         return original_import(name, *args, **kwargs)
 
-    with patch('builtins.__import__', side_effect=mock_import_pd):
+    with patch("builtins.__import__", side_effect=mock_import_pd):
         with pytest.raises(RuntimeError, match="pandas library not available"):
-             _validate_dependencies()
+            _validate_dependencies()
 
-    def mock_import_pa(name, *args, **kwargs):
-        if name == 'pyarrow':
+    def mock_import_pa(name: str, *args, **kwargs):
+        if name == "pyarrow":
             raise ImportError("No module named pyarrow")
-        if name in ['ccxt', 'pandas']:
-             return MagicMock()
+        if name in ["ccxt", "pandas"]:
+            return MagicMock()
         return original_import(name, *args, **kwargs)
 
-    with patch('builtins.__import__', side_effect=mock_import_pa):
+    with patch("builtins.__import__", side_effect=mock_import_pa):
         with pytest.raises(RuntimeError, match="pyarrow library not available"):
-             _validate_dependencies()
+            _validate_dependencies()
 
-def test_log_header(mock_logger):
+
+# --- Logging Tests ---
+
+
+def test_log_header(mock_logger: MagicMock) -> None:
+    """Test header logging."""
     _log_header()
     assert mock_logger.info.call_count > 0
 
-def test_log_footer(mock_logger):
+
+def test_log_footer_success(mock_logger: MagicMock) -> None:
+    """Test footer logging on success."""
     _log_footer(success=True)
     assert mock_logger.info.call_count > 0
+
+
+def test_log_footer_failure(mock_logger: MagicMock) -> None:
+    """Test footer logging on failure."""
     _log_footer(success=False)
     assert mock_logger.info.call_count > 0
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-@patch('src.data_fetching.main._save_dates_state')
-@patch('src.data_fetching.main._validate_dependencies')
-def test_main_success(mock_validate, mock_save, mock_load, mock_download):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
-    with patch('src.data_fetching.main._increment_dates') as mock_incr:
-        mock_incr.return_value = ('2023-01-05', '2023-01-10')
+
+# --- Main Function Tests ---
+
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+@patch.object(main_module, "_save_dates_state")
+@patch.object(main_module, "_validate_dependencies")
+def test_main_success(
+    mock_validate: MagicMock,
+    mock_save: MagicMock,
+    mock_load: MagicMock,
+    mock_download: MagicMock,
+) -> None:
+    """Test successful main execution."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
+    with patch.object(main_module, "_increment_dates") as mock_incr:
+        mock_incr.return_value = ("2023-01-05", "2023-01-10")
         main(auto_increment=True)
         mock_validate.assert_called_once()
-        mock_download.assert_called_with(start_date='2023-01-01', end_date='2023-01-05')
-        mock_save.assert_called_with('2023-01-05', '2023-01-10')
+        mock_download.assert_called_with(start_date="2023-01-01", end_date="2023-01-05")
+        mock_save.assert_called_with("2023-01-05", "2023-01-10")
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-@patch('src.data_fetching.main._validate_dependencies')
-def test_main_no_increment(mock_validate, mock_load, mock_download):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
-    with patch('src.data_fetching.main._save_dates_state') as mock_save:
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+@patch.object(main_module, "_validate_dependencies")
+def test_main_no_increment(
+    mock_validate: MagicMock, mock_load: MagicMock, mock_download: MagicMock
+) -> None:
+    """Test main without auto-increment."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
+    with patch.object(main_module, "_save_dates_state") as mock_save:
         main(auto_increment=False)
         mock_download.assert_called()
         mock_save.assert_not_called()
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-def test_main_interrupt(mock_load, mock_download, mock_logger):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+def test_main_interrupt(
+    mock_load: MagicMock, mock_download: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main with keyboard interrupt."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
     mock_download.side_effect = KeyboardInterrupt()
-    with patch('src.data_fetching.main._validate_dependencies'):
+    with patch.object(main_module, "_validate_dependencies"):
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 130
         mock_logger.warning.assert_called_with("Operation interrupted by user")
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-def test_main_file_error(mock_load, mock_download, mock_logger):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+def test_main_file_error(
+    mock_load: MagicMock, mock_download: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main with file system error."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
     mock_download.side_effect = FileNotFoundError("Disk missing")
-    with patch('src.data_fetching.main._validate_dependencies'):
+    with patch.object(main_module, "_validate_dependencies"):
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 1
-        mock_logger.error.assert_any_call("File system error: %s", mock_download.side_effect)
+        mock_logger.error.assert_any_call(
+            "File system error: %s", mock_download.side_effect
+        )
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-def test_main_network_error(mock_load, mock_download, mock_logger):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+def test_main_network_error(
+    mock_load: MagicMock, mock_download: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main with network error."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
     mock_download.side_effect = ConnectionError("No internet")
-    with patch('src.data_fetching.main._validate_dependencies'):
+    with patch.object(main_module, "_validate_dependencies"):
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 1
         mock_logger.error.assert_any_call("Network error: %s", mock_download.side_effect)
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-def test_main_config_error(mock_load, mock_download, mock_logger):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+def test_main_config_error(
+    mock_load: MagicMock, mock_download: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main with configuration error."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
     mock_download.side_effect = ValueError("Bad date")
-    with patch('src.data_fetching.main._validate_dependencies'):
+    with patch.object(main_module, "_validate_dependencies"):
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 1
-        mock_logger.error.assert_any_call("Configuration error: %s", mock_download.side_effect)
+        mock_logger.error.assert_any_call(
+            "Configuration error: %s", mock_download.side_effect
+        )
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-def test_main_runtime_error(mock_load, mock_download, mock_logger):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+def test_main_runtime_error(
+    mock_load: MagicMock, mock_download: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main with runtime error."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
     mock_download.side_effect = RuntimeError("Crash")
-    with patch('src.data_fetching.main._validate_dependencies'):
+    with patch.object(main_module, "_validate_dependencies"):
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 1
         mock_logger.error.assert_any_call("Runtime error: %s", mock_download.side_effect)
 
-@patch('src.data_fetching.main.download_ticks_in_date_range')
-@patch('src.data_fetching.main._load_dates_state')
-def test_main_unknown_error(mock_load, mock_download, mock_logger):
-    mock_load.return_value = ('2023-01-01', '2023-01-05')
+
+@patch.object(main_module, "download_ticks_in_date_range")
+@patch.object(main_module, "_load_dates_state")
+def test_main_unknown_error(
+    mock_load: MagicMock, mock_download: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main with unknown error."""
+    mock_load.return_value = ("2023-01-01", "2023-01-05")
     mock_download.side_effect = Exception("Unknown")
-    with patch('src.data_fetching.main._validate_dependencies'):
+    with patch.object(main_module, "_validate_dependencies"):
         with pytest.raises(SystemExit) as exc:
             main()
         assert exc.value.code == 1
         mock_logger.exception.assert_called()
 
+
 # --- Main Loop Tests ---
 
-@patch('src.data_fetching.main.main')
-@patch('time.sleep')
-def test_main_loop_success(mock_sleep, mock_main, mock_logger):
-    # Run loop 2 times
+
+@patch.object(main_module, "main")
+@patch("time.sleep")
+def test_main_loop_success(
+    mock_sleep: MagicMock, mock_main: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test successful main loop execution."""
     main_loop(max_iterations=2, delay_seconds=1)
 
     assert mock_main.call_count == 2
     assert mock_logger.info.call_count > 0
-    # Should sleep once between iterations
     mock_sleep.assert_called_with(1)
 
-@patch('src.data_fetching.main.main')
-@patch('time.sleep')
-def test_main_loop_interrupt(mock_sleep, mock_main, mock_logger):
+
+@patch.object(main_module, "main")
+@patch("time.sleep")
+def test_main_loop_interrupt(
+    mock_sleep: MagicMock, mock_main: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main loop with keyboard interrupt."""
     mock_main.side_effect = KeyboardInterrupt()
     main_loop(max_iterations=5, delay_seconds=1)
 
-    # Should stop at first interrupt
     assert mock_main.call_count == 1
-    mock_logger.info.assert_any_call("🛑 Loop interrupted at iteration 1")
+    mock_logger.info.assert_any_call("Loop interrupted at iteration %d", 1)
 
-@patch('src.data_fetching.main.main')
-@patch('time.sleep')
-def test_main_loop_error_retry(mock_sleep, mock_main, mock_logger):
-    # Fail 3 times then succeed
-    mock_main.side_effect = [Exception("Fail1"), Exception("Fail2"), Exception("Fail3"), None]
+
+@patch.object(main_module, "main")
+@patch("time.sleep")
+def test_main_loop_error_retry(
+    mock_sleep: MagicMock, mock_main: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main loop with error retry."""
+    mock_main.side_effect = [
+        Exception("Fail1"),
+        Exception("Fail2"),
+        Exception("Fail3"),
+        None,
+    ]
 
     main_loop(max_iterations=4, delay_seconds=1)
 
     assert mock_main.call_count == 4
-    # Check retries logic (backoff)
-    # retry delays: 30, 60, 120
-    # sleep calls: retry1, retry2, retry3, normal_delay(before 4th),
-    # but wait, it succeeds on 4th, so it sleeps delay_seconds *after* 4th if max_iters wasn't hit
-    # but here max_iters=4 so loop ends after 4th, so no final sleep.
-
-    # We can check logs for "Retrying in"
     assert mock_logger.error.call_count >= 3
     assert mock_logger.info.call_count > 0
 
-@patch('src.data_fetching.main.main')
-@patch('time.sleep')
-def test_main_loop_max_consecutive_errors(mock_sleep, mock_main, mock_logger):
+
+@patch.object(main_module, "main")
+@patch("time.sleep")
+def test_main_loop_max_consecutive_errors(
+    mock_sleep: MagicMock, mock_main: MagicMock, mock_logger: MagicMock
+) -> None:
+    """Test main loop stops after max consecutive errors."""
     mock_main.side_effect = Exception("Fail")
 
     main_loop(max_iterations=10, delay_seconds=1)
 
-    # Should stop after 5 consecutive errors (default max)
     assert mock_main.call_count == 5
-    mock_logger.error.assert_any_call("💀 Too many consecutive errors (5), stopping daemon")
+    mock_logger.error.assert_any_call(
+        "Too many consecutive errors (%d), stopping daemon", 5
+    )
+
+
+# --- Retry Delay Tests ---
+
+
+def test_compute_retry_delay() -> None:
+    """Test exponential backoff retry delay computation."""
+    assert _compute_retry_delay(1) == 60  # 30 * 2^1 = 60
+    assert _compute_retry_delay(2) == 120  # 30 * 2^2 = 120
+    assert _compute_retry_delay(3) == 240  # 30 * 2^3 = 240
+    assert _compute_retry_delay(4) == 300  # 30 * 2^4 = 480 -> capped at 300
+    assert _compute_retry_delay(10) == 300  # Capped at max

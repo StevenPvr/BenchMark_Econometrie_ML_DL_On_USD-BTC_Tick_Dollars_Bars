@@ -1,4 +1,4 @@
-"""Tests for src.labelling.label_meta.eval."""
+"""Tests for src.labelling.label_meta.eval.logic."""
 
 import json
 import numpy as np
@@ -7,7 +7,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.labelling.label_meta.eval import (
+from src.labelling.label_meta.eval.logic import (
     TradingMetrics,
     CombinedEvaluationResult,
     compute_trading_metrics,
@@ -253,7 +253,7 @@ class TestDataLoading:
     def test_load_meta_model_not_found(self, tmp_path, mocker):
         """Test loading when meta model not found."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -263,7 +263,7 @@ class TestDataLoading:
     def test_load_meta_training_results(self, tmp_path, mocker):
         """Test loading training results."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -281,7 +281,7 @@ class TestDataLoading:
     def test_load_meta_training_results_not_found(self, tmp_path, mocker):
         """Test loading when training results not found."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -291,7 +291,7 @@ class TestDataLoading:
     def test_get_available_trained_meta_models_empty(self, tmp_path, mocker):
         """Test when no trained models exist."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path / "nonexistent"
         )
 
@@ -301,7 +301,7 @@ class TestDataLoading:
     def test_get_available_trained_meta_models(self, tmp_path, mocker):
         """Test listing available trained models."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -451,7 +451,7 @@ class TestAdditionalCoverage:
     def test_get_available_trained_meta_models_multiple(self, tmp_path, mocker):
         """Test with multiple trained models."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -637,7 +637,7 @@ class TestDataLoadingDetailed:
     def test_load_meta_training_results_success(self, tmp_path, mocker):
         """Test successful loading of training results."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -658,7 +658,7 @@ class TestDataLoadingDetailed:
     def test_get_available_meta_models_empty_dir(self, tmp_path, mocker):
         """Test with empty training directory."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -671,7 +671,7 @@ class TestDataLoadingDetailed:
     def test_get_available_meta_models_with_incomplete(self, tmp_path, mocker):
         """Test filtering out incomplete model directories."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -748,7 +748,7 @@ class TestLoadModelEdgeCases:
     def test_load_meta_model_wrong_path(self, tmp_path, mocker):
         """Test loading from wrong directory structure."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 
@@ -763,7 +763,7 @@ class TestLoadModelEdgeCases:
     def test_get_available_models_complex_names(self, tmp_path, mocker):
         """Test with complex model names containing underscores."""
         mocker.patch(
-            "src.labelling.label_meta.eval.LABEL_META_TRAIN_DIR",
+            "src.labelling.label_meta.eval.logic.LABEL_META_TRAIN_DIR",
             tmp_path
         )
 

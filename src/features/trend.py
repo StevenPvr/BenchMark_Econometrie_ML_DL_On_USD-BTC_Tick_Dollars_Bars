@@ -37,7 +37,8 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numba import njit  # type: ignore[import-untyped]  # Still used by _compute_streak
 
-from src.config_logging import get_logger
+from src.constants import EPS
+from src.utils import get_logger
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -51,6 +52,8 @@ __all__ = [
     "compute_return_streak",
 ]
 
+# NOTE: Numba functions use literal values equivalent to EPS (1e-10)
+# because Numba cannot import Python constants at compile time.
 
 # =============================================================================
 # MOVING AVERAGES

@@ -18,34 +18,31 @@ while _project_root != _project_root.parent:
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from src.features.main import (
-    load_input_data,
-    compute_all_features,
-    apply_lags,
-    interpolate_sporadic_nan,
+from src.features.main import main
+from src.features.compute import apply_lags, compute_all_features
+from src.features.io import fit_and_save_scalers, load_input_data, save_outputs
+from src.features.pipeline import (
+    TRAIN_RATIO,
+    compute_timestamp_features,
     drop_initial_nan_rows,
+    drop_timestamp_columns,
+    get_columns_to_scale,
+    interpolate_sporadic_nan,
     shift_target_to_future_return,
     split_train_test,
-    get_columns_to_scale,
-    fit_and_save_scalers,
-    compute_timestamp_features,
-    drop_timestamp_columns,
-    save_outputs,
-    main,
-    TRAIN_RATIO,
 )
 
-# Mock constants from src.features.main
-# We mock them where they are IMPORTED in the module
+# Mock constants where they are IMPORTED in the modules
 @pytest.fixture
 def mock_paths(mocker):
-    mocker.patch("src.features.main.DOLLAR_BARS_PARQUET", MagicMock(exists=MagicMock(return_value=True), name="DOLLAR_BARS_PARQUET"))
-    mocker.patch("src.features.main.DATASET_FEATURES_PARQUET", MagicMock(name="DATASET_FEATURES_PARQUET"))
-    mocker.patch("src.features.main.DATASET_FEATURES_LINEAR_PARQUET", MagicMock(name="DATASET_FEATURES_LINEAR_PARQUET"))
-    mocker.patch("src.features.main.DATASET_FEATURES_LSTM_PARQUET", MagicMock(name="DATASET_FEATURES_LSTM_PARQUET"))
-    mocker.patch("src.features.main.SCALERS_DIR", MagicMock(name="SCALERS_DIR"))
-    mocker.patch("src.features.main.ZSCORE_SCALER_FILE", MagicMock(name="ZSCORE_SCALER_FILE"))
-    mocker.patch("src.features.main.MINMAX_SCALER_FILE", MagicMock(name="MINMAX_SCALER_FILE"))
+    mocker.patch("src.features.io.DOLLAR_BARS_PARQUET", MagicMock(exists=MagicMock(return_value=True), name="DOLLAR_BARS_PARQUET"))
+    mocker.patch("src.features.io.DATASET_FEATURES_PARQUET", MagicMock(name="DATASET_FEATURES_PARQUET"))
+    mocker.patch("src.features.io.DATASET_FEATURES_LINEAR_PARQUET", MagicMock(name="DATASET_FEATURES_LINEAR_PARQUET"))
+    mocker.patch("src.features.io.DATASET_FEATURES_LSTM_PARQUET", MagicMock(name="DATASET_FEATURES_LSTM_PARQUET"))
+    mocker.patch("src.features.io.SCALERS_DIR", MagicMock(name="SCALERS_DIR"))
+    mocker.patch("src.features.io.ZSCORE_SCALER_FILE", MagicMock(name="ZSCORE_SCALER_FILE"))
+    mocker.patch("src.features.io.MINMAX_SCALER_FILE", MagicMock(name="MINMAX_SCALER_FILE"))
+    mocker.patch("src.features.io.FEATURES_DIR", MagicMock(name="FEATURES_DIR"))
 
 def test_load_input_data(mocker, mock_paths):
     # Mock pd.read_parquet
@@ -56,7 +53,7 @@ def test_load_input_data(mocker, mock_paths):
     assert df.equals(mock_df)
 
     # Test file not found
-    from src.features.main import DOLLAR_BARS_PARQUET
+    from src.features.io import DOLLAR_BARS_PARQUET
     DOLLAR_BARS_PARQUET.exists.return_value = False
     with pytest.raises(FileNotFoundError):
         load_input_data()
@@ -66,23 +63,23 @@ def test_compute_all_features(sample_bars, mocker):
     # We just need to check if they are called and if results are combined
 
     # Mock return values as DataFrames with specific columns
-    mocker.patch("src.features.main.compute_cumulative_returns", return_value=pd.DataFrame({"cum_ret": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_recent_extremes", return_value=pd.DataFrame({"extremes": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_realized_volatility", return_value=pd.DataFrame({"vol": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_return_volatility_ratio", return_value=pd.DataFrame({"rvr": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_realized_skewness", return_value=pd.DataFrame({"skew": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_realized_kurtosis", return_value=pd.DataFrame({"kurt": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_all_jump_features", return_value=pd.DataFrame({"jump": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_moving_averages", return_value=pd.DataFrame({"ma": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_price_zscore", return_value=pd.DataFrame({"zscore": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_cross_ma", return_value=pd.DataFrame({"cross": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_return_streak", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="streak"))
+    mocker.patch("src.features.compute.compute_cumulative_returns", return_value=pd.DataFrame({"cum_ret": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_recent_extremes", return_value=pd.DataFrame({"extremes": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_realized_volatility", return_value=pd.DataFrame({"vol": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_return_volatility_ratio", return_value=pd.DataFrame({"rvr": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_realized_skewness", return_value=pd.DataFrame({"skew": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_realized_kurtosis", return_value=pd.DataFrame({"kurt": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_all_jump_features", return_value=pd.DataFrame({"jump": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_moving_averages", return_value=pd.DataFrame({"ma": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_price_zscore", return_value=pd.DataFrame({"zscore": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_cross_ma", return_value=pd.DataFrame({"cross": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_return_streak", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="streak"))
 
-    mocker.patch("src.features.main.compute_parkinson_volatility", return_value=pd.DataFrame({"park": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_garman_klass_volatility", return_value=pd.DataFrame({"gk": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_rogers_satchell_volatility", return_value=pd.DataFrame({"rs": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_yang_zhang_volatility", return_value=pd.DataFrame({"yz": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_range_ratios", return_value=pd.DataFrame({"ratio": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_parkinson_volatility", return_value=pd.DataFrame({"park": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_garman_klass_volatility", return_value=pd.DataFrame({"gk": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_rogers_satchell_volatility", return_value=pd.DataFrame({"rs": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_yang_zhang_volatility", return_value=pd.DataFrame({"yz": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_range_ratios", return_value=pd.DataFrame({"ratio": [1]*len(sample_bars)}, index=sample_bars.index))
 
     # Add dummy columns for conditional checks
     df_bars = sample_bars.copy()
@@ -90,20 +87,20 @@ def test_compute_all_features(sample_bars, mocker):
     df_bars["buy_volume"] = 100
     df_bars["sell_volume"] = 100
 
-    mocker.patch("src.features.main.compute_temporal_acceleration", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="accel"))
-    mocker.patch("src.features.main.compute_temporal_acceleration_smoothed", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="accel_smooth"))
-    mocker.patch("src.features.main.compute_temporal_jerk", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="jerk"))
+    mocker.patch("src.features.compute.compute_temporal_acceleration", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="accel"))
+    mocker.patch("src.features.compute.compute_temporal_acceleration_smoothed", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="accel_smooth"))
+    mocker.patch("src.features.compute.compute_temporal_jerk", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="jerk"))
 
-    mocker.patch("src.features.main.compute_vpin", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="vpin"))
-    mocker.patch("src.features.main.compute_kyle_lambda", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="kyle"))
+    mocker.patch("src.features.compute.compute_vpin", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="vpin"))
+    mocker.patch("src.features.compute.compute_kyle_lambda", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="kyle"))
 
-    mocker.patch("src.features.main.compute_shannon_entropy", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="shannon"))
-    mocker.patch("src.features.main.compute_approximate_entropy", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="apen"))
-    mocker.patch("src.features.main.compute_sample_entropy", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="sampen"))
+    mocker.patch("src.features.compute.compute_shannon_entropy", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="shannon"))
+    mocker.patch("src.features.compute.compute_approximate_entropy", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="apen"))
+    mocker.patch("src.features.compute.compute_sample_entropy", return_value=pd.Series([1]*len(sample_bars), index=sample_bars.index, name="sampen"))
 
-    mocker.patch("src.features.main.compute_all_temporal_features", return_value=pd.DataFrame({"temporal": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_frac_diff_features", return_value=pd.DataFrame({"frac": [1]*len(sample_bars)}, index=sample_bars.index))
-    mocker.patch("src.features.main.compute_all_technical_indicators", return_value=pd.DataFrame({"ta": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_all_temporal_features", return_value=pd.DataFrame({"temporal": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_frac_diff_features", return_value=pd.DataFrame({"frac": [1]*len(sample_bars)}, index=sample_bars.index))
+    mocker.patch("src.features.compute.compute_all_technical_indicators", return_value=pd.DataFrame({"ta": [1]*len(sample_bars)}, index=sample_bars.index))
 
     df_all = compute_all_features(df_bars)
 
@@ -121,7 +118,7 @@ def test_apply_lags(mocker):
     df_in = pd.DataFrame({"a": [1, 2, 3], "timestamp": [1, 2, 3]})
     df_out = pd.DataFrame({"a": [1, 2, 3], "a_lag1": [np.nan, 1, 2]})
 
-    mocker.patch("src.features.main.generate_all_lags", return_value=df_out)
+    mocker.patch("src.features.compute.generate_all_lags", return_value=df_out)
 
     res = apply_lags(df_in)
     assert res.equals(df_out)
@@ -211,8 +208,8 @@ def test_fit_and_save_scalers(mocker, mock_paths):
     mock_std_scaler = MagicMock()
     mock_minmax_scaler = MagicMock()
 
-    mocker.patch("src.features.main.StandardScalerCustom", return_value=mock_std_scaler)
-    mocker.patch("src.features.main.MinMaxScalerCustom", return_value=mock_minmax_scaler)
+    mocker.patch("src.features.io.StandardScalerCustom", return_value=mock_std_scaler)
+    mocker.patch("src.features.io.MinMaxScalerCustom", return_value=mock_minmax_scaler)
 
     fit_and_save_scalers(df_train)
 
@@ -256,21 +253,6 @@ def test_save_outputs(mocker, mock_paths):
     # Should be called 3 times (features, linear, lstm)
     assert mock_to_parquet.call_count == 3
 
-    # Verify dropped timestamp columns in saved data
-    args, _ = mock_to_parquet.call_args_list[0] # first call
-    # args[0] is the path (str or Path), so we check the dataframe on which it's called
-    # BUT `to_parquet` is called on the dataframe instance.
-    # When mocking DataFrame.to_parquet, the first argument to the mock is the dataframe instance (self) IF we use autospec=True or similar,
-    # OR if we patched it on the class.
-    # Since we patched `pd.DataFrame.to_parquet`, the first argument passed to the mock is NOT `self` unless we use it as a method.
-    # Actually, `mocker.patch.object` on a class method makes the first arg `self` only if called from instance?
-    # Wait, `to_parquet` is an instance method.
-    # Let's verify simply that it was called.
-
-    # A better check is to see if `drop_timestamp_columns` was called.
-    # But we can assume it works if `drop_timestamp_columns` is tested separately.
-    pass
-
 def test_main(mocker, mock_paths):
     # Mock sys.argv with --no-batch to use non-batch mode where our mocks apply
     mocker.patch("sys.argv", ["main.py", "--no-batch"])
@@ -285,7 +267,6 @@ def test_main(mocker, mock_paths):
     mocker.patch("src.features.main.interpolate_sporadic_nan", side_effect=lambda x: x)
     mocker.patch("src.features.main.shift_target_to_future_return", side_effect=lambda x, target_col: x)
     mocker.patch("src.features.main.split_train_test", return_value=(pd.DataFrame(), pd.DataFrame(), 0))
-    mocker.patch("src.features.main.fit_and_save_scalers")
     mocker.patch("src.features.main.save_outputs")
 
     main()

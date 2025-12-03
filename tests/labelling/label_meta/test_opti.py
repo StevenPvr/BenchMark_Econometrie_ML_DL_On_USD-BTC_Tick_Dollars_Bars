@@ -1,4 +1,4 @@
-"""Tests for src.labelling.label_meta.opti."""
+"""Tests for src.labelling.label_meta.opti.logic."""
 
 import numpy as np
 import pandas as pd
@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 import optuna
 
-from src.labelling.label_meta.opti import (
+from src.labelling.label_meta.opti.logic import (
     get_events_meta,
     get_bins,
     WalkForwardCV,
@@ -377,7 +377,7 @@ class TestIntegration:
 
         # Mock expensive operations
         mocker.patch(
-            "src.labelling.label_meta.opti._generate_trial_events_meta",
+            "src.labelling.label_meta.opti.logic._generate_trial_events_meta",
             return_value=pd.DataFrame({
                 "bin": [0, 1] * 25,
                 "t1": sample_features.index[:50],

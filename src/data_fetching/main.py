@@ -2,155 +2,178 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from datetime import datetime, timedelta
 import json
+import signal
 import sys
-
-# Add project root to Python path for direct execution
-_script_dir = Path(__file__).parent
-_project_root = _script_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from types import FrameType
 
 from src.config_logging import setup_logging
-from src.constants import END_DATE, EXCHANGE_ID, START_DATE, SYMBOL
+from src.constants import (
+    END_DATE,
+    EXCHANGE_ID,
+    FETCHING_AUTO_INCREMENT_DAYS,
+    START_DATE,
+    SYMBOL,
+)
 from src.data_fetching.fetching import download_ticks_in_date_range
-from src.path import DATASET_RAW_CSV, DATASET_RAW_PARQUET
+from src.path import DATASET_RAW_PARQUET, PROJECT_ROOT
 from src.utils import get_logger
 
 logger = get_logger(__name__)
 
-# Auto-increment configuration
-AUTO_INCREMENT_DAYS: int = 5  # 5-day windows
-DATES_STATE_FILE = _project_root / "data" / "fetch_dates_state.json"
+# State file location
+DATES_STATE_FILE: Path = PROJECT_ROOT / "data" / "fetch_dates_state.json"
+
+# Daemon configuration
+MAX_CONSECUTIVE_ERRORS: int = 5
+DEFAULT_DELAY_SECONDS: int = 300
+EXPONENTIAL_BACKOFF_BASE: int = 30
+EXPONENTIAL_BACKOFF_MAX: int = 300
 
 
 def _load_dates_state() -> tuple[str, str]:
-    """Load current start/end dates from state file, fallback to constants."""
+    """Load current start/end dates from state file.
+
+    Falls back to constants if state file doesn't exist or is corrupted.
+
+    Returns:
+        Tuple of (start_date, end_date) in YYYY-MM-DD format.
+    """
     if DATES_STATE_FILE.exists():
         try:
-            with open(DATES_STATE_FILE, 'r') as f:
+            with DATES_STATE_FILE.open("r") as f:
                 state = json.load(f)
-                return state['start_date'], state['end_date']
+                return state["start_date"], state["end_date"]
         except Exception as e:
             logger.warning("Could not load dates state file: %s", e)
 
-    # Fallback to constants
     return START_DATE, END_DATE
 
 
 def _save_dates_state(start_date: str, end_date: str) -> None:
-    """Save current dates to state file."""
+    """Save current dates to state file.
+
+    Args:
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format.
+    """
     DATES_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     state = {
-        'start_date': start_date,
-        'end_date': end_date,
-        'last_updated': datetime.now().isoformat()
+        "start_date": start_date,
+        "end_date": end_date,
+        "last_updated": datetime.now().isoformat(),
     }
-    with open(DATES_STATE_FILE, 'w') as f:
+    with DATES_STATE_FILE.open("w") as f:
         json.dump(state, f, indent=2)
 
 
 def _increment_dates(current_end: str) -> tuple[str, str]:
-    """Increment dates by AUTO_INCREMENT_DAYS, handling month ends."""
+    """Increment dates by auto-increment days.
+
+    Args:
+        current_end: Current end date in YYYY-MM-DD format.
+
+    Returns:
+        Tuple of (new_start, new_end) in YYYY-MM-DD format.
+    """
     end_dt = datetime.strptime(current_end, "%Y-%m-%d")
-
-    # New start = current end
     new_start = end_dt
-
-    # New end = start + AUTO_INCREMENT_DAYS
-    new_end = new_start + timedelta(days=AUTO_INCREMENT_DAYS)
-
+    new_end = new_start + timedelta(days=FETCHING_AUTO_INCREMENT_DAYS)
     return new_start.strftime("%Y-%m-%d"), new_end.strftime("%Y-%m-%d")
 
 
 def _validate_dependencies() -> None:
-    """Validate that required dependencies are available."""
+    """Validate that required dependencies are available.
+
+    Raises:
+        RuntimeError: If a required dependency is missing.
+    """
     try:
-        import ccxt  # type: ignore[import-untyped]
-        logger.info("✓ ccxt library available")
+        import ccxt  # noqa: F401
+
+        logger.info("ccxt library available")
     except ImportError as e:
         logger.error("Missing required dependency: ccxt")
         logger.error("Install with: pip install ccxt")
-        raise RuntimeError("ccxt library not available") from e
+        msg = "ccxt library not available"
+        raise RuntimeError(msg) from e
 
     try:
-        import pandas as pd  # type: ignore[import-untyped]
-        logger.info("✓ pandas library available")
+        import pandas  # noqa: F401
+
+        logger.info("pandas library available")
     except ImportError as e:
         logger.error("Missing required dependency: pandas")
-        raise RuntimeError("pandas library not available") from e
+        msg = "pandas library not available"
+        raise RuntimeError(msg) from e
 
     try:
-        import pyarrow  # type: ignore[import-untyped]
-        logger.info("✓ pyarrow library available")
+        import pyarrow  # noqa: F401
+
+        logger.info("pyarrow library available")
     except ImportError as e:
         logger.error("Missing required dependency: pyarrow")
         logger.error("Install with: pip install pyarrow")
-        raise RuntimeError("pyarrow library not available") from e
+        msg = "pyarrow library not available"
+        raise RuntimeError(msg) from e
 
 
 def _log_header() -> None:
     """Display the automated fetching banner with configuration."""
-    logger.info("\n")
+    logger.info("")
     logger.info("=" * 70)
     logger.info(" AUTOMATED BTC/USD TICK DATA FETCHING")
     logger.info("=" * 70)
-    logger.info(f"Exchange:     {EXCHANGE_ID}")
-    logger.info(f"Symbol:       {SYMBOL}")
-    logger.info(f"Date Range:   {START_DATE} → {END_DATE}")
-    logger.info(f"Output CSV:   {DATASET_RAW_CSV}")
-    logger.info(f"Output PQ:    {DATASET_RAW_PARQUET}")
+    logger.info("Exchange:     %s", EXCHANGE_ID)
+    logger.info("Symbol:       %s", SYMBOL)
+    logger.info("Date Range:   %s -> %s", START_DATE, END_DATE)
+    logger.info("Output PQ:    %s", DATASET_RAW_PARQUET)
     logger.info("=" * 70)
 
 
 def _log_footer(success: bool = True) -> None:
-    """Display completion summary."""
-    logger.info("\n" + "=" * 70)
+    """Display completion summary.
+
+    Args:
+        success: Whether the operation succeeded.
+    """
+    logger.info("")
+    logger.info("=" * 70)
     if success:
         logger.info(" FETCHING COMPLETE")
-        logger.info("✓ BTC/USD tick data successfully downloaded")
+        logger.info("BTC/USD tick data successfully downloaded")
     else:
         logger.info(" FETCHING FAILED")
     logger.info("=" * 70)
 
 
 def main(auto_increment: bool = True) -> None:
-    """Automated main function for BTC/USD tick data fetching with auto-increment."""
+    """Automated main function for BTC/USD tick data fetching with auto-increment.
+
+    Args:
+        auto_increment: Whether to increment dates for the next run.
+    """
     setup_logging()
 
     try:
-        # Load current dates (from state file or constants)
         current_start, current_end = _load_dates_state()
-
-        # Validate dependencies before proceeding
         _validate_dependencies()
+        _log_run_header(current_start, current_end)
 
-        # Display header with current configuration
-        logger.info("\n")
-        logger.info("=" * 70)
-        logger.info(" AUTOMATED BTC/USD TICK DATA FETCHING (AUTO-INCREMENT)")
-        logger.info("=" * 70)
-        logger.info(f"Exchange:     {EXCHANGE_ID}")
-        logger.info(f"Symbol:       {SYMBOL}")
-        logger.info(f"Date Range:   {current_start} → {current_end}")
-        logger.info(f"Window Size:  {AUTO_INCREMENT_DAYS} days")
-        logger.info(f"Output:       {DATASET_RAW_PARQUET}")
-        logger.info("=" * 70)
-
-        # Execute the fetching pipeline with current dates
         logger.info("Starting automated data fetching...")
         download_ticks_in_date_range(start_date=current_start, end_date=current_end)
-        logger.info("✓ Data fetching completed successfully")
+        logger.info("Data fetching completed successfully")
 
-        # Auto-increment dates for next run
         if auto_increment:
             next_start, next_end = _increment_dates(current_end)
             _save_dates_state(next_start, next_end)
-            logger.info("✓ Dates auto-incremented: %s → %s (next run)", next_start, next_end)
+            logger.info(
+                "Dates auto-incremented: %s -> %s (next run)", next_start, next_end
+            )
 
-        # Display success footer
         _log_footer(success=True)
 
     except KeyboardInterrupt:
@@ -182,98 +205,188 @@ def main(auto_increment: bool = True) -> None:
         sys.exit(1)
 
 
-def main_loop(max_iterations: int | None = None, delay_seconds: int = 300) -> None:
+def _log_run_header(current_start: str, current_end: str) -> None:
+    """Log the header for a data fetching run.
+
+    Args:
+        current_start: Start date for this run.
+        current_end: End date for this run.
+    """
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info(" AUTOMATED BTC/USD TICK DATA FETCHING (AUTO-INCREMENT)")
+    logger.info("=" * 70)
+    logger.info("Exchange:     %s", EXCHANGE_ID)
+    logger.info("Symbol:       %s", SYMBOL)
+    logger.info("Date Range:   %s -> %s", current_start, current_end)
+    logger.info("Window Size:  %d days", FETCHING_AUTO_INCREMENT_DAYS)
+    logger.info("Output:       %s", DATASET_RAW_PARQUET)
+    logger.info("=" * 70)
+
+
+def main_loop(
+    max_iterations: int | None = None,
+    delay_seconds: int = DEFAULT_DELAY_SECONDS,
+) -> None:
     """Run data fetching in a continuous loop with auto-increment dates.
 
     This function runs indefinitely until interrupted, automatically incrementing
     dates and handling errors gracefully.
 
     Args:
-        max_iterations: Maximum iterations (None = infinite)
-        delay_seconds: Delay between iterations (default: 5 minutes = 300s)
+        max_iterations: Maximum iterations (None = infinite).
+        delay_seconds: Delay between iterations in seconds.
     """
-    import time
-    import signal
-    import sys
+    _setup_signal_handlers()
 
-    # Handle graceful shutdown
-    def signal_handler(signum, frame):
+    iteration = 0
+    consecutive_errors = 0
+
+    _log_daemon_start(delay_seconds)
+
+    while max_iterations is None or iteration < max_iterations:
+        iteration += 1
+        start_time = time.time()
+
+        _log_iteration_start(iteration)
+
+        try:
+            main(auto_increment=True)
+            execution_time = time.time() - start_time
+
+            logger.info(
+                "Iteration %d completed successfully in %.1fs", iteration, execution_time
+            )
+            consecutive_errors = 0
+
+            if max_iterations is None or iteration < max_iterations:
+                logger.info("Next iteration in %d seconds...", delay_seconds)
+                time.sleep(delay_seconds)
+
+        except KeyboardInterrupt:
+            logger.info("Loop interrupted at iteration %d", iteration)
+            break
+        except Exception as e:
+            execution_time = time.time() - start_time
+            consecutive_errors += 1
+
+            logger.error(
+                "Iteration %d failed after %.1fs: %s", iteration, execution_time, e
+            )
+            logger.error(
+                "Consecutive errors: %d/%d", consecutive_errors, MAX_CONSECUTIVE_ERRORS
+            )
+
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                logger.error(
+                    "Too many consecutive errors (%d), stopping daemon",
+                    consecutive_errors,
+                )
+                break
+
+            retry_delay = _compute_retry_delay(consecutive_errors)
+            logger.info("Retrying in %d seconds...", retry_delay)
+            time.sleep(retry_delay)
+
+    logger.info("Daemon stopped after %d iterations", iteration)
+
+
+def _setup_signal_handlers() -> None:
+    """Set up signal handlers for graceful shutdown."""
+
+    def signal_handler(signum: int, frame: FrameType | None) -> None:
         logger.info("Received shutdown signal, stopping gracefully...")
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    iteration = 0
-    consecutive_errors = 0
-    max_consecutive_errors = 5
 
-    logger.info("🚀 Starting continuous data fetching daemon...")
-    logger.info(f"⏰ Delay between iterations: {delay_seconds} seconds ({delay_seconds//60} minutes)")
-    logger.info("🛑 Use Ctrl+C or 'kill <pid>' to stop gracefully")
-    logger.info("="*80)
+def _log_daemon_start(delay_seconds: int) -> None:
+    """Log daemon startup information.
 
-    while max_iterations is None or iteration < max_iterations:
-        iteration += 1
-        start_time = time.time()
+    Args:
+        delay_seconds: Delay between iterations.
+    """
+    logger.info("Starting continuous data fetching daemon...")
+    logger.info(
+        "Delay between iterations: %d seconds (%d minutes)",
+        delay_seconds,
+        delay_seconds // 60,
+    )
+    logger.info("Use Ctrl+C or 'kill <pid>' to stop gracefully")
+    logger.info("=" * 80)
 
-        logger.info(f"\n{'='*60}")
-        logger.info(f"🔄 ITERATION {iteration} - Starting...")
-        logger.info(f"{'='*60}")
 
-        try:
-            main(auto_increment=True)
-            execution_time = time.time() - start_time
+def _log_iteration_start(iteration: int) -> None:
+    """Log iteration start information.
 
-            logger.info(f"✅ Iteration {iteration} completed successfully in {execution_time:.1f}s")
-            consecutive_errors = 0  # Reset error counter
+    Args:
+        iteration: Current iteration number.
+    """
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("ITERATION %d - Starting...", iteration)
+    logger.info("=" * 60)
 
-            if max_iterations is None or iteration < max_iterations:
-                logger.info(f"⏳ Next iteration in {delay_seconds} seconds...")
-                time.sleep(delay_seconds)
 
-        except KeyboardInterrupt:
-            logger.info(f"🛑 Loop interrupted at iteration {iteration}")
-            break
-        except Exception as e:
-            execution_time = time.time() - start_time
-            consecutive_errors += 1
+def _compute_retry_delay(consecutive_errors: int) -> int:
+    """Compute retry delay with exponential backoff.
 
-            logger.error(f"❌ Iteration {iteration} failed after {execution_time:.1f}s: {e}")
-            logger.error(f"🔄 Consecutive errors: {consecutive_errors}/{max_consecutive_errors}")
+    Args:
+        consecutive_errors: Number of consecutive errors.
 
-            if consecutive_errors >= max_consecutive_errors:
-                logger.error(f"💀 Too many consecutive errors ({consecutive_errors}), stopping daemon")
-                break
-
-            # Exponential backoff for retries
-            retry_delay = min(300, 30 * (2 ** consecutive_errors))  # Max 5 minutes
-            logger.info(f"⏳ Retrying in {retry_delay} seconds...")
-            time.sleep(retry_delay)
-
-    logger.info(f"🏁 Daemon stopped after {iteration} iterations")
+    Returns:
+        Retry delay in seconds.
+    """
+    return min(
+        EXPONENTIAL_BACKOFF_MAX,
+        EXPONENTIAL_BACKOFF_BASE * (2**consecutive_errors),
+    )
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Automated BTC/USD tick data fetching daemon")
-    parser.add_argument("--daemon", action="store_true",
-                       help="Run as daemon (infinite loop with error recovery)")
-    parser.add_argument("--loop", action="store_true",
-                       help="Run in auto-increment loop (legacy, use --daemon)")
-    parser.add_argument("--max-iterations", type=int,
-                       help="Maximum iterations for loop/daemon mode")
-    parser.add_argument("--delay", type=int, default=300,
-                       help="Delay between iterations in seconds (default: 300 = 5 min)")
-    parser.add_argument("--no-increment", action="store_true",
-                       help="Disable auto-increment (test mode)")
+    parser = argparse.ArgumentParser(
+        description="Automated BTC/USD tick data fetching daemon"
+    )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run as daemon (infinite loop with error recovery)",
+    )
+    parser.add_argument(
+        "--loop",
+        action="store_true",
+        help="Run in auto-increment loop (legacy, use --daemon)",
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        help="Maximum iterations for loop/daemon mode",
+    )
+    parser.add_argument(
+        "--delay",
+        type=int,
+        default=DEFAULT_DELAY_SECONDS,
+        help=f"Delay between iterations in seconds (default: {DEFAULT_DELAY_SECONDS})",
+    )
+    parser.add_argument(
+        "--no-increment",
+        action="store_true",
+        help="Disable auto-increment (test mode)",
+    )
 
     args = parser.parse_args()
 
     if args.daemon or args.loop:
-        # Run as daemon (infinite loop unless max_iterations specified)
         main_loop(max_iterations=args.max_iterations, delay_seconds=args.delay)
     else:
-        # Single execution
         main(auto_increment=not args.no_increment)
+
+
+__all__ = [
+    "main",
+    "main_loop",
+]

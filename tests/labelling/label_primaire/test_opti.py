@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from unittest.mock import MagicMock, patch
 import optuna
-from src.labelling.label_primaire.opti import (
+from src.labelling.label_primaire.opti.logic import (
     optimize_model,
     create_objective,
     _get_path_returns,
@@ -88,7 +88,7 @@ def test_update_barrier_touches(sample_data, sample_events):
     events["sl"] = -0.01
 
     # Mock find_barrier_touch to return a specific timestamp
-    with patch("src.labelling.label_primaire.opti.find_barrier_touch", return_value=close.index[2]):
+    with patch("src.labelling.label_primaire.opti.logic.find_barrier_touch", return_value=close.index[2]):
         updated = _update_barrier_touches(close, events)
         assert updated.loc[events.index[0], "t1"] == close.index[2]
 
@@ -97,8 +97,8 @@ def test_apply_pt_sl_on_t1(sample_data, sample_events):
     events = sample_events.copy()
 
     # Just verify it calls dependencies
-    with patch("src.labelling.label_primaire.opti.compute_barriers", return_value=events), \
-         patch("src.labelling.label_primaire.opti._update_barrier_touches", return_value=events):
+    with patch("src.labelling.label_primaire.opti.logic.compute_barriers", return_value=events), \
+         patch("src.labelling.label_primaire.opti.logic._update_barrier_touches", return_value=events):
         res = apply_pt_sl_on_t1(close, events, 1.0, 1.0)
         assert isinstance(res, pd.DataFrame)
 
@@ -254,11 +254,11 @@ def test_create_objective(sample_data, mocker):
 
     # Mock external calls to avoid heavy computation
     mock_events = pd.DataFrame({"label": [1]*50 + [-1]*50}, index=features.index)
-    mocker.patch("src.labelling.label_primaire.opti._generate_trial_events", return_value=mock_events)
-    mocker.patch("src.labelling.label_primaire.opti._validate_events", return_value=(True, "OK"))
-    mocker.patch("src.labelling.label_primaire.opti._align_features_events", return_value=(features, pd.Series([1]*100, index=features.index), pd.DataFrame(index=features.index), "OK"))
+    mocker.patch("src.labelling.label_primaire.opti.logic._generate_trial_events", return_value=mock_events)
+    mocker.patch("src.labelling.label_primaire.opti.logic._validate_events", return_value=(True, "OK"))
+    mocker.patch("src.labelling.label_primaire.opti.logic._align_features_events", return_value=(features, pd.Series([1]*100, index=features.index), pd.DataFrame(index=features.index), "OK"))
     # _run_cv_scoring returns (objective, mean_mcc, mean_f1w, n_valid_folds, n_total_folds, reason)
-    mocker.patch("src.labelling.label_primaire.opti._run_cv_scoring", return_value=(0.5, 0.5, 0.5, 5, 5, "OK"))
+    mocker.patch("src.labelling.label_primaire.opti.logic._run_cv_scoring", return_value=(0.5, 0.5, 0.5, 5, 5, "OK"))
 
     mock_model_cls = MagicMock()
     search_space = {"p1": ("categorical", [1])}
@@ -284,14 +284,14 @@ def test_create_objective_uses_cache(sample_data, mocker):
 
     # Track calls to _generate_trial_events
     generate_mock = mocker.patch(
-        "src.labelling.label_primaire.opti._generate_trial_events",
+        "src.labelling.label_primaire.opti.logic._generate_trial_events",
         return_value=mock_events
     )
-    mocker.patch("src.labelling.label_primaire.opti._validate_events", return_value=(True, "OK"))
-    mocker.patch("src.labelling.label_primaire.opti._align_features_events",
+    mocker.patch("src.labelling.label_primaire.opti.logic._validate_events", return_value=(True, "OK"))
+    mocker.patch("src.labelling.label_primaire.opti.logic._align_features_events",
                  return_value=(features, pd.Series([1]*100, index=features.index),
                               pd.DataFrame(index=features.index), "OK"))
-    mocker.patch("src.labelling.label_primaire.opti._run_cv_scoring",
+    mocker.patch("src.labelling.label_primaire.opti.logic._run_cv_scoring",
                  return_value=(0.5, 0.5, 0.5, 5, 5, "OK"))
 
     mock_model_cls = MagicMock()
@@ -326,17 +326,17 @@ def test_optimize_model(mocker):
     mock_volatility = pd.Series(np.random.uniform(0.01, 0.02, 100), index=dates)
 
     # Mock everything around the main loop
-    mocker.patch("src.labelling.label_primaire.opti.load_model_class", return_value=MagicMock)
-    mocker.patch("src.labelling.label_primaire.opti._prepare_optimization_data", return_value=(mock_features, mock_close, mock_volatility))
+    mocker.patch("src.labelling.label_primaire.opti.logic.load_model_class", return_value=MagicMock)
+    mocker.patch("src.labelling.label_primaire.opti.logic._prepare_optimization_data", return_value=(mock_features, mock_close, mock_volatility))
 
     mock_study = MagicMock()
-    mocker.patch("src.labelling.label_primaire.opti._create_study", return_value=mock_study)
-    mocker.patch("src.labelling.label_primaire.opti.create_objective", return_value=lambda trial: 0.5)
+    mocker.patch("src.labelling.label_primaire.opti.logic._create_study", return_value=mock_study)
+    mocker.patch("src.labelling.label_primaire.opti.logic.create_objective", return_value=lambda trial: 0.5)
 
     mock_result = MagicMock()
     mock_result.best_score = 0.75  # Set real value to avoid formatting error
-    mocker.patch("src.labelling.label_primaire.opti._build_result", return_value=mock_result)
-    mocker.patch("src.labelling.label_primaire.opti._log_result")  # Skip logging
+    mocker.patch("src.labelling.label_primaire.opti.logic._build_result", return_value=mock_result)
+    mocker.patch("src.labelling.label_primaire.opti.logic._log_result")  # Skip logging
 
     res = optimize_model("lightgbm")
     assert res == mock_result
@@ -363,18 +363,18 @@ def test_select_models_interactive(mocker):
     assert "lightgbm" in models
 
 def test_run_sequential(mocker):
-    mocker.patch("src.labelling.label_primaire.opti._run_optimization_worker", return_value=MagicMock(best_score=0.5))
+    mocker.patch("src.labelling.label_primaire.opti.logic._run_optimization_worker", return_value=MagicMock(best_score=0.5))
     trials_per_model = {"m1": 10, "m2": 10}
     res = _run_sequential(["m1", "m2"], trials_per_model, 5)
     assert len(res) == 2
 
 def test_main_cli(mocker):
-    mocker.patch("src.labelling.label_primaire.opti.select_models_interactive", return_value=["lightgbm"])
+    mocker.patch("src.labelling.label_primaire.opti.logic.select_models_interactive", return_value=["lightgbm"])
     # trials, splits, data_fraction, parallel, launch
     mocker.patch("builtins.input", side_effect=["1", "1", "1.0", "n", "o"])
 
-    mock_run = mocker.patch("src.labelling.label_primaire.opti._run_sequential", return_value=[])
-    mocker.patch("src.labelling.label_primaire.opti._print_final_summary")
+    mock_run = mocker.patch("src.labelling.label_primaire.opti.logic._run_sequential", return_value=[])
+    mocker.patch("src.labelling.label_primaire.opti.logic._print_final_summary")
 
     main()
     mock_run.assert_called_once()

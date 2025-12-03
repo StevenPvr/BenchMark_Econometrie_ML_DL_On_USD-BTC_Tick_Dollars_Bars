@@ -37,16 +37,18 @@ Reference:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
-from numba import njit  # type: ignore[import-untyped]
 
-from src.config_logging import get_logger
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
+from src.constants import EPS
+from src.utils import get_logger
+from src.features.range_volatility_core import (
+    _compute_range_ratios,
+    _rolling_garman_klass,
+    _rolling_parkinson,
+    _rolling_rogers_satchell,
+    _rolling_yang_zhang,
+)
 
 logger = get_logger(__name__)
 
@@ -56,72 +58,15 @@ __all__ = [
     "compute_rogers_satchell_volatility",
     "compute_yang_zhang_volatility",
     "compute_range_ratios",
+    # Aliases for backward compatibility
+    "compute_parkinson",
+    "compute_garman_klass",
+    "compute_rogers_satchell",
+    "compute_yang_zhang",
+    "compute_all_range_volatility",
+    "compute_body_ratio",
+    "compute_range_ratio",
 ]
-
-
-# =============================================================================
-# PARKINSON VOLATILITY
-# =============================================================================
-
-
-@njit(cache=True)
-def _parkinson_single(high: float, low: float) -> float:
-    """Compute single-bar Parkinson variance.
-
-    σ²_Park = (1 / 4·ln(2)) · (ln(H/L))²
-
-    Args:
-        high: High price.
-        low: Low price.
-
-    Returns:
-        Parkinson variance estimate.
-    """
-    if np.isnan(high) or np.isnan(low) or low <= 0 or high <= 0:
-        return np.nan
-
-    log_hl = np.log(high / low)
-    return (log_hl ** 2) / (4.0 * np.log(2.0))
-
-
-@njit(cache=True)
-def _rolling_parkinson(
-    high: NDArray[np.float64],
-    low: NDArray[np.float64],
-    window: int,
-) -> NDArray[np.float64]:
-    """Compute rolling Parkinson volatility (numba optimized).
-
-    Args:
-        high: Array of high prices.
-        low: Array of low prices.
-        window: Rolling window size.
-
-    Returns:
-        Array of Parkinson volatility (standard deviation).
-    """
-    n = len(high)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    for i in range(window - 1, n):
-        var_sum = 0.0
-        count = 0
-
-        for j in range(window):
-            idx = i - j
-            var = _parkinson_single(high[idx], low[idx])
-            if not np.isnan(var):
-                var_sum += var
-                count += 1
-
-        if count > 0:
-            # Average variance, then sqrt for volatility
-            result[i] = np.sqrt(var_sum / count)
-
-    return result
 
 
 def compute_parkinson_volatility(
@@ -145,10 +90,6 @@ def compute_parkinson_volatility(
 
     Returns:
         DataFrame with Parkinson volatility columns.
-
-    Example:
-        >>> df_vol = compute_parkinson_volatility(df_bars)
-        >>> df_bars = pd.concat([df_bars, df_vol], axis=1)
     """
     if windows is None:
         windows = [5, 10, 20]
@@ -166,94 +107,8 @@ def compute_parkinson_volatility(
         if len(valid) > 0:
             logger.info(
                 "Parkinson volatility (k=%d) stats: mean=%.6f, std=%.6f",
-                k,
-                np.mean(valid),
-                np.std(valid),
+                k, np.mean(valid), np.std(valid),
             )
-
-    return result
-
-
-# =============================================================================
-# GARMAN-KLASS VOLATILITY
-# =============================================================================
-
-
-@njit(cache=True)
-def _garman_klass_single(
-    high: float,
-    low: float,
-    open_: float,
-    close: float,
-) -> float:
-    """Compute single-bar Garman-Klass variance.
-
-    σ²_GK = 0.5·(ln(H/L))² - (2·ln(2) - 1)·(ln(C/O))²
-
-    Args:
-        high: High price.
-        low: Low price.
-        open_: Open price.
-        close: Close price.
-
-    Returns:
-        Garman-Klass variance estimate.
-    """
-    if (np.isnan(high) or np.isnan(low) or np.isnan(open_) or np.isnan(close)
-            or low <= 0 or high <= 0 or open_ <= 0 or close <= 0):
-        return np.nan
-
-    log_hl = np.log(high / low)
-    log_co = np.log(close / open_)
-
-    return 0.5 * (log_hl ** 2) - (2.0 * np.log(2.0) - 1.0) * (log_co ** 2)
-
-
-@njit(cache=True)
-def _rolling_garman_klass(
-    high: NDArray[np.float64],
-    low: NDArray[np.float64],
-    open_: NDArray[np.float64],
-    close: NDArray[np.float64],
-    window: int,
-) -> NDArray[np.float64]:
-    """Compute rolling Garman-Klass volatility (numba optimized).
-
-    Args:
-        high: Array of high prices.
-        low: Array of low prices.
-        open_: Array of open prices.
-        close: Array of close prices.
-        window: Rolling window size.
-
-    Returns:
-        Array of Garman-Klass volatility.
-    """
-    n = len(high)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    for i in range(window - 1, n):
-        var_sum = 0.0
-        count = 0
-
-        for j in range(window):
-            idx = i - j
-            var = _garman_klass_single(high[idx], low[idx], open_[idx], close[idx])
-            if not np.isnan(var):
-                var_sum += var
-                count += 1
-
-        if count > 0:
-            avg_var = var_sum / count
-            # Handle potential negative variance (can happen with GK)
-            # Return 0 for non-positive variance (no volatility)
-            if avg_var > 0:
-                result[i] = np.sqrt(avg_var)
-            else:
-                result[i] = 0.0
 
     return result
 
@@ -282,10 +137,6 @@ def compute_garman_klass_volatility(
 
     Returns:
         DataFrame with Garman-Klass volatility columns.
-
-    Example:
-        >>> df_vol = compute_garman_klass_volatility(df_bars)
-        >>> df_bars = pd.concat([df_bars, df_vol], axis=1)
     """
     if windows is None:
         windows = [5, 10, 20]
@@ -305,95 +156,8 @@ def compute_garman_klass_volatility(
         if len(valid) > 0:
             logger.info(
                 "Garman-Klass volatility (k=%d) stats: mean=%.6f, std=%.6f",
-                k,
-                np.mean(valid),
-                np.std(valid),
+                k, np.mean(valid), np.std(valid),
             )
-
-    return result
-
-
-# =============================================================================
-# ROGERS-SATCHELL VOLATILITY
-# =============================================================================
-
-
-@njit(cache=True)
-def _rogers_satchell_single(
-    high: float,
-    low: float,
-    open_: float,
-    close: float,
-) -> float:
-    """Compute single-bar Rogers-Satchell variance.
-
-    σ²_RS = ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O)
-
-    Args:
-        high: High price.
-        low: Low price.
-        open_: Open price.
-        close: Close price.
-
-    Returns:
-        Rogers-Satchell variance estimate.
-    """
-    if (np.isnan(high) or np.isnan(low) or np.isnan(open_) or np.isnan(close)
-            or low <= 0 or high <= 0 or open_ <= 0 or close <= 0):
-        return np.nan
-
-    log_hc = np.log(high / close)
-    log_ho = np.log(high / open_)
-    log_lc = np.log(low / close)
-    log_lo = np.log(low / open_)
-
-    return log_hc * log_ho + log_lc * log_lo
-
-
-@njit(cache=True)
-def _rolling_rogers_satchell(
-    high: NDArray[np.float64],
-    low: NDArray[np.float64],
-    open_: NDArray[np.float64],
-    close: NDArray[np.float64],
-    window: int,
-) -> NDArray[np.float64]:
-    """Compute rolling Rogers-Satchell volatility (numba optimized).
-
-    Args:
-        high: Array of high prices.
-        low: Array of low prices.
-        open_: Array of open prices.
-        close: Array of close prices.
-        window: Rolling window size.
-
-    Returns:
-        Array of Rogers-Satchell volatility.
-    """
-    n = len(high)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window:
-        return result
-
-    for i in range(window - 1, n):
-        var_sum = 0.0
-        count = 0
-
-        for j in range(window):
-            idx = i - j
-            var = _rogers_satchell_single(high[idx], low[idx], open_[idx], close[idx])
-            if not np.isnan(var):
-                var_sum += var
-                count += 1
-
-        if count > 0:
-            avg_var = var_sum / count
-            # Return 0 for non-positive variance (no volatility)
-            if avg_var > 0:
-                result[i] = np.sqrt(avg_var)
-            else:
-                result[i] = 0.0
 
     return result
 
@@ -422,10 +186,6 @@ def compute_rogers_satchell_volatility(
 
     Returns:
         DataFrame with Rogers-Satchell volatility columns.
-
-    Example:
-        >>> df_vol = compute_rogers_satchell_volatility(df_bars)
-        >>> df_bars = pd.concat([df_bars, df_vol], axis=1)
     """
     if windows is None:
         windows = [5, 10, 20]
@@ -445,133 +205,8 @@ def compute_rogers_satchell_volatility(
         if len(valid) > 0:
             logger.info(
                 "Rogers-Satchell volatility (k=%d) stats: mean=%.6f, std=%.6f",
-                k,
-                np.mean(valid),
-                np.std(valid),
+                k, np.mean(valid), np.std(valid),
             )
-
-    return result
-
-
-# =============================================================================
-# YANG-ZHANG VOLATILITY
-# =============================================================================
-
-
-@njit(cache=True)
-def _rolling_yang_zhang(
-    high: NDArray[np.float64],
-    low: NDArray[np.float64],
-    open_: NDArray[np.float64],
-    close: NDArray[np.float64],
-    window: int,
-) -> NDArray[np.float64]:
-    """Compute rolling Yang-Zhang volatility (numba optimized).
-
-    σ²_YZ = σ²_overnight + k·σ²_open + (1-k)·σ²_RS
-
-    Where:
-        σ²_overnight = Var(ln(O_t / C_{t-1}))
-        σ²_open = Var(ln(C_t / O_t))
-        k = 0.34 / (1.34 + (n+1)/(n-1))
-
-    Args:
-        high: Array of high prices.
-        low: Array of low prices.
-        open_: Array of open prices.
-        close: Array of close prices.
-        window: Rolling window size.
-
-    Returns:
-        Array of Yang-Zhang volatility.
-    """
-    n = len(high)
-    result = np.full(n, np.nan, dtype=np.float64)
-
-    if n < window + 1:
-        return result
-
-    # k coefficient
-    k = 0.34 / (1.34 + (window + 1.0) / (window - 1.0))
-
-    for i in range(window, n):
-        # Collect window data (need previous close for overnight)
-        overnight_returns = np.zeros(window, dtype=np.float64)
-        open_close_returns = np.zeros(window, dtype=np.float64)
-        rs_vars = np.zeros(window, dtype=np.float64)
-        count = 0
-
-        for j in range(window):
-            idx = i - j
-            prev_close = close[idx - 1]
-
-            if (np.isnan(high[idx]) or np.isnan(low[idx]) or
-                    np.isnan(open_[idx]) or np.isnan(close[idx]) or
-                    np.isnan(prev_close) or prev_close <= 0 or
-                    open_[idx] <= 0 or close[idx] <= 0 or
-                    high[idx] <= 0 or low[idx] <= 0):
-                continue
-
-            # Overnight return: ln(O_t / C_{t-1})
-            overnight_returns[count] = np.log(open_[idx] / prev_close)
-
-            # Open-to-close return: ln(C_t / O_t)
-            open_close_returns[count] = np.log(close[idx] / open_[idx])
-
-            # Rogers-Satchell variance
-            rs_vars[count] = _rogers_satchell_single(
-                high[idx], low[idx], open_[idx], close[idx]
-            )
-            count += 1
-
-        if count < 2:
-            continue
-
-        # Compute variances
-        overnight = overnight_returns[:count]
-        open_close = open_close_returns[:count]
-        rs = rs_vars[:count]
-
-        # Overnight variance
-        overnight_mean = 0.0
-        for val in overnight:
-            overnight_mean += val
-        overnight_mean /= count
-
-        overnight_var = 0.0
-        for val in overnight:
-            overnight_var += (val - overnight_mean) ** 2
-        overnight_var /= (count - 1)
-
-        # Open-close variance
-        open_close_mean = 0.0
-        for val in open_close:
-            open_close_mean += val
-        open_close_mean /= count
-
-        open_close_var = 0.0
-        for val in open_close:
-            open_close_var += (val - open_close_mean) ** 2
-        open_close_var /= (count - 1)
-
-        # Average RS variance
-        rs_var = 0.0
-        rs_count = 0
-        for val in rs:
-            if not np.isnan(val):
-                rs_var += val
-                rs_count += 1
-        if rs_count > 0:
-            rs_var /= rs_count
-
-        # Yang-Zhang variance
-        yz_var = overnight_var + k * open_close_var + (1.0 - k) * rs_var
-
-        # Return 0 for non-positive variance (no volatility)
-        if yz_var > 0:
-            result[i] = np.sqrt(yz_var)
-        else:
-            result[i] = 0.0
 
     return result
 
@@ -601,10 +236,6 @@ def compute_yang_zhang_volatility(
 
     Returns:
         DataFrame with Yang-Zhang volatility columns.
-
-    Example:
-        >>> df_vol = compute_yang_zhang_volatility(df_bars)
-        >>> df_bars = pd.concat([df_bars, df_vol], axis=1)
     """
     if windows is None:
         windows = [5, 10, 20]
@@ -624,63 +255,10 @@ def compute_yang_zhang_volatility(
         if len(valid) > 0:
             logger.info(
                 "Yang-Zhang volatility (k=%d) stats: mean=%.6f, std=%.6f",
-                k,
-                np.mean(valid),
-                np.std(valid),
+                k, np.mean(valid), np.std(valid),
             )
 
     return result
-
-
-# =============================================================================
-# RANGE RATIOS
-# =============================================================================
-
-
-@njit(cache=True)
-def _compute_range_ratios(
-    high: NDArray[np.float64],
-    low: NDArray[np.float64],
-    open_: NDArray[np.float64],
-    close: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Compute range-based ratios (numba optimized).
-
-    Args:
-        high: Array of high prices.
-        low: Array of low prices.
-        open_: Array of open prices.
-        close: Array of close prices.
-
-    Returns:
-        Tuple of (range_ratio, body_ratio).
-    """
-    n = len(high)
-    range_ratio = np.full(n, np.nan, dtype=np.float64)
-    body_ratio = np.full(n, np.nan, dtype=np.float64)
-
-    for i in range(n):
-        h, l, o, c = high[i], low[i], open_[i], close[i]
-
-        if np.isnan(h) or np.isnan(l) or np.isnan(o) or np.isnan(c):
-            continue
-
-        if c <= 0:
-            continue
-
-        hl_range = h - l
-
-        # Range ratio: (H - L) / C
-        range_ratio[i] = hl_range / c
-
-        # Body ratio: |C - O| / (H - L)
-        # When range is 0 (high == low), body ratio is 0 (no body possible)
-        if hl_range > 1e-10:
-            body_ratio[i] = abs(c - o) / hl_range
-        else:
-            body_ratio[i] = 0.0
-
-    return range_ratio, body_ratio
 
 
 def compute_range_ratios(
@@ -710,10 +288,6 @@ def compute_range_ratios(
 
     Returns:
         DataFrame with range_ratio and body_ratio columns.
-
-    Example:
-        >>> df_ratios = compute_range_ratios(df_bars)
-        >>> df_bars = pd.concat([df_bars, df_ratios], axis=1)
     """
     high = df_bars[high_col].values.astype(np.float64)
     low = df_bars[low_col].values.astype(np.float64)
@@ -726,24 +300,81 @@ def compute_range_ratios(
     result["range_ratio"] = range_ratio
     result["body_ratio"] = body_ratio
 
-    # Log statistics
     valid_range = range_ratio[~np.isnan(range_ratio)]
     valid_body = body_ratio[~np.isnan(body_ratio)]
 
     if len(valid_range) > 0:
         logger.info(
             "Range ratio stats: mean=%.6f, std=%.6f, min=%.6f, max=%.6f",
-            np.mean(valid_range),
-            np.std(valid_range),
-            np.min(valid_range),
-            np.max(valid_range),
+            np.mean(valid_range), np.std(valid_range),
+            np.min(valid_range), np.max(valid_range),
         )
 
     if len(valid_body) > 0:
         logger.info(
             "Body ratio stats: mean=%.4f, std=%.4f (1=directional, 0=doji)",
-            np.mean(valid_body),
-            np.std(valid_body),
+            np.mean(valid_body), np.std(valid_body),
         )
 
     return result
+
+
+# =============================================================================
+# BACKWARD COMPATIBILITY ALIASES
+# =============================================================================
+
+
+def compute_parkinson(
+    df_bars: pd.DataFrame,
+    windows: list[int] | None = None,
+) -> pd.DataFrame:
+    """Alias for compute_parkinson_volatility."""
+    return compute_parkinson_volatility(df_bars, windows=windows)
+
+
+def compute_garman_klass(
+    df_bars: pd.DataFrame,
+    windows: list[int] | None = None,
+) -> pd.DataFrame:
+    """Alias for compute_garman_klass_volatility."""
+    return compute_garman_klass_volatility(df_bars, windows=windows)
+
+
+def compute_rogers_satchell(
+    df_bars: pd.DataFrame,
+    windows: list[int] | None = None,
+) -> pd.DataFrame:
+    """Alias for compute_rogers_satchell_volatility."""
+    return compute_rogers_satchell_volatility(df_bars, windows=windows)
+
+
+def compute_yang_zhang(
+    df_bars: pd.DataFrame,
+    windows: list[int] | None = None,
+) -> pd.DataFrame:
+    """Alias for compute_yang_zhang_volatility."""
+    return compute_yang_zhang_volatility(df_bars, windows=windows)
+
+
+def compute_all_range_volatility(
+    df_bars: pd.DataFrame,
+    windows: list[int] | None = None,
+) -> pd.DataFrame:
+    """Compute all range-based volatility estimators."""
+    results = []
+    results.append(compute_parkinson_volatility(df_bars, windows=windows))
+    results.append(compute_garman_klass_volatility(df_bars, windows=windows))
+    results.append(compute_rogers_satchell_volatility(df_bars, windows=windows))
+    results.append(compute_yang_zhang_volatility(df_bars, windows=windows))
+    results.append(compute_range_ratios(df_bars))
+    return pd.concat(results, axis=1)
+
+
+def compute_body_ratio(df_bars: pd.DataFrame) -> pd.Series:
+    """Compute body ratio only."""
+    return pd.Series(compute_range_ratios(df_bars)["body_ratio"])
+
+
+def compute_range_ratio(df_bars: pd.DataFrame) -> pd.Series:
+    """Compute range ratio only."""
+    return pd.Series(compute_range_ratios(df_bars)["range_ratio"])

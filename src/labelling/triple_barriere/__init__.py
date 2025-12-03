@@ -39,10 +39,12 @@ from src.labelling.triple_barriere.fast_barriers import (
     update_all_t1_with_barriers_numba,
     compute_all_returns_and_labels_numba,
 )
+from src.labelling.triple_barriere.main import main as run_triple_barrier
 
 __all__ = [
     # High-level API
     "get_events_primary_fast",
+    "run_triple_barrier",
     # Full pipeline
     "compute_triple_barrier_labels_full",
     # Modular functions

@@ -7,13 +7,26 @@ Module de labellisation selon la methodologie De Prado (AFML Chapter 3).
 ```
 labelling/
 ├── label_primaire/    # Modele primaire (prediction direction)
-│   ├── main.py        # Point d'entree
-│   ├── opti.py        # Optimisation hyperparametres
-│   ├── train.py       # Entrainement
-│   ├── eval.py        # Evaluation
+│   ├── opti/          # Optimisation hyperparametres
+│   │   ├── __init__.py
+│   │   └── main.py
+│   ├── train/         # Entrainement
+│   │   ├── __init__.py
+│   │   └── main.py
+│   ├── eval/          # Evaluation
+│   │   ├── __init__.py
+│   │   └── main.py
 │   └── utils.py       # Utilitaires
 ├── label_meta/        # Meta-labelling (bet sizing)
-│   ├── opti.py        # Optimisation
+│   ├── opti/          # Optimisation
+│   │   ├── __init__.py
+│   │   └── main.py
+│   ├── train/         # Entrainement
+│   │   ├── __init__.py
+│   │   └── main.py
+│   ├── eval/          # Evaluation
+│   │   ├── __init__.py
+│   │   └── main.py
 │   └── utils.py       # Utilitaires
 └── __init__.py
 ```
@@ -50,13 +63,18 @@ Le label est determine par la premiere barriere touchee.
 
 ```bash
 # 1. Optimisation des hyperparametres
-python -m src.labelling.label_primaire.opti
+python -m src.labelling.label_primaire.opti.main
 
 # 2. Entrainement
-python -m src.labelling.label_primaire.train
+python -m src.labelling.label_primaire.train.main
 
 # 3. Evaluation
-python -m src.labelling.label_primaire.eval
+python -m src.labelling.label_primaire.eval.main
+
+# Meta-labelling (bet sizing)
+python -m src.labelling.label_meta.opti.main
+python -m src.labelling.label_meta.train.main
+python -m src.labelling.label_meta.eval.main
 ```
 
 ## Fonctions Principales

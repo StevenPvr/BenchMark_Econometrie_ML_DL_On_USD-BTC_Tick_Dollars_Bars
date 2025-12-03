@@ -20,14 +20,9 @@ from src.constants import (
 )
 from src.data_preparation.preparation import (
     add_log_returns_to_bars_file,
-    run_dollar_bars_pipeline,
     run_dollar_bars_pipeline_batch,
 )
-from src.path import (
-    DATASET_CLEAN_PARQUET,
-    DOLLAR_BARS_PARQUET,
-    DOLLAR_BARS_CSV,
-)
+from src.path import DATASET_CLEAN_PARQUET, DOLLAR_BARS_PARQUET
 from src.utils import get_logger
 
 logger = get_logger(__name__)
@@ -62,18 +57,22 @@ def main() -> None:
             include_incomplete_final=DOLLAR_BARS_INCLUDE_INCOMPLETE_FINAL,
         )
 
-        logger.info("✓ Dollar bars generation completed")
-        logger.info("  • Bars generated: %d", len(df_bars))
-        logger.info("  • Output saved to:")
-        logger.info("    - %s", DOLLAR_BARS_PARQUET)
-        logger.info("    - %s", DOLLAR_BARS_CSV)
+        logger.info("Dollar bars generation completed")
+        logger.info("  Bars generated: %d", len(df_bars))
+        logger.info("  Output saved to: %s", DOLLAR_BARS_PARQUET)
 
         # Log basic statistics
-        if not df_bars.empty and 'close' in df_bars.columns:
-            logger.info("  • Price range: %.2f - %.2f",
-                       df_bars['close'].min(), df_bars['close'].max())
-            logger.info("  • Date range: %s - %s",
-                       df_bars.index.min(), df_bars.index.max())
+        if not df_bars.empty and "close" in df_bars.columns:
+            logger.info(
+                "  Price range: %.2f - %.2f",
+                df_bars["close"].min(),
+                df_bars["close"].max(),
+            )
+            logger.info(
+                "  Date range: %s - %s",
+                df_bars.index.min(),
+                df_bars.index.max(),
+            )
 
         # Add log returns (natural) into the consolidated dollar_bars dataset
         logger.info("=" * 60)

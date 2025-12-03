@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numba import njit  # type: ignore[import-untyped]
 
-from src.config_logging import get_logger
+from src.utils import get_logger
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray

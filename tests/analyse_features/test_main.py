@@ -28,7 +28,7 @@ class TestMain:
     @patch("src.analyse_features.main.run_target_analysis")
     @patch("src.analyse_features.main.run_clustering_analysis")
     @patch("src.analyse_features.main.run_temporal_analysis")
-    @patch("src.analyse_features.main.save_full_summary")
+    @patch("src.analyse_features.main._save_full_summary")
     @patch("src.analyse_features.main.ensure_directories")
     def test_run_all_analyses(self, mock_ensure, mock_save, mock_temporal, mock_cluster,
                              mock_target, mock_multi, mock_stat, mock_corr, sample_df):

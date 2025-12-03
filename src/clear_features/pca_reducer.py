@@ -9,46 +9,64 @@ Note: Data is assumed to already be normalized/standardized before PCA.
 from __future__ import annotations
 
 import json
-import logging
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
-import joblib  # type: ignore[import-untyped]
+import joblib
 import numpy as np
-import pandas as pd  # type: ignore[import-untyped]
-from sklearn.decomposition import PCA, IncrementalPCA  # type: ignore[import-untyped]
+import pandas as pd
+from sklearn.decomposition import PCA, IncrementalPCA
 
 from src.clear_features.config import (
     FEATURE_CATEGORIES_FILE,
+    META_COLUMNS,
     PCA_ARTIFACTS_DIR,
     PCA_CONFIG,
-    META_COLUMNS,
     TARGET_COLUMN,
 )
+from src.config_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _to_python_type(val: Any) -> Any:
-    """Convert numpy types to Python native types for JSON serialization."""
-    if isinstance(val, (np.integer, np.int64, np.int32)):  # type: ignore
+    """Convert numpy types to Python native types for JSON serialization.
+
+    Args:
+        val: Value to convert (can be numpy or native type).
+
+    Returns:
+        Python native type equivalent.
+    """
+    if isinstance(val, (int, np.integer)):
         return int(val)
-    elif isinstance(val, (np.floating, np.float64, np.float32)):  # type: ignore
+    if isinstance(val, (float, np.floating)):
         return float(val) if not np.isnan(val) else None
-    elif isinstance(val, np.ndarray):
+    if isinstance(val, np.ndarray):
         return [_to_python_type(v) for v in val]
-    elif isinstance(val, dict):
+    if isinstance(val, dict):
         return {k: _to_python_type(v) for k, v in val.items()}
-    elif isinstance(val, list):
+    if isinstance(val, list):
         return [_to_python_type(v) for v in val]
     return val
 
 
 @dataclass
 class GroupPCAResult:
-    """Result of PCA applied to a single feature group."""
+    """Result of PCA applied to a single feature group.
+
+    Attributes:
+        group_name: Name of the feature group.
+        category: Category of the group (e.g., momentum, volatility).
+        lag: Lag identifier for the group.
+        original_features: List of original feature names.
+        n_original: Number of original features.
+        n_components: Number of PCA components retained.
+        explained_variance_ratio: Variance explained by each component.
+        cumulative_variance: Cumulative variance explained.
+        component_names: Names of the PCA component columns.
+    """
 
     group_name: str
     category: str
@@ -61,7 +79,11 @@ class GroupPCAResult:
     component_names: list[str]
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization.
+
+        Returns:
+            Dictionary representation of the result.
+        """
         return _to_python_type({
             "group_name": self.group_name,
             "category": self.category,
@@ -77,7 +99,17 @@ class GroupPCAResult:
 
 @dataclass
 class PCAReductionSummary:
-    """Summary of all PCA reductions applied."""
+    """Summary of all PCA reductions applied.
+
+    Attributes:
+        groups_processed: List of processed group results.
+        groups_skipped: Names of groups that were skipped.
+        features_removed: Features replaced by PCA components.
+        features_added: New PCA component names.
+        features_kept: Features not affected by PCA.
+        original_n_features: Total features before PCA.
+        final_n_features: Total features after PCA.
+    """
 
     groups_processed: list[GroupPCAResult] = field(default_factory=list)
     groups_skipped: list[str] = field(default_factory=list)
@@ -88,7 +120,11 @@ class PCAReductionSummary:
     final_n_features: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization.
+
+        Returns:
+            Dictionary representation of the summary.
+        """
         return _to_python_type({
             "n_groups_processed": len(self.groups_processed),
             "n_groups_skipped": len(self.groups_skipped),
@@ -145,7 +181,11 @@ class GroupPCAReducer:
             data = json.load(f)
 
         self._feature_groups = data.get("groups", [])
-        logger.info(f"Loaded {len(self._feature_groups)} feature groups from {self.categories_file}")
+        logger.info(
+            "Loaded %d feature groups from %s",
+            len(self._feature_groups),
+            self.categories_file,
+        )
 
     def _determine_n_components(
         self, pca: PCA, variance_threshold: float
@@ -170,7 +210,7 @@ class GroupPCAReducer:
             raise ValueError("DataFrame must have 'split' column to identify training data")
 
         df_train = df[df["split"] == "train"].copy()
-        logger.info(f"Fitting PCA on training data: {len(df_train)} rows")
+        logger.info("Fitting PCA on training data: %d rows", len(df_train))
 
         # Get all feature columns (excluding metadata and target)
         excluded_cols = set(META_COLUMNS) | {TARGET_COLUMN}
@@ -191,7 +231,10 @@ class GroupPCAReducer:
 
             # Skip pca_clusters group (old PCA features to be removed)
             if category == "pca_clusters":
-                logger.info(f"Skipping group '{group_name}' (pca_clusters category - will be removed)")
+                logger.info(
+                    "Skipping group '%s' (pca_clusters category - will be removed)",
+                    group_name,
+                )
                 self._summary.groups_skipped.append(group_name)
                 # Mark these features for removal
                 available_features = [f for f in features if f in df_train.columns]
@@ -205,11 +248,11 @@ class GroupPCAReducer:
             if len(available_features) < 2:
                 # Keep single features as-is (no PCA needed)
                 if len(available_features) == 1:
-                    logger.debug(f"Group '{group_name}': Single feature, keeping as-is")
+                    logger.debug("Group '%s': Single feature, keeping as-is", group_name)
                     self._summary.features_kept.extend(available_features)
                     features_in_groups.update(available_features)
                 else:
-                    logger.warning(f"Group '{group_name}': No features available, skipping")
+                    logger.warning("Group '%s': No features available, skipping", group_name)
                 self._summary.groups_skipped.append(group_name)
                 continue
 
@@ -222,7 +265,11 @@ class GroupPCAReducer:
             inf_mask = np.isinf(X_train)
             if inf_mask.any():
                 n_inf = inf_mask.sum()
-                logger.warning(f"Group '{group_name}': Found {n_inf} inf values, replacing with NaN for imputation")
+                logger.warning(
+                    "Group '%s': Found %d inf values, replacing with NaN for imputation",
+                    group_name,
+                    n_inf,
+                )
                 X_train[inf_mask] = np.nan
 
             # Handle NaN values (use median imputation from training data)
@@ -233,13 +280,16 @@ class GroupPCAReducer:
             self._imputation_medians[group_name] = col_medians
 
             if np.isnan(X_train).any():
-                logger.warning(f"Group '{group_name}': Found NaN values, using median imputation")
+                logger.warning("Group '%s': Found NaN values, using median imputation", group_name)
                 nan_mask = np.isnan(X_train)
                 X_train[nan_mask] = np.take(col_medians, np.where(nan_mask)[1])
 
             # Final check for any remaining non-finite values
             if not np.isfinite(X_train).all():
-                logger.error(f"Group '{group_name}': Still has non-finite values after imputation, skipping")
+                logger.error(
+                    "Group '%s': Still has non-finite values after imputation, skipping",
+                    group_name,
+                )
                 self._summary.groups_skipped.append(group_name)
                 continue
 
@@ -404,7 +454,7 @@ class GroupPCAReducer:
         # Also remove old pca_cluster features (from previous PCA)
         old_pca_cols = [c for c in df_columns if c.startswith("pca_cluster")]
         if old_pca_cols:
-            logger.info(f"Removing {len(old_pca_cols)} old pca_cluster features")
+            logger.info("Removing %d old pca_cluster features", len(old_pca_cols))
             columns_to_drop.update(old_pca_cols)
 
         # Build result DataFrame in one operation
@@ -451,13 +501,13 @@ class GroupPCAReducer:
             "imputation_medians": self._imputation_medians,
             "standardization_params": self._standardization_params,
         }, models_file)
-        logger.info(f"Saved PCA models to {models_file}")
+        logger.info("Saved PCA models to %s", models_file)
 
         # Save summary as JSON
         summary_file = output_dir / "pca_summary.json"
         with open(summary_file, "w") as f:
             json.dump(self._summary.to_dict(), f, indent=2)
-        logger.info(f"Saved summary to {summary_file}")
+        logger.info("Saved summary to %s", summary_file)
 
     def load_artifacts(self, input_dir: Path = PCA_ARTIFACTS_DIR) -> None:
         """Load previously saved PCA models, imputation medians, and standardization params."""
@@ -500,7 +550,7 @@ class GroupPCAReducer:
             self._summary.groups_processed.append(result)
 
         self._is_fitted = True
-        logger.info(f"Loaded PCA artifacts from {input_dir}")
+        logger.info("Loaded PCA artifacts from %s", input_dir)
 
 
 class IncrementalGroupPCAReducer:
@@ -559,7 +609,7 @@ class IncrementalGroupPCAReducer:
             data = json.load(f)
 
         self._feature_groups = data.get("groups", [])
-        logger.info(f"Loaded {len(self._feature_groups)} feature groups")
+        logger.info("Loaded %d feature groups", len(self._feature_groups))
 
     def partial_fit(self, df_batch: pd.DataFrame) -> None:
         """Incrementally fit PCA on a batch of TRAIN data.
@@ -659,11 +709,11 @@ class IncrementalGroupPCAReducer:
             try:
                 self._ipca_models[group_name].partial_fit(X_std)
             except Exception as e:
-                logger.warning(f"Group '{group_name}': partial_fit failed: {e}")
+                logger.warning("Group '%s': partial_fit failed: %s", group_name, e)
                 self._groups_to_skip.add(group_name)
 
         if self._n_batches_seen % 5 == 0:
-            logger.info(f"  Partial fit batch {self._n_batches_seen} complete")
+            logger.info("  Partial fit batch %d complete", self._n_batches_seen)
 
     def finalize_fit(self) -> PCAReductionSummary:
         """Finalize the incremental fit and determine optimal n_components.
@@ -854,13 +904,13 @@ class IncrementalGroupPCAReducer:
             "group_features": self._group_features,
             "is_incremental": True,
         }, models_file)
-        logger.info(f"Saved incremental PCA models to {models_file}")
+        logger.info("Saved incremental PCA models to %s", models_file)
 
         # Save summary
         summary_file = output_dir / "pca_summary.json"
         with open(summary_file, "w") as f:
             json.dump(self._summary.to_dict(), f, indent=2)
-        logger.info(f"Saved summary to {summary_file}")
+        logger.info("Saved summary to %s", summary_file)
 
     def load_artifacts(self, input_dir: Path = PCA_ARTIFACTS_DIR) -> None:
         """Load previously saved artifacts."""
@@ -914,4 +964,4 @@ class IncrementalGroupPCAReducer:
 
         self._is_fitted = True
         self._fit_finalized = True
-        logger.info(f"Loaded PCA artifacts from {input_dir}")
+        logger.info("Loaded PCA artifacts from %s", input_dir)

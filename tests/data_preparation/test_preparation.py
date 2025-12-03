@@ -17,11 +17,12 @@ from src.data_preparation.preparation import (
     _create_empty_bars_df
 )
 
-# Mock src.config_logging to avoid console spam or errors
+# Mock loggers in submodules to avoid console spam or errors
 @pytest.fixture(autouse=True)
 def mock_logger():
-    with patch("src.data_preparation.preparation.logger") as mock:
-        yield mock
+    with patch("src.data_preparation.dollar_bars.logger") as mock1, \
+         patch("src.data_preparation.pipeline.logger") as mock2:
+        yield mock1
 
 @pytest.fixture
 def basic_df():
@@ -58,7 +59,7 @@ class TestNumbaFunctions:
         # threshold is simple mean = 109.0
         # min is 0.5 * threshold = 54.5
         # max is 2.0 * threshold = 218.0
-        t, t_min, t_max = _compute_robust_percentile_threshold(dollar_values, 10, 50.0)
+        t, t_min, t_max = _compute_robust_percentile_threshold(dollar_values, 10)
 
         assert t == 109.0
         assert t_min == 54.5

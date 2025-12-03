@@ -1,38 +1,52 @@
-"""Log transformation for non-stationary features."""
+"""Log transformation for non-stationary features.
+
+Applies log transformations to features identified as non-stationary
+by the stationarity analysis module.
+"""
 
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import joblib 
+import joblib
 import numpy as np
 import pandas as pd
 
 from src.clear_features.config import (
-    STATIONARITY_RESULTS_FILE,
     LOG_TRANSFORM_ARTIFACTS_DIR,
     LOG_TRANSFORM_CONFIG,
     META_COLUMNS,
+    STATIONARITY_RESULTS_FILE,
     TARGET_COLUMN,
 )
+from src.config_logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
 class LogTransformResult:
-    """Result of log transformation analysis."""
+    """Result of log transformation analysis.
+
+    Attributes:
+        features_transformed: List of features that were transformed.
+        features_skipped: List of features that were skipped.
+        transform_params: Dict mapping feature name to transform parameters.
+    """
 
     features_transformed: list[str] = field(default_factory=list)
     features_skipped: list[str] = field(default_factory=list)
-    transform_params: dict[str, dict] = field(default_factory=dict)
+    transform_params: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization.
+
+        Returns:
+            Dictionary representation of the result.
+        """
         return {
             "n_transformed": len(self.features_transformed),
             "n_skipped": len(self.features_skipped),
@@ -43,27 +57,39 @@ class LogTransformResult:
 
 
 class LogTransformer:
-    """Applies log transformation to non-stationary features."""
+    """Applies log transformation to non-stationary features.
+
+    Uses stationarity test results to identify features that need transformation.
+    Supports multiple transform types: log, log1p, signed_log1p.
+    """
 
     def __init__(
         self,
         stationarity_file: Path = STATIONARITY_RESULTS_FILE,
-        config: dict | None = None,
-    ):
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialize log transformer.
+
+        Args:
+            stationarity_file: Path to stationarity test results JSON.
+            config: Log transform configuration dict.
+        """
         self.stationarity_file = stationarity_file
         self.config = config or LOG_TRANSFORM_CONFIG
 
-        self._stationarity_data: dict | None = None
+        self._stationarity_data: dict[str, Any] | None = None
         self._non_stationary_features: list[str] = []
-        self._transform_params: dict[str, dict] = {}
+        self._transform_params: dict[str, dict[str, Any]] = {}
         self._result: LogTransformResult | None = None
 
     def load_stationarity_results(self) -> None:
-        """Load stationarity test results from analyse_features."""
+        """Load stationarity test results from analyse_features module."""
         logger.info("Loading stationarity results from %s", self.stationarity_file)
 
         if not self.stationarity_file.exists():
-            logger.warning("Stationarity results file not found: %s", self.stationarity_file)
+            logger.warning(
+                "Stationarity results file not found: %s", self.stationarity_file
+            )
             self._stationarity_data = {"all_results": []}
             return
 
@@ -73,7 +99,14 @@ class LogTransformer:
         logger.info("Loaded stationarity results")
 
     def identify_non_stationary_features(self, df: pd.DataFrame) -> list[str]:
-        """Identify features that need log transformation based on stationarity tests."""
+        """Identify features that need log transformation based on stationarity tests.
+
+        Args:
+            df: DataFrame containing features to check.
+
+        Returns:
+            List of feature names identified as non-stationary.
+        """
         if self._stationarity_data is None:
             self.load_stationarity_results()
 
@@ -81,9 +114,7 @@ class LogTransformer:
             logger.error("Failed to load stationarity data")
             self._stationarity_data = {"all_results": []}
 
-        non_stationary_conclusions = cast(list[str], self.config["non_stationary_conclusions"])
-
-        # Get features from stationarity results
+        non_stationary_conclusions = self.config["non_stationary_conclusions"]
         all_results = self._stationarity_data.get("all_results", [])
 
         self._non_stationary_features = []
@@ -92,9 +123,7 @@ class LogTransformer:
             feature = item.get("feature", "")
             conclusion = item.get("stationarity_conclusion", "")
 
-            # Check if feature exists in dataframe and is non-stationary
             if feature in df.columns and conclusion in non_stationary_conclusions:
-                # Skip metadata and target columns
                 if feature not in META_COLUMNS and feature != TARGET_COLUMN:
                     self._non_stationary_features.append(feature)
 
@@ -106,16 +135,45 @@ class LogTransformer:
 
         return self._non_stationary_features
 
+    def _determine_transform_type(
+        self, min_val: float, min_threshold: float, use_log1p: bool
+    ) -> tuple[str, float]:
+        """Determine transformation type based on value range.
+
+        Args:
+            min_val: Minimum value in the feature.
+            min_threshold: Threshold for near-zero values.
+            use_log1p: Whether to prefer log1p over log.
+
+        Returns:
+            Tuple of (transform_type, shift_value).
+        """
+        if min_val < 0:
+            return "signed_log1p", 0.0
+        elif min_val < min_threshold:
+            shift = abs(min_val) + min_threshold if min_val <= 0 else 0.0
+            return "log1p", shift
+        else:
+            transform_type = "log" if not use_log1p else "log1p"
+            return transform_type, 0.0
+
     def fit(self, df: pd.DataFrame) -> LogTransformResult:
-        """Fit log transformer - compute parameters on training data."""
+        """Fit log transformer - compute parameters on training data.
+
+        Args:
+            df: DataFrame containing features to fit.
+
+        Returns:
+            LogTransformResult with transformation details.
+        """
         if not self._non_stationary_features:
             self.identify_non_stationary_features(df)
 
         self._result = LogTransformResult()
         self._transform_params = {}
 
-        use_log1p = self.config.get("use_log1p", True)
-        min_threshold = self.config.get("min_value_threshold", 1e-10)
+        use_log1p = bool(self.config.get("use_log1p", True))
+        min_threshold = float(self.config.get("min_value_threshold", 1e-10))  # type: ignore
 
         for feature in self._non_stationary_features:
             if feature not in df.columns:
@@ -129,30 +187,18 @@ class LogTransformer:
                 self._result.features_skipped.append(feature)
                 continue
 
-            # Compute parameters for transformation
-            min_val = np.min(valid_values)
-            max_val = np.max(valid_values)
+            min_val = float(np.min(valid_values))
+            max_val = float(np.max(valid_values))
 
-            # Determine transformation strategy based on value range
-            if min_val < 0:
-                # Values include negatives - use signed log transform
-                # log_transform = sign(x) * log1p(|x|)
-                transform_type = "signed_log1p"
-                shift = 0
-            elif min_val < min_threshold:
-                # Values include zeros or near-zeros - use log1p with shift
-                transform_type = "log1p"
-                shift = abs(min_val) + min_threshold if min_val <= 0 else 0
-            else:
-                # All positive values - use standard log
-                transform_type = "log" if not use_log1p else "log1p"
-                shift = 0
+            transform_type, shift = self._determine_transform_type(
+                min_val, min_threshold, use_log1p
+            )
 
             self._transform_params[feature] = {
                 "transform_type": transform_type,
-                "shift": float(shift),
-                "original_min": float(min_val),
-                "original_max": float(max_val),
+                "shift": shift,
+                "original_min": min_val,
+                "original_max": max_val,
             }
 
             self._result.features_transformed.append(feature)
@@ -166,8 +212,38 @@ class LogTransformer:
 
         return self._result
 
+    def _apply_transform(
+        self, values: np.ndarray, transform_type: str, shift: float
+    ) -> np.ndarray:
+        """Apply log transformation to values.
+
+        Args:
+            values: Array of values to transform.
+            transform_type: Type of transformation (log, log1p, signed_log1p).
+            shift: Shift value to add before transformation.
+
+        Returns:
+            Transformed values.
+        """
+        if transform_type == "signed_log1p":
+            return np.sign(values) * np.log1p(np.abs(values))
+        elif transform_type == "log1p":
+            return np.log1p(values + shift)
+        else:
+            return np.log(values + shift + 1e-10)
+
     def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply log transformation to features."""
+        """Apply log transformation to features.
+
+        Args:
+            df: DataFrame to transform.
+
+        Returns:
+            Transformed DataFrame.
+
+        Raises:
+            RuntimeError: If fit() was not called first.
+        """
         if not self._transform_params:
             raise RuntimeError("Must call fit() before transform()")
 
@@ -178,39 +254,40 @@ class LogTransformer:
                 continue
 
             values = result_df[feature].values.astype(np.float64)
-            transform_type = params["transform_type"]
-            shift = params["shift"]
-
-            if transform_type == "signed_log1p":
-                # sign(x) * log1p(|x|)
-                transformed = np.sign(values) * np.log1p(np.abs(values))
-            elif transform_type == "log1p":
-                # log1p(x + shift)
-                transformed = np.log1p(values + shift)
-            else:  # "log"
-                # log(x + shift)
-                transformed = np.log(values + shift + 1e-10)
-
+            transformed = self._apply_transform(
+                values, params["transform_type"], params["shift"]
+            )
             result_df[feature] = transformed
 
         return result_df
 
-    def fit_transform(self, df: pd.DataFrame) -> tuple[pd.DataFrame, LogTransformResult]:
-        """Fit and transform in one step."""
+    def fit_transform(
+        self, df: pd.DataFrame
+    ) -> tuple[pd.DataFrame, LogTransformResult]:
+        """Fit and transform in one step.
+
+        Args:
+            df: DataFrame to fit and transform.
+
+        Returns:
+            Tuple of (transformed DataFrame, LogTransformResult).
+        """
         result = self.fit(df)
         df_transformed = self.transform(df)
         return df_transformed, result
 
     def save_artifacts(self, output_dir: Path = LOG_TRANSFORM_ARTIFACTS_DIR) -> None:
-        """Save transformation artifacts."""
+        """Save transformation artifacts to disk.
+
+        Args:
+            output_dir: Directory to save artifacts to.
+        """
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save transform params
         params_file = output_dir / "log_transform_params.joblib"
         joblib.dump(self._transform_params, params_file)
         logger.info("Saved log transform params to %s", params_file)
 
-        # Save summary as JSON
         if self._result is not None:
             summary_file = output_dir / "log_transform_summary.json"
             with open(summary_file, "w") as f:
@@ -218,7 +295,11 @@ class LogTransformer:
             logger.info("Saved summary to %s", summary_file)
 
     def load_artifacts(self, input_dir: Path = LOG_TRANSFORM_ARTIFACTS_DIR) -> None:
-        """Load previously saved artifacts."""
+        """Load previously saved artifacts from disk.
+
+        Args:
+            input_dir: Directory containing saved artifacts.
+        """
         params_file = input_dir / "log_transform_params.joblib"
         self._transform_params = joblib.load(params_file)
         logger.info("Loaded log transform params from %s", params_file)

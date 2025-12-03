@@ -332,3 +332,35 @@ DATASET_FEATURES_LINEAR_LABEL_CSV = FEATURES_DIR / "dataset_features_linear_labe
 # Min-max scaled features with labels (for deep learning: LSTM)
 DATASET_FEATURES_LSTM_LABEL_PARQUET = FEATURES_DIR / "dataset_features_lstm_label.parquet"
 DATASET_FEATURES_LSTM_LABEL_CSV = FEATURES_DIR / "dataset_features_lstm_label.csv"
+
+# ============================================================================
+# FEATURE ANALYSIS DIRECTORIES AND FILES (analyse_features module)
+# ============================================================================
+
+ANALYSE_FEATURES_DIR = DATA_DIR / "analyse_features"
+ANALYSE_FEATURES_JSON_DIR = ANALYSE_FEATURES_DIR / "json"
+ANALYSE_FEATURES_PLOTS_HTML_DIR = ANALYSE_FEATURES_DIR / "plots" / "html"
+ANALYSE_FEATURES_PLOTS_PNG_DIR = ANALYSE_FEATURES_DIR / "plots" / "png"
+ANALYSE_FEATURES_CACHE_DIR = ANALYSE_FEATURES_DIR / "cache"
+
+# JSON result files
+CORRELATION_RESULTS_JSON = ANALYSE_FEATURES_JSON_DIR / "correlation_results.json"
+MULTICOLLINEARITY_RESULTS_JSON = ANALYSE_FEATURES_JSON_DIR / "multicollinearity_results.json"
+TARGET_RESULTS_JSON = ANALYSE_FEATURES_JSON_DIR / "target_results.json"
+CLUSTERING_RESULTS_JSON = ANALYSE_FEATURES_JSON_DIR / "clustering_results.json"
+TEMPORAL_RESULTS_JSON = ANALYSE_FEATURES_JSON_DIR / "temporal_results.json"
+ANALYSE_FEATURES_SUMMARY_JSON = ANALYSE_FEATURES_JSON_DIR / "analysis_summary.json"
+
+# Input datasets for analysis (from remove_correlated_features.py with '_final' suffix)
+ANALYSE_FEATURES_INPUT_DATASETS: dict[str, "Path"] = {
+    "tree_based": DATASET_FEATURES_FINAL_PARQUET,
+    "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+    "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
+}
+
+# Output datasets (with '_final' suffix - ready for labelling)
+ANALYSE_FEATURES_OUTPUT_DATASETS: dict[str, "Path"] = {
+    "tree_based": DATASET_FEATURES_FINAL_PARQUET,
+    "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+    "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
+}

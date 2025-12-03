@@ -9,7 +9,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from src.labelling.label_primaire.eval import (
+from src.labelling.label_primaire.eval.logic import (
     evaluate_model,
     compute_metrics,
     ClassificationMetrics,
@@ -141,15 +141,15 @@ def test_get_features_path(mocker):
     """Test getting features path for different model types."""
     # Mock the path constants
     mocker.patch(
-        "src.labelling.label_primaire.eval.DATASET_FEATURES_FINAL_PARQUET",
+        "src.labelling.label_primaire.eval.logic.DATASET_FEATURES_FINAL_PARQUET",
         Path("/path/to/tree.parquet")
     )
     mocker.patch(
-        "src.labelling.label_primaire.eval.DATASET_FEATURES_LINEAR_FINAL_PARQUET",
+        "src.labelling.label_primaire.eval.logic.DATASET_FEATURES_LINEAR_FINAL_PARQUET",
         Path("/path/to/linear.parquet")
     )
     mocker.patch(
-        "src.labelling.label_primaire.eval.DATASET_FEATURES_LSTM_FINAL_PARQUET",
+        "src.labelling.label_primaire.eval.logic.DATASET_FEATURES_LSTM_FINAL_PARQUET",
         Path("/path/to/lstm.parquet")
     )
 
@@ -169,7 +169,7 @@ def test_get_features_path(mocker):
 def test_get_labeled_features_path(mocker):
     """Test getting labeled features path."""
     mocker.patch(
-        "src.labelling.label_primaire.eval.DATASET_FEATURES_FINAL_PARQUET",
+        "src.labelling.label_primaire.eval.logic.DATASET_FEATURES_FINAL_PARQUET",
         Path("/path/to/features.parquet")
     )
 
@@ -181,7 +181,7 @@ def test_get_labeled_features_path(mocker):
 def test_get_trained_models_empty(tmp_path, mocker):
     """Test when no models are trained."""
     mocker.patch(
-        "src.labelling.label_primaire.eval.LABEL_PRIMAIRE_TRAIN_DIR",
+        "src.labelling.label_primaire.eval.logic.LABEL_PRIMAIRE_TRAIN_DIR",
         tmp_path
     )
 
@@ -192,7 +192,7 @@ def test_get_trained_models_empty(tmp_path, mocker):
 def test_get_trained_models(tmp_path, mocker):
     """Test listing trained models."""
     mocker.patch(
-        "src.labelling.label_primaire.eval.LABEL_PRIMAIRE_TRAIN_DIR",
+        "src.labelling.label_primaire.eval.logic.LABEL_PRIMAIRE_TRAIN_DIR",
         tmp_path
     )
 
@@ -212,7 +212,7 @@ def test_get_trained_models(tmp_path, mocker):
 def test_load_model_not_found(tmp_path, mocker):
     """Test loading when model not found."""
     mocker.patch(
-        "src.labelling.label_primaire.eval.LABEL_PRIMAIRE_TRAIN_DIR",
+        "src.labelling.label_primaire.eval.logic.LABEL_PRIMAIRE_TRAIN_DIR",
         tmp_path
     )
 
@@ -223,7 +223,7 @@ def test_load_model_not_found(tmp_path, mocker):
 def test_load_data_not_found(tmp_path, mocker):
     """Test loading data when file not found."""
     mocker.patch(
-        "src.labelling.label_primaire.eval.DATASET_FEATURES_FINAL_PARQUET",
+        "src.labelling.label_primaire.eval.logic.DATASET_FEATURES_FINAL_PARQUET",
         tmp_path / "nonexistent.parquet"
     )
 
@@ -239,7 +239,7 @@ def test_load_data_no_label_column(tmp_path, mocker):
     df.to_parquet(parquet_path)
 
     mocker.patch(
-        "src.labelling.label_primaire.eval.DATASET_FEATURES_FINAL_PARQUET",
+        "src.labelling.label_primaire.eval.logic.DATASET_FEATURES_FINAL_PARQUET",
         tmp_path / "features.parquet"
     )
 

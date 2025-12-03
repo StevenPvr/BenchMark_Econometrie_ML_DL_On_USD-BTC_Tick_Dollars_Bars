@@ -1,9 +1,23 @@
-"""Configuration for clear_features module - PCA reduction, log transform, and scaling."""
+"""Configuration for clear_features module - PCA reduction, log transform, and scaling.
+
+This module imports constants from constants.py and defines paths from path.py.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from src.constants import (
+    CLEAR_FEATURES_META_COLUMNS,
+    CLEAR_FEATURES_TARGET_COLUMN,
+    CLEAR_FEATURES_CORRELATION_METHOD,
+    CLEAR_FEATURES_CORRELATION_THRESHOLD,
+    CLEAR_FEATURES_CORRELATION_MIN_CLUSTER_SIZE,
+    CLEAR_FEATURES_CORRELATION_SAMPLE_SIZE,
+    CLEAR_FEATURES_PCA_VARIANCE_THRESHOLD,
+    CLEAR_FEATURES_LOG_NON_STATIONARY_CONCLUSIONS,
+    CLEAR_FEATURES_LOG_MIN_VALUE_THRESHOLD,
+    CLEAR_FEATURES_LOG_USE_LOG1P,
+    CLEAR_FEATURES_SAVE_BATCH_SIZE,
+)
 from src.path import (
     DATA_DIR,
     FEATURES_DIR,
@@ -17,6 +31,10 @@ from src.path import (
     ZSCORE_SCALER_FILE,
     MINMAX_SCALER_FILE,
 )
+
+# Re-export constants with module-level aliases for backward compatibility
+META_COLUMNS: list[str] = list(CLEAR_FEATURES_META_COLUMNS)
+TARGET_COLUMN: str = CLEAR_FEATURES_TARGET_COLUMN
 
 # Input/Output directories
 ANALYSE_FEATURES_DIR = DATA_DIR / "analyse_features"
@@ -49,55 +67,28 @@ DATASETS = INPUT_DATASETS
 # Reference dataset (for fitting PCA - use tree_based as it's unscaled)
 REFERENCE_DATASET = "tree_based"
 
-# Metadata columns to exclude from transformations
-META_COLUMNS = [
-    "bar_id",
-    "datetime_close",
-    "split",
-    # Technical lag index columns (not features)
-    "bar_id_lag1",
-    "bar_id_lag5",
-    "bar_id_lag10",
-    "bar_id_lag15",
-    "bar_id_lag25",
-    "bar_id_lag50",
-]
-
-# Target column (exclude from transformations)
-TARGET_COLUMN = "log_return"
-
-# Non-linear correlation configuration
-CORRELATION_CONFIG = {
-    # Method: 'spearman' (rank-based, recommended) or 'kendall'
-    "method": "spearman",
-    # Correlation threshold for clustering (finance-appropriate: 0.7-0.9)
-    # 0.8 is conservative and recommended for financial data
-    "threshold": 0.8,
-    # Minimum features in a cluster to apply PCA
-    "min_cluster_size": 2,
-    # Sample size for correlation computation (None = use all data)
-    "sample_size": 50000,
+# Non-linear correlation configuration (uses constants)
+CORRELATION_CONFIG: dict[str, str | float | int | None] = {
+    "method": CLEAR_FEATURES_CORRELATION_METHOD,
+    "threshold": CLEAR_FEATURES_CORRELATION_THRESHOLD,
+    "min_cluster_size": CLEAR_FEATURES_CORRELATION_MIN_CLUSTER_SIZE,
+    "sample_size": CLEAR_FEATURES_CORRELATION_SAMPLE_SIZE,
 }
 
-# PCA configuration
-PCA_CONFIG = {
-    # Variance explained threshold to determine n_components
-    "variance_explained_threshold": 0.90,
-    # Alternative: maximum number of components (None = use variance threshold)
+# PCA configuration (uses constants)
+PCA_CONFIG: dict[str, float | int | None] = {
+    "variance_explained_threshold": CLEAR_FEATURES_PCA_VARIANCE_THRESHOLD,
     "max_components": None,
 }
 
 # Feature categories file (for group-based PCA)
 FEATURE_CATEGORIES_FILE = FEATURES_DIR / "feature_categories.json"
 
-# Log transform configuration
-LOG_TRANSFORM_CONFIG = {
-    # Stationarity conclusions that trigger log transform
-    "non_stationary_conclusions": ["trend_stationary", "non_stationary"],
-    # Minimum value threshold for log transform (to avoid log(0))
-    "min_value_threshold": 1e-10,
-    # Whether to use log1p (log(1+x)) for values near zero
-    "use_log1p": True,
+# Log transform configuration (uses constants)
+LOG_TRANSFORM_CONFIG: dict[str, list[str] | float | bool] = {
+    "non_stationary_conclusions": list(CLEAR_FEATURES_LOG_NON_STATIONARY_CONCLUSIONS),
+    "min_value_threshold": CLEAR_FEATURES_LOG_MIN_VALUE_THRESHOLD,
+    "use_log1p": CLEAR_FEATURES_LOG_USE_LOG1P,
 }
 
 # Scaler files (fitted in features/main.py)
@@ -105,3 +96,6 @@ SCALER_CONFIG = {
     "zscore_scaler_path": ZSCORE_SCALER_FILE,
     "minmax_scaler_path": MINMAX_SCALER_FILE,
 }
+
+# Batch size for parquet saving
+SAVE_BATCH_SIZE = CLEAR_FEATURES_SAVE_BATCH_SIZE

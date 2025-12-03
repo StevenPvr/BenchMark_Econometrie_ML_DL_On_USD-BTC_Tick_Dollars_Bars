@@ -106,6 +106,31 @@ from src.features.volume_imbalance import (
 )
 from src.features.vpin import compute_vpin
 
+# Pipeline utilities
+from src.features.pipeline import (
+    compute_timestamp_features,
+    drop_empty_columns,
+    drop_initial_nan_rows,
+    drop_timestamp_columns,
+    get_columns_to_scale,
+    interpolate_sporadic_nan,
+    shift_target_to_future_return,
+    split_train_test,
+    TRAIN_RATIO,
+)
+from src.features.compute import apply_lags, compute_all_features
+from src.features.io import (
+    fit_and_save_scalers,
+    load_input_data,
+    save_outputs,
+    save_train_test_splits,
+)
+from src.features.batch import (
+    BATCH_OVERLAP,
+    DEFAULT_BATCH_SIZE,
+    run_batch_pipeline,
+)
+
 __all__ = [
     # Trade classification
     "classify_trades_tick_rule",
@@ -179,4 +204,26 @@ __all__ = [
     "MinMaxScalerCustom",
     "ScalerManager",
     "fit_and_transform_features",
+    # Pipeline utilities
+    "compute_timestamp_features",
+    "drop_empty_columns",
+    "drop_initial_nan_rows",
+    "drop_timestamp_columns",
+    "get_columns_to_scale",
+    "interpolate_sporadic_nan",
+    "shift_target_to_future_return",
+    "split_train_test",
+    "TRAIN_RATIO",
+    # Compute
+    "apply_lags",
+    "compute_all_features",
+    # I/O
+    "fit_and_save_scalers",
+    "load_input_data",
+    "save_outputs",
+    "save_train_test_splits",
+    # Batch
+    "BATCH_OVERLAP",
+    "DEFAULT_BATCH_SIZE",
+    "run_batch_pipeline",
 ]

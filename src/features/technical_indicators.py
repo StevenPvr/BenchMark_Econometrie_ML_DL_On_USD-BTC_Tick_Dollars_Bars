@@ -38,7 +38,7 @@ from typing import cast
 
 import pandas as pd  # type: ignore[import-untyped]
 
-from src.config_logging import get_logger
+from src.utils import get_logger
 
 logger = get_logger(__name__)
 

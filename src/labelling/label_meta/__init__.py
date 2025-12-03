@@ -38,7 +38,7 @@ from src.labelling.label_meta.opti import (
     get_events_meta,
     get_bins,
     # Optimization
-    optimize_meta_model,
+    optimize_model,
     WalkForwardCV,
 )
 
@@ -48,7 +48,7 @@ __all__ = [
     "get_events_meta",
     "get_bins",
     # Optimization
-    "optimize_meta_model",
+    "optimize_model",
     "MetaOptimizationConfig",
     "MetaOptimizationResult",
     "WalkForwardCV",

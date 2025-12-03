@@ -28,6 +28,8 @@ class XGBoostModel(BaseModel):
         colsample_bytree: float = 0.8,
         reg_alpha: float = 0.0,
         reg_lambda: float = 1.0,
+        min_child_weight: int = 1,
+        gamma: float = 0.0,
         random_state: int = 42,
         n_jobs: int = -1,
         early_stopping_rounds: int | None = None,
@@ -52,6 +54,10 @@ class XGBoostModel(BaseModel):
             Regularisation L1.
         reg_lambda : float, default=1.0
             Regularisation L2.
+        min_child_weight : int, default=1
+            Minimum sum of instance weight in a child (regularization).
+        gamma : float, default=0.0
+            Minimum loss reduction to make a split (regularization).
         random_state : int, default=42
             Seed pour reproductibilite.
         n_jobs : int, default=-1
@@ -67,6 +73,8 @@ class XGBoostModel(BaseModel):
         self.colsample_bytree = colsample_bytree
         self.reg_alpha = reg_alpha
         self.reg_lambda = reg_lambda
+        self.min_child_weight = min_child_weight
+        self.gamma = gamma
         self.random_state = random_state
         self.n_jobs = n_jobs
         self.early_stopping_rounds = early_stopping_rounds
@@ -109,6 +117,8 @@ class XGBoostModel(BaseModel):
             "colsample_bytree": self.colsample_bytree,
             "reg_alpha": self.reg_alpha,
             "reg_lambda": self.reg_lambda,
+            "min_child_weight": self.min_child_weight,
+            "gamma": self.gamma,
             "random_state": self.random_state,
             "n_jobs": self.n_jobs,
         }

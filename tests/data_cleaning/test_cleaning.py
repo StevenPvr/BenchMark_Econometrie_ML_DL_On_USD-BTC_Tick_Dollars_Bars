@@ -1,4 +1,4 @@
-"""Unit tests for src/data_cleaning/cleaning.py."""
+"""Unit tests for src/data_cleaning/ modules."""
 
 from unittest import mock
 
@@ -9,20 +9,24 @@ import pytest
 from src.data_cleaning.cleaning import (
     _drop_duplicates,
     _drop_missing_essentials,
-    _filter_dollar_value_outliers,
-    _filter_mad_price_outliers,
-    _filter_outliers_robust,
-    _filter_price_outliers,
-    _filter_rolling_zscore_outliers,
-    _filter_volume_outliers,
-    _load_raw_trades,
-    _merge_outlier_reports,
     _persist_clean_dataset,
     _strip_unwanted_columns,
     _validate_numeric_columns,
-    _compute_dollar_notional,
     clean_ticks_data,
+)
+from src.data_cleaning.outliers import (
     OutlierReport,
+    _compute_dollar_notional,
+    _filter_dollar_value_outliers,
+    _filter_mad_price_outliers,
+    _filter_rolling_zscore_outliers,
+    _filter_volume_outliers,
+    filter_outliers_robust as _filter_outliers_robust,
+    filter_price_outliers as _filter_price_outliers,
+    merge_outlier_reports as _merge_outlier_reports,
+)
+from src.data_cleaning.parquet_io import (
+    load_raw_trades as _load_raw_trades,
 )
 
 
@@ -476,8 +480,8 @@ class TestFilterOutliersRobust:
             "price": np.linspace(100, 101, 150),
             "amount": np.ones(150),
         })
-        with mock.patch("src.data_cleaning.cleaning._filter_rolling_zscore_outliers") as roll_mock, \
-             mock.patch("src.data_cleaning.cleaning._filter_dollar_value_outliers") as dollar_mock:
+        with mock.patch("src.data_cleaning.outliers._filter_rolling_zscore_outliers") as roll_mock, \
+             mock.patch("src.data_cleaning.outliers._filter_dollar_value_outliers") as dollar_mock:
             _filter_outliers_robust(df)
 
         roll_mock.assert_not_called()

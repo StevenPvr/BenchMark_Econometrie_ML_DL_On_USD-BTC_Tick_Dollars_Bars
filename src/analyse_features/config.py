@@ -1,201 +1,159 @@
 """Configuration for feature analysis module.
 
-This module centralizes all parameters for the feature analysis pipeline:
-- Parallelization settings (n_jobs, chunk_size)
-- Analysis thresholds
-- Output paths
+This module re-exports constants and paths from the central configuration
+files for backward compatibility and convenience.
+
+All constants are defined in src/constants.py.
+All paths are defined in src/path.py.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Literal
 
+from src.constants import (
+    DEFAULT_RANDOM_STATE,
+    # Parallelization
+    ANALYSE_FEATURES_CHUNK_SIZE as CHUNK_SIZE,
+    ANALYSE_FEATURES_JOBLIB_BACKEND as JOBLIB_BACKEND,
+    ANALYSE_FEATURES_JOBLIB_VERBOSITY as JOBLIB_VERBOSITY,
+    # Data sampling
+    ANALYSE_FEATURES_SAMPLE_FRACTION as DATASET_SAMPLE_FRACTION,
+    # Correlation
+    CORRELATION_SIGNIFICANT_THRESHOLD,
+    CORRELATION_HIGH_THRESHOLD,
+    CORRELATION_DROP_THRESHOLD,
+    MI_N_NEIGHBORS,
+    # Clustering
+    CLUSTER_LINKAGE,
+    UMAP_N_NEIGHBORS,
+    UMAP_MIN_DIST,
+    UMAP_N_COMPONENTS,
+    UMAP_METRIC,
+    TSNE_PERPLEXITY,
+    TSNE_N_ITER,
+    # Temporal
+    TEMPORAL_ACF_LAGS as ACF_LAGS,
+    TEMPORAL_ROLLING_WINDOWS,
+    TEMPORAL_N_PERIODS as N_TEMPORAL_PERIODS,
+    # Target
+    TARGET_COLUMN_DEFAULT as TARGET_COLUMN,
+    TARGET_TOP_N_FEATURES as TOP_N_FEATURES,
+    TARGET_SCATTER_SAMPLE_SIZE as SCATTER_SAMPLE_SIZE,
+    # VIF
+    VIF_HIGH_THRESHOLD,
+    VIF_CRITICAL_THRESHOLD,
+    CONDITION_NUMBER_MODERATE,
+    CONDITION_NUMBER_HIGH,
+    # Feature selection
+    ANALYSE_FEATURES_SAVE_BATCH_SIZE as SAVE_BATCH_SIZE,
+    # Visualization
+    ANALYSE_FEATURES_FIGSIZE_HEATMAP as FIGSIZE_HEATMAP,
+    ANALYSE_FEATURES_FIGSIZE_BAR as FIGSIZE_BAR,
+    ANALYSE_FEATURES_FIGSIZE_SCATTER as FIGSIZE_SCATTER,
+    ANALYSE_FEATURES_FIGSIZE_DENDROGRAM as FIGSIZE_DENDROGRAM,
+    ANALYSE_FEATURES_FIGSIZE_ACF as FIGSIZE_ACF,
+    ANALYSE_FEATURES_PNG_DPI as PNG_DPI,
+    COLORSCALE_CORRELATION,
+    COLORSCALE_SEQUENTIAL,
+)
 from src.path import (
-    DATA_DIR,
+    ANALYSE_FEATURES_DIR,
+    ANALYSE_FEATURES_JSON_DIR as RESULTS_JSON_DIR,
+    ANALYSE_FEATURES_PLOTS_HTML_DIR as PLOTS_HTML_DIR,
+    ANALYSE_FEATURES_PLOTS_PNG_DIR as PLOTS_PNG_DIR,
+    ANALYSE_FEATURES_CACHE_DIR as CACHE_DIR,
+    CORRELATION_RESULTS_JSON,
+    MULTICOLLINEARITY_RESULTS_JSON,
+    TARGET_RESULTS_JSON,
+    CLUSTERING_RESULTS_JSON,
+    TEMPORAL_RESULTS_JSON,
+    ANALYSE_FEATURES_SUMMARY_JSON as SUMMARY_JSON,
+    ANALYSE_FEATURES_INPUT_DATASETS as INPUT_DATASETS,
+    ANALYSE_FEATURES_OUTPUT_DATASETS as OUTPUT_DATASETS,
     DATASET_FEATURES_CLEAR_PARQUET,
     DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
     DATASET_FEATURES_LSTM_CLEAR_PARQUET,
-    DATASET_FEATURES_FINAL_PARQUET,
-    DATASET_FEATURES_LINEAR_FINAL_PARQUET,
-    DATASET_FEATURES_LSTM_FINAL_PARQUET,
+    DATA_DIR,
 )
 
-# ============================================================================
-# PARALLELIZATION SETTINGS
-# ============================================================================
+# Legacy aliases for backward compatibility
+SPEARMAN_HIGH_CORR_THRESHOLD: float = CORRELATION_HIGH_THRESHOLD
+MI_RANDOM_STATE: int = DEFAULT_RANDOM_STATE
+TSNE_RANDOM_STATE: int = DEFAULT_RANDOM_STATE
+ROLLING_WINDOWS: list[int] = list(TEMPORAL_ROLLING_WINDOWS)
 
 # Number of parallel jobs (-1 = all cores)
 N_JOBS: int = -1 if os.cpu_count() else 1
-
-# Actual number of cores for explicit usage
 N_CORES: int = os.cpu_count() or 1
 
-# Chunk size for batch processing (features per batch)
-CHUNK_SIZE: int = 50
-
-# Backend for joblib parallelization
-JOBLIB_BACKEND: str = "loky"  # 'loky' (default), 'multiprocessing', 'threading'
-
-# Verbosity level for joblib (0=silent, 10=verbose)
-JOBLIB_VERBOSITY: int = 0
-
-# ============================================================================
-# OUTPUT PATHS
-# ============================================================================
-
-# Base output directory for analysis results
-ANALYSE_FEATURES_DIR: Path = DATA_DIR / "analyse_features"
-
-# JSON output files (human-readable results)
-RESULTS_JSON_DIR: Path = ANALYSE_FEATURES_DIR / "json"
-CORRELATION_RESULTS_JSON: Path = RESULTS_JSON_DIR / "correlation_results.json"
-STATIONARITY_RESULTS_JSON: Path = RESULTS_JSON_DIR / "stationarity_results.json"
-MULTICOLLINEARITY_RESULTS_JSON: Path = RESULTS_JSON_DIR / "multicollinearity_results.json"
-TARGET_RESULTS_JSON: Path = RESULTS_JSON_DIR / "target_results.json"
-CLUSTERING_RESULTS_JSON: Path = RESULTS_JSON_DIR / "clustering_results.json"
-TEMPORAL_RESULTS_JSON: Path = RESULTS_JSON_DIR / "temporal_results.json"
-SUMMARY_JSON: Path = RESULTS_JSON_DIR / "analysis_summary.json"
-
-# Input datasets (from clear_features/ with '_clear' suffix)
-INPUT_DATASETS = {
-    "tree_based": DATASET_FEATURES_CLEAR_PARQUET,
-    "linear": DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
-    "lstm": DATASET_FEATURES_LSTM_CLEAR_PARQUET,
-}
-
-# Output datasets (with '_final' suffix - ready for labelling)
-OUTPUT_DATASETS = {
-    "tree_based": DATASET_FEATURES_FINAL_PARQUET,
-    "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
-    "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
-}
-
-# Plot directories
-PLOTS_HTML_DIR: Path = ANALYSE_FEATURES_DIR / "plots" / "html"
-PLOTS_PNG_DIR: Path = ANALYSE_FEATURES_DIR / "plots" / "png"
-
-# Cache directory for intermediate results
-CACHE_DIR: Path = ANALYSE_FEATURES_DIR / "cache"
-
-# ============================================================================
-# DATA SAMPLING SETTINGS
-# ============================================================================
-
-# Fraction of dataset to use for analysis (0.2 = 20%)
-DATASET_SAMPLE_FRACTION: float = 0.2
-
-# ============================================================================
-# CORRELATION ANALYSIS SETTINGS
-# ============================================================================
-
-# Correlation thresholds (used for summary and filtering)
-# - SIGNIFICANT: minimum correlation to consider relevant
-# - HIGH: threshold for "highly correlated" pairs
-# - VERY_HIGH: threshold for potential redundancy (consider removing)
-CORRELATION_SIGNIFICANT_THRESHOLD: float = 0.5
-CORRELATION_HIGH_THRESHOLD: float = 0.7
-SPEARMAN_HIGH_CORR_THRESHOLD: float = 0.7  # Legacy alias, use CORRELATION_HIGH_THRESHOLD
-# Threshold for dropping one feature from highly correlated groups
-CORRELATION_DROP_THRESHOLD: float = 0.7
-
-# Mutual information settings
-MI_N_NEIGHBORS: int = 5  # k-NN for MI estimation
-MI_RANDOM_STATE: int = 42
-
-# ============================================================================
-# STATIONARITY ANALYSIS SETTINGS
-# ============================================================================
-
-# Significance level for stationarity tests
-STATIONARITY_ALPHA: float = 0.05
-
-# ADF regression type: 'c' (constant), 'ct' (constant + trend), 'n' (no constant)
-ADF_REGRESSION: Literal['c', 'ct', 'n'] = "c"
-
-# Maximum lags for ADF (None = auto)
-ADF_MAX_LAGS: int | None = None
-
-# KPSS regression type: 'c' (constant), 'ct' (constant + trend)
-KPSS_REGRESSION: Literal['c', 'ct'] = "c"
-
-# ============================================================================
-# CLUSTERING SETTINGS
-# ============================================================================
-
-# Hierarchical clustering linkage method
-CLUSTER_LINKAGE: str = "ward"  # 'ward', 'complete', 'average', 'single'
-
-# Distance metric for clustering (1 - |corr|)
-CLUSTER_METRIC: str = "correlation"
-
-# UMAP parameters
-UMAP_N_NEIGHBORS: int = 15
-UMAP_MIN_DIST: float = 0.1
-UMAP_N_COMPONENTS: int = 2
-UMAP_METRIC: str = "correlation"
-
-# t-SNE parameters
-TSNE_PERPLEXITY: int = 30
-TSNE_N_ITER: int = 1000
-TSNE_RANDOM_STATE: int = 42
-
-# ============================================================================
-# TEMPORAL ANALYSIS SETTINGS
-# ============================================================================
-
-# ACF/PACF lags
-ACF_LAGS: int = 40
-
-# Rolling correlation window sizes
-ROLLING_WINDOWS: list[int] = [50, 100, 250, 500]
-
-# Temporal split for heatmap (number of periods)
-N_TEMPORAL_PERIODS: int = 10
-
-# ============================================================================
-# TARGET ANALYSIS SETTINGS
-# ============================================================================
-
-# Target column name
-TARGET_COLUMN: str = "log_return"
-
-# Top N features to display in plots
-TOP_N_FEATURES: int = 30
-
-# Scatter plot sample size
-SCATTER_SAMPLE_SIZE: int = 10000
-
-# ============================================================================
-# MULTICOLLINEARITY SETTINGS
-# ============================================================================
-
-# VIF threshold for high multicollinearity
-VIF_HIGH_THRESHOLD: float = 10.0
-VIF_CRITICAL_THRESHOLD: float = 100.0
-
-# Condition number thresholds
-CONDITION_NUMBER_MODERATE: float = 30.0
-CONDITION_NUMBER_HIGH: float = 100.0
-
-# ============================================================================
-# VISUALIZATION SETTINGS
-# ============================================================================
-
-# Figure sizes
-FIGSIZE_HEATMAP: tuple[int, int] = (16, 14)
-FIGSIZE_BAR: tuple[int, int] = (12, 8)
-FIGSIZE_SCATTER: tuple[int, int] = (10, 8)
-FIGSIZE_DENDROGRAM: tuple[int, int] = (16, 10)
-FIGSIZE_ACF: tuple[int, int] = (14, 6)
-
-# DPI for PNG exports
-PNG_DPI: int = 150
-
-# Color schemes
-COLORSCALE_CORRELATION: str = "RdBu_r"  # Red-Blue diverging
-COLORSCALE_SEQUENTIAL: str = "Viridis"
+# Re-export all symbols for backward compatibility
+__all__ = [
+    # Parallelization
+    "N_JOBS",
+    "N_CORES",
+    "CHUNK_SIZE",
+    "JOBLIB_BACKEND",
+    "JOBLIB_VERBOSITY",
+    # Paths
+    "ANALYSE_FEATURES_DIR",
+    "RESULTS_JSON_DIR",
+    "PLOTS_HTML_DIR",
+    "PLOTS_PNG_DIR",
+    "CACHE_DIR",
+    "CORRELATION_RESULTS_JSON",
+    "MULTICOLLINEARITY_RESULTS_JSON",
+    "TARGET_RESULTS_JSON",
+    "CLUSTERING_RESULTS_JSON",
+    "TEMPORAL_RESULTS_JSON",
+    "SUMMARY_JSON",
+    "INPUT_DATASETS",
+    "OUTPUT_DATASETS",
+    # Sampling
+    "DATASET_SAMPLE_FRACTION",
+    # Correlation
+    "CORRELATION_SIGNIFICANT_THRESHOLD",
+    "CORRELATION_HIGH_THRESHOLD",
+    "CORRELATION_DROP_THRESHOLD",
+    "SPEARMAN_HIGH_CORR_THRESHOLD",
+    "MI_N_NEIGHBORS",
+    "MI_RANDOM_STATE",
+    # Clustering
+    "CLUSTER_LINKAGE",
+    "UMAP_N_NEIGHBORS",
+    "UMAP_MIN_DIST",
+    "UMAP_N_COMPONENTS",
+    "UMAP_METRIC",
+    "TSNE_PERPLEXITY",
+    "TSNE_N_ITER",
+    "TSNE_RANDOM_STATE",
+    # Temporal
+    "ACF_LAGS",
+    "ROLLING_WINDOWS",
+    "N_TEMPORAL_PERIODS",
+    # Target
+    "TARGET_COLUMN",
+    "TOP_N_FEATURES",
+    "SCATTER_SAMPLE_SIZE",
+    # VIF
+    "VIF_HIGH_THRESHOLD",
+    "VIF_CRITICAL_THRESHOLD",
+    "CONDITION_NUMBER_MODERATE",
+    "CONDITION_NUMBER_HIGH",
+    # Feature selection
+    "SAVE_BATCH_SIZE",
+    # Visualization
+    "FIGSIZE_HEATMAP",
+    "FIGSIZE_BAR",
+    "FIGSIZE_SCATTER",
+    "FIGSIZE_DENDROGRAM",
+    "FIGSIZE_ACF",
+    "PNG_DPI",
+    "COLORSCALE_CORRELATION",
+    "COLORSCALE_SEQUENTIAL",
+    # Functions
+    "ensure_directories",
+]
 
 
 def ensure_directories() -> None:

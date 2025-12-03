@@ -6,6 +6,8 @@ Pipeline:
 3. Normalization (z-score for linear, minmax for LSTM)
 """
 
+from __future__ import annotations
+
 from src.clear_features.pca_reducer import (
     GroupPCAResult,
     PCAReductionSummary,

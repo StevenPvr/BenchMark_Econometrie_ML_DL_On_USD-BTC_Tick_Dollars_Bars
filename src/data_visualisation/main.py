@@ -1,16 +1,23 @@
-#!/usr/bin/env python3
 """Main entry point for dollar bars visualisation."""
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
 import sys
 
-# Allow running as a script from the repo root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+# Add project root to Python path for direct execution.
+# This must be done before importing src modules.
+_script_dir = Path(__file__).parent
+_project_root = _script_dir.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 from src.path import DATA_PLOTS_DIR, DOLLAR_BARS_PARQUET
-from src.data_visualisation.visualisation import run_full_analysis
+from src.utils import get_logger
+
+from src.data_visualisation.analysis import run_full_analysis
+
+logger = get_logger(__name__)
 
 
 def main() -> None:

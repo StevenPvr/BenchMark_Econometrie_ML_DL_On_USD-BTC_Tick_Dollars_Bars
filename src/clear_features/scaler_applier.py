@@ -6,22 +6,21 @@ This ensures scalers are fitted on the actual columns that will be in the final 
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
-import pandas as pd  # type: ignore[import-untyped]
+import pandas as pd
 
 from src.clear_features.config import (
-    SCALER_CONFIG,
+    CLEAR_FEATURES_DIR,
     META_COLUMNS,
     TARGET_COLUMN,
-    CLEAR_FEATURES_DIR,
 )
-from src.features.scalers import StandardScalerCustom, MinMaxScalerCustom
+from src.config_logging import get_logger
+from src.features.scalers import MinMaxScalerCustom, StandardScalerCustom
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Default paths for scalers (in clear_features directory, not features)
 ZSCORE_SCALER_PATH = CLEAR_FEATURES_DIR / "zscore_scaler.joblib"
@@ -35,7 +34,8 @@ class ScalerFitter:
     Fits on TRAIN data only to prevent data leakage.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize scaler fitter with empty state."""
         # Z-score (StandardScaler) stats - Welford's algorithm
         self._zscore_n: int = 0
         self._zscore_mean: np.ndarray | None = None
@@ -50,7 +50,14 @@ class ScalerFitter:
         self._is_finalized = False
 
     def _get_feature_columns(self, df: pd.DataFrame) -> list[str]:
-        """Get feature columns to scale (exclude meta and target)."""
+        """Get feature columns to scale (exclude meta and target).
+
+        Args:
+            df: DataFrame to extract columns from.
+
+        Returns:
+            List of feature column names to scale.
+        """
         excluded = set(META_COLUMNS) | {TARGET_COLUMN}
         return [
             c for c in df.columns
@@ -62,7 +69,10 @@ class ScalerFitter:
         """Incrementally fit scalers on a batch of TRAIN data.
 
         Args:
-            df_train_batch: Batch of training data (already PCA-transformed)
+            df_train_batch: Batch of training data (already PCA-transformed).
+
+        Raises:
+            RuntimeError: If finalize() was already called.
         """
         if self._is_finalized:
             raise RuntimeError("Cannot partial_fit after finalize()")
@@ -108,7 +118,10 @@ class ScalerFitter:
         """Finalize scaler fitting and return fitted scalers.
 
         Returns:
-            Tuple of (zscore_scaler, minmax_scaler)
+            Tuple of (zscore_scaler, minmax_scaler).
+
+        Raises:
+            RuntimeError: If no data was fitted.
         """
         if self._zscore_columns is None:
             raise RuntimeError("No data was fitted. Call partial_fit() first.")
@@ -138,17 +151,22 @@ class ScalerFitter:
         self._is_finalized = True
 
         logger.info(
-            f"Finalized scalers: {len(self._zscore_columns)} columns, "
-            f"{self._zscore_n:,} samples"
+            "Finalized scalers: %d columns, %d samples",
+            len(self._zscore_columns),
+            self._zscore_n,
         )
 
         return zscore_scaler, minmax_scaler
 
 
 class ScalerApplier:
-    """Applies fitted scalers to datasets."""
+    """Applies fitted scalers to datasets.
 
-    def __init__(self):
+    Handles loading, saving, and applying z-score and min-max scalers.
+    """
+
+    def __init__(self) -> None:
+        """Initialize scaler applier with no scalers loaded."""
         self._zscore_scaler: StandardScalerCustom | None = None
         self._minmax_scaler: MinMaxScalerCustom | None = None
 
@@ -157,7 +175,12 @@ class ScalerApplier:
         zscore_scaler: StandardScalerCustom,
         minmax_scaler: MinMaxScalerCustom,
     ) -> None:
-        """Set scalers directly (after fitting)."""
+        """Set scalers directly (after fitting).
+
+        Args:
+            zscore_scaler: Fitted z-score scaler.
+            minmax_scaler: Fitted min-max scaler.
+        """
         self._zscore_scaler = zscore_scaler
         self._minmax_scaler = minmax_scaler
 
@@ -166,7 +189,12 @@ class ScalerApplier:
         zscore_path: Path = ZSCORE_SCALER_PATH,
         minmax_path: Path = MINMAX_SCALER_PATH,
     ) -> None:
-        """Load pre-fitted scalers from disk."""
+        """Load pre-fitted scalers from disk.
+
+        Args:
+            zscore_path: Path to z-score scaler file.
+            minmax_path: Path to min-max scaler file.
+        """
         if zscore_path.exists():
             self._zscore_scaler = StandardScalerCustom.load(zscore_path)
             logger.info("Loaded z-score scaler from %s", zscore_path)
@@ -184,7 +212,12 @@ class ScalerApplier:
         zscore_path: Path = ZSCORE_SCALER_PATH,
         minmax_path: Path = MINMAX_SCALER_PATH,
     ) -> None:
-        """Save scalers to disk."""
+        """Save scalers to disk.
+
+        Args:
+            zscore_path: Path to save z-score scaler.
+            minmax_path: Path to save min-max scaler.
+        """
         zscore_path.parent.mkdir(parents=True, exist_ok=True)
 
         if self._zscore_scaler is not None:
@@ -196,7 +229,14 @@ class ScalerApplier:
             logger.info("Saved min-max scaler to %s", minmax_path)
 
     def apply_zscore(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply z-score normalization."""
+        """Apply z-score normalization.
+
+        Args:
+            df: DataFrame to scale.
+
+        Returns:
+            Scaled DataFrame.
+        """
         if self._zscore_scaler is None:
             logger.warning("No z-score scaler available, returning unchanged")
             return df
@@ -205,14 +245,12 @@ class ScalerApplier:
             logger.warning("Z-score scaler has no columns, returning unchanged")
             return df
 
-        # Count columns that will be scaled
         cols_to_scale = [c for c in self._zscore_scaler.columns_ if c in df.columns]
 
         if not cols_to_scale:
             logger.warning("No columns to z-score scale")
             return df
 
-        # Transform (scaler handles column matching internally)
         result = self._zscore_scaler.transform(df)
 
         logger.info("Applied z-score scaling to %d columns", len(cols_to_scale))
@@ -220,7 +258,14 @@ class ScalerApplier:
         return result
 
     def apply_minmax(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply min-max normalization."""
+        """Apply min-max normalization.
+
+        Args:
+            df: DataFrame to scale.
+
+        Returns:
+            Scaled DataFrame.
+        """
         if self._minmax_scaler is None:
             logger.warning("No min-max scaler available, returning unchanged")
             return df
@@ -229,14 +274,12 @@ class ScalerApplier:
             logger.warning("Min-max scaler has no columns, returning unchanged")
             return df
 
-        # Count columns that will be scaled
         cols_to_scale = [c for c in self._minmax_scaler.columns_ if c in df.columns]
 
         if not cols_to_scale:
             logger.warning("No columns to min-max scale")
             return df
 
-        # Transform (scaler handles column matching internally)
         result = self._minmax_scaler.transform(df)
 
         logger.info("Applied min-max scaling to %d columns", len(cols_to_scale))

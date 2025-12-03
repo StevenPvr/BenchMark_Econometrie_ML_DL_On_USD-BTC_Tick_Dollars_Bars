@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from pytest_mock import MockerFixture
 
-from src.labelling.label_primaire.train import (
+from src.labelling.label_primaire.train.logic import (
     train_model,
     TrainingConfig,
     TrainingResult,
@@ -52,13 +52,13 @@ def mock_bars():
 def test_train_model(mocker: MockerFixture, mock_dataset, mock_bars, tmp_path):
     # Mock MODEL_REGISTRY to include test_model
     mocker.patch.dict(
-        "src.labelling.label_primaire.train.MODEL_REGISTRY",
+        "src.labelling.label_primaire.train.logic.MODEL_REGISTRY",
         {"test_model": {"class": "test.Model", "dataset": "tree", "search_space": {}}}
     )
 
     # Mock external dependencies
     mocker.patch(
-        "src.labelling.label_primaire.train.load_optimized_params",
+        "src.labelling.label_primaire.train.logic.load_optimized_params",
         return_value={
             "model_params": {"n_estimators": 10},
             "triple_barrier_params": {"pt_mult": 1, "sl_mult": 1, "max_holding": 5},
@@ -71,12 +71,12 @@ def test_train_model(mocker: MockerFixture, mock_dataset, mock_bars, tmp_path):
     mock_model_instance = MagicMock()
     mock_model_cls.return_value = mock_model_instance
     mocker.patch(
-        "src.labelling.label_primaire.train.load_model_class",
+        "src.labelling.label_primaire.train.logic.load_model_class",
         return_value=mock_model_cls
     )
 
     mocker.patch(
-        "src.labelling.label_primaire.train.get_dataset_for_model",
+        "src.labelling.label_primaire.train.logic.get_dataset_for_model",
         return_value=mock_dataset
     )
 
@@ -84,10 +84,10 @@ def test_train_model(mocker: MockerFixture, mock_dataset, mock_bars, tmp_path):
         "pandas.read_parquet",
         return_value=mock_bars
     )
-    mocker.patch("src.labelling.label_primaire.train.DOLLAR_BARS_PARQUET", MagicMock(exists=lambda: True))
+    mocker.patch("src.labelling.label_primaire.train.logic.DOLLAR_BARS_PARQUET", MagicMock(exists=lambda: True))
 
     mocker.patch(
-        "src.labelling.label_primaire.train.get_daily_volatility",
+        "src.labelling.label_primaire.train.logic.get_daily_volatility",
         return_value=pd.Series(np.ones(10)*0.01, index=mock_dataset.index)
     )
 
@@ -96,7 +96,7 @@ def test_train_model(mocker: MockerFixture, mock_dataset, mock_bars, tmp_path):
         "label": [1, 0] * 5
     }, index=mock_dataset.index)
     mocker.patch(
-        "src.labelling.label_primaire.train.get_events_primary",
+        "src.labelling.label_primaire.train.logic.get_events_primary",
         return_value=mock_events
     )
 
@@ -143,8 +143,8 @@ def test_load_optimized_params(tmp_path):
 
 def test_get_available_optimized_models(mocker, tmp_path):
     # Mock MODEL_REGISTRY and path
-    mocker.patch("src.labelling.label_primaire.train.MODEL_REGISTRY", {"m1": {}, "m2": {}})
-    mocker.patch("src.labelling.label_primaire.train.LABEL_PRIMAIRE_OPTI_DIR", tmp_path)
+    mocker.patch("src.labelling.label_primaire.train.logic.MODEL_REGISTRY", {"m1": {}, "m2": {}})
+    mocker.patch("src.labelling.label_primaire.train.logic.LABEL_PRIMAIRE_OPTI_DIR", tmp_path)
 
     # Create one optimization file
     (tmp_path / "m1_optimization.json").touch()
@@ -154,8 +154,8 @@ def test_get_available_optimized_models(mocker, tmp_path):
     assert "m2" not in available
 
 def test_select_model(mocker):
-    mocker.patch("src.labelling.label_primaire.train.MODEL_REGISTRY", {"m1": {"dataset": "d"}})
-    mocker.patch("src.labelling.label_primaire.train.get_available_optimized_models", return_value=["m1"])
+    mocker.patch("src.labelling.label_primaire.train.logic.MODEL_REGISTRY", {"m1": {"dataset": "d"}})
+    mocker.patch("src.labelling.label_primaire.train.logic.get_available_optimized_models", return_value=["m1"])
 
     mocker.patch("builtins.input", return_value="1")
     assert select_model() == "m1"
@@ -175,14 +175,14 @@ def test_get_yes_no_input(mocker):
 # =============================================================================
 
 def test_main(mocker):
-    mocker.patch("src.labelling.label_primaire.train.select_model", return_value="m1")
-    mocker.patch("src.labelling.label_primaire.train.load_optimized_params", return_value={
+    mocker.patch("src.labelling.label_primaire.train.logic.select_model", return_value="m1")
+    mocker.patch("src.labelling.label_primaire.train.logic.load_optimized_params", return_value={
         "metric": "score", "best_score": 0.9, "triple_barrier_params": {}
     })
-    mocker.patch("src.labelling.label_primaire.train.get_yes_no_input", return_value=True)
+    mocker.patch("src.labelling.label_primaire.train.logic.get_yes_no_input", return_value=True)
     mocker.patch("builtins.input", return_value="o") # confirm
 
-    mock_train = mocker.patch("src.labelling.label_primaire.train.train_model", return_value=MagicMock(
+    mock_train = mocker.patch("src.labelling.label_primaire.train.logic.train_model", return_value=MagicMock(
         train_samples=100,
         label_distribution={"label_counts": {}, "label_percentages": {}},
         triple_barrier_params={},

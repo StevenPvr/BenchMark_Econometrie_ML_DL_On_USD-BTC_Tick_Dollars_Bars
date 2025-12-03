@@ -27,27 +27,16 @@ Use cases:
 
 from __future__ import annotations
 
+import warnings
+from datetime import datetime
+from typing import Any, cast
 
-from pathlib import Path
-import sys
+import numpy as np
+import pandas as pd  # type: ignore[import-untyped]
+from scipy import stats  # type: ignore[import-untyped]
+from sklearn.feature_selection import f_regression, mutual_info_regression  # type: ignore[import-untyped]
 
-# Add project root to Python path for direct execution.
-# This must be done before importing src modules.
-_script_dir = Path(__file__).parent
-_project_root = _script_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-import warnings  # noqa: E402
-from datetime import datetime  # noqa: E402
-from typing import Any, cast  # noqa: E402
-
-import numpy as np  # noqa: E402
-import pandas as pd  # type: ignore[import-untyped]  # noqa: E402
-from scipy import stats  # type: ignore[import-untyped]  # noqa: E402
-from sklearn.feature_selection import f_regression, mutual_info_regression  # type: ignore[import-untyped]  # noqa: E402
-
-from src.analyse_features.config import (  # noqa: E402
+from src.analyse_features.config import (
     MI_N_NEIGHBORS,
     MI_RANDOM_STATE,
     SCATTER_SAMPLE_SIZE,
@@ -56,10 +45,10 @@ from src.analyse_features.config import (  # noqa: E402
     TOP_N_FEATURES,
     ensure_directories,
 )
-from src.analyse_features.utils.json_utils import save_json  # noqa: E402
-from src.analyse_features.utils.plotting import plot_target_correlations  # noqa: E402
-from src.analyse_features.utils.parallel import get_n_jobs  # noqa: E402
-from src.config_logging import get_logger  # noqa: E402
+from src.analyse_features.utils.json_utils import save_json
+from src.analyse_features.utils.parallel import get_n_jobs
+from src.analyse_features.utils.plotting import plot_target_correlations
+from src.config_logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -109,14 +98,12 @@ def compute_target_correlations(
             })
             continue
 
-        # Pearson correlation
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             pearson_r, pearson_p = stats.pearsonr(x_clean, y_clean)
             pearson_r = cast(float, pearson_r)
             pearson_p = cast(float, pearson_p)
 
-        # Spearman correlation
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             spearman_r, spearman_p = stats.spearmanr(x_clean, y_clean)
@@ -135,7 +122,6 @@ def compute_target_correlations(
 
     result_df = pd.DataFrame(results)
 
-    # Sort by absolute Spearman correlation
     result_df = result_df.sort_values("abs_spearman", ascending=False).reset_index(drop=True)
 
     logger.info("Computed correlations for %d features", len(result_df))
@@ -173,18 +159,15 @@ def compute_target_mutual_information(
 
     n_jobs = get_n_jobs(n_jobs)
 
-    # Prepare data
     X = df[feature_columns].values
     y = df[target_column].values
 
-    # Handle NaN
     mask = ~np.isnan(y) & ~np.any(np.isnan(X), axis=1)
     X_clean = X[mask]
     y_clean = y[mask]
 
     logger.info("Computing MI for %d features (n_jobs=%d)", len(feature_columns), n_jobs)
 
-    # Compute MI
     mi_scores = mutual_info_regression(
         X_clean,
         y_clean,
@@ -229,16 +212,13 @@ def compute_f_scores(
         feature_columns = df.select_dtypes(include=[np.number]).columns.tolist()
         feature_columns = [c for c in feature_columns if c != target_column]
 
-    # Prepare data
     X = df[feature_columns].values
     y = df[target_column].values
 
-    # Handle NaN
     mask = ~np.isnan(y) & ~np.any(np.isnan(X), axis=1)
     X_clean = X[mask]
     y_clean = y[mask]
 
-    # Compute F-scores
     f_scores, p_values = f_regression(X_clean, y_clean)
 
     result_df = pd.DataFrame({
@@ -275,27 +255,23 @@ def compute_combined_target_metrics(
         feature_columns = df.select_dtypes(include=[np.number]).columns.tolist()
         feature_columns = [c for c in feature_columns if c != target_column]
 
-    # Compute all metrics
     corr_df = compute_target_correlations(df, target_column, feature_columns)
     mi_df = compute_target_mutual_information(df, target_column, feature_columns, n_jobs=n_jobs)
     f_df = compute_f_scores(df, target_column, feature_columns)
 
-    # Merge
     result_df = corr_df.merge(mi_df, on="feature")
     result_df = result_df.merge(f_df, on="feature")
 
-    # Add combined rank
     result_df["rank_pearson"] = result_df["abs_pearson"].rank(ascending=False)
     result_df["rank_spearman"] = result_df["abs_spearman"].rank(ascending=False)
     result_df["rank_mi"] = result_df["mutual_information"].rank(ascending=False)
     result_df["rank_f"] = result_df["f_score"].rank(ascending=False)
 
-    # Average rank (lower is better)
     result_df["avg_rank"] = (
-        result_df["rank_pearson"] +
-        result_df["rank_spearman"] +
-        result_df["rank_mi"] +
-        result_df["rank_f"]
+        result_df["rank_pearson"]
+        + result_df["rank_spearman"]
+        + result_df["rank_mi"]
+        + result_df["rank_f"]
     ) / 4
 
     result_df = result_df.sort_values("avg_rank").reset_index(drop=True)
@@ -347,7 +323,6 @@ def compute_feature_target_scatter_data(
     """
     logger.info("Preparing scatter data for %d features", len(feature_columns))
 
-    # Sample if needed
     if len(df) > sample_size:
         df_sample = df.sample(n=sample_size, random_state=42)
     else:
@@ -390,26 +365,21 @@ def analyze_nonlinearity(
         feature_columns = df.select_dtypes(include=[np.number]).columns.tolist()
         feature_columns = [c for c in feature_columns if c != target_column]
 
-    # Get combined metrics
     metrics_df = compute_combined_target_metrics(df, target_column, feature_columns)
 
-    # Compute non-linearity indicators
     metrics_df["pearson_spearman_diff"] = (
         metrics_df["abs_spearman"] - metrics_df["abs_pearson"]
     )
 
-    # Normalize MI to [0, 1] range (approximate)
     mi_max = metrics_df["mutual_information"].max()
     if mi_max > 0:
         metrics_df["mi_normalized"] = metrics_df["mutual_information"] / mi_max
     else:
         metrics_df["mi_normalized"] = 0
 
-    # Non-linearity score: higher = more non-linear
-    # Large Spearman-Pearson diff or high MI with low Pearson
     metrics_df["nonlinearity_score"] = (
-        metrics_df["pearson_spearman_diff"].abs() +
-        (metrics_df["mi_normalized"] - metrics_df["abs_pearson"]).clip(lower=0)
+        metrics_df["pearson_spearman_diff"].abs()
+        + (metrics_df["mi_normalized"] - metrics_df["abs_pearson"]).clip(lower=0)
     )
 
     metrics_df = metrics_df.sort_values("nonlinearity_score", ascending=False)
@@ -444,7 +414,7 @@ def run_target_analysis(
     logger.info("=" * 60)
     logger.info("Target column: %s", target_column)
 
-    results = {}
+    results: dict[str, Any] = {}
 
     # 1. Combined metrics
     logger.info("-" * 40)
@@ -454,7 +424,6 @@ def run_target_analysis(
     combined_df = compute_combined_target_metrics(df, target_column, feature_columns)
     results["combined_metrics"] = combined_df
 
-    # Log top features
     top_features = get_top_features(combined_df, n=10)
     logger.info("Top 10 features by average rank: %s", top_features)
 
@@ -466,7 +435,6 @@ def run_target_analysis(
     nonlin_df = analyze_nonlinearity(df, target_column, feature_columns)
     results["nonlinearity"] = nonlin_df
 
-    # Most non-linear features
     most_nonlinear = nonlin_df.head(10)["feature"].tolist()
     logger.info("Most non-linear relationships: %s", most_nonlinear)
 
@@ -493,7 +461,6 @@ def run_target_analysis(
     logger.info("Average |Spearman|: %.4f", summary["avg_abs_spearman"])
     logger.info("Average MI: %.4f", summary["avg_mi"])
 
-    # Save results
     if save_results:
         json_data: dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
@@ -509,7 +476,6 @@ def run_target_analysis(
                 "by_mi": metrics_df.nsmallest(30, "rank_mi")["feature"].tolist(),
             }
 
-            # Generate plot
             plot_target_correlations(metrics_df)
 
         if "summary" in results:
@@ -533,7 +499,6 @@ if __name__ == "__main__":
     logger.info("Loading features from %s", DATASET_FEATURES_PARQUET)
     df = pd.read_parquet(DATASET_FEATURES_PARQUET)
 
-    # Filter to train split only
     if "split" in df.columns:
         df = df[df["split"] == "train"].copy()
         df = df.drop(columns=["split"])

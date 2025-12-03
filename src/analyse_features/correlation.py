@@ -16,17 +16,6 @@ References:
 
 from __future__ import annotations
 
-
-from pathlib import Path
-import sys
-
-# Add project root to Python path for direct execution.
-# This must be done before importing src modules.
-_script_dir = Path(__file__).parent
-_project_root = _script_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
 import warnings
 from datetime import datetime
 from typing import Any, cast

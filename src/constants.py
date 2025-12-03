@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Dict, List, Tuple
 
 # Column name constants
 CLOSE_COLUMN: str = "close"
@@ -283,6 +284,14 @@ SYMBOL: str = "BTC/USDT"  # Binance uses USDT instead of USD
 START_DATE: str = "2024-01-26"  # 3-month period for more data
 END_DATE: str = "2024-01-31"
 
+# Data fetching configuration
+FETCHING_MAX_TRADES_PER_CALL: int = 1000  # ccxt typically limits to 1000 trades per call
+FETCHING_CHUNK_DAYS: int = 14  # 2 weeks per chunk for incremental saving
+FETCHING_MAX_REQUEST_WEIGHT_PER_MINUTE: int = 6000  # Binance limit: 6000 weight/minute
+FETCHING_REQUEST_WEIGHT_PER_CALL: int = 1  # Each fetch_trades call costs 1 weight
+FETCHING_DEFAULT_MAX_WORKERS: int = 6  # Default parallel workers for fetching
+FETCHING_AUTO_INCREMENT_DAYS: int = 5  # Days to auto-increment between fetches
+
 # Data conversion constants
 MAX_ERROR_DATES_DISPLAY: int = 5
 
@@ -302,7 +311,7 @@ DOLLAR_BARS_CALIBRATION_FRACTION: float = 0.2
 # Target ticks per bar (De Prado methodology)
 # T = Total Dollar Volume / (n_ticks / target_ticks_per_bar)
 # Recommended: 100-500 ticks/bar for robust OHLCV statistics
-DOLLAR_BARS_TARGET_TICKS_PER_BAR: int = 100
+DOLLAR_BARS_TARGET_TICKS_PER_BAR: int = 400
 
 # EMA span for adaptive threshold mode (alpha = 2 / (span + 1))
 DOLLAR_BARS_EMA_SPAN: int = 100
@@ -320,6 +329,9 @@ DOLLAR_BARS_INCLUDE_INCOMPLETE_FINAL: bool = False
 # When True, bars from the first calibration_fraction of ticks are removed
 # This prevents using calibration data for both threshold estimation AND bar generation
 DOLLAR_BARS_EXCLUDE_CALIBRATION_PREFIX: bool = False
+
+# Minimum threshold value to avoid division by zero in dollar bars computation
+DOLLAR_BARS_MIN_THRESHOLD: float = 1e-10
 
 # Time series analysis defaults
 ACF_PACF_DEFAULT_LAGS: int = 30
@@ -510,3 +522,179 @@ OUTLIER_WINSORIZE_UPPER_PERCENTILE: float = 0.999  # 99.9th percentile
 # When price oscillates too rapidly, it may indicate data quality issues
 OUTLIER_TICK_RULE_OSCILLATION_WINDOW: int = 5  # Window to check tick rule sign changes
 OUTLIER_TICK_RULE_MAX_SIGN_CHANGES: int = 4  # Max allowed sign changes in window
+
+# Legacy price filter (deprecated - use MAD-based filters instead)
+OUTLIER_LEGACY_MAX_PCT_CHANGE: float = 0.05  # 5% max price change for legacy filter
+
+# Robust outlier filter multiplier (applied to MAD threshold)
+OUTLIER_ROBUST_MAD_MULTIPLIER: float = 3.0  # Multiplier for MAD threshold in robust filter
+
+# PyArrow batch size for streaming parquet operations
+PARQUET_BATCH_SIZE: int = 262_144  # Batch size for PyArrow dataset operations
+
+# ============================================================================
+# NUMERICAL STABILITY CONSTANTS (Features & General Computations)
+# ============================================================================
+
+# General numerical stability epsilon
+EPS: float = 1e-10  # General epsilon for division safety
+EPS_SMALL: float = 1e-12  # Smaller epsilon for variance/std computations
+EPS_VARIANCE: float = 1e-10  # Epsilon for variance clipping
+
+# Z-score normalization
+ZSCORE_MIN_STD: float = 1e-10  # Minimum std for z-score computation
+
+# Scaler bounds
+SCALER_MIN_RANGE: float = 1e-10  # Minimum range for min-max scaling
+SCALER_CLIP_MIN: float = -1.0  # Min-max scaler clip lower bound
+SCALER_CLIP_MAX: float = 1.0  # Min-max scaler clip upper bound
+
+# Jump detection
+JUMP_MIN_VARIANCE: float = 1e-15  # Minimum variance for jump ratio computation
+
+# ============================================================================
+# FEATURE ANALYSIS CONSTANTS (analyse_features module)
+# ============================================================================
+
+# Parallelization settings
+ANALYSE_FEATURES_CHUNK_SIZE: int = 50  # Features per batch
+ANALYSE_FEATURES_JOBLIB_BACKEND: str = "loky"
+ANALYSE_FEATURES_JOBLIB_VERBOSITY: int = 0
+
+# Data sampling
+ANALYSE_FEATURES_SAMPLE_FRACTION: float = 0.2  # 20% of dataset for analysis
+
+# Correlation thresholds
+CORRELATION_SIGNIFICANT_THRESHOLD: float = 0.5
+CORRELATION_HIGH_THRESHOLD: float = 0.7
+CORRELATION_DROP_THRESHOLD: float = 0.7  # Threshold for dropping correlated features
+
+# Mutual information settings
+MI_N_NEIGHBORS: int = 5  # k-NN for MI estimation
+
+# Stationarity analysis settings
+STATIONARITY_ALPHA: float = 0.05
+STATIONARITY_SAMPLE_SIZE: int = 50_000  # Sample size for stationarity tests
+STATIONARITY_MAX_PARALLEL_JOBS: int = 12
+
+# Clustering settings
+CLUSTER_LINKAGE: str = "ward"
+UMAP_N_NEIGHBORS: int = 15
+UMAP_MIN_DIST: float = 0.1
+UMAP_N_COMPONENTS: int = 2
+UMAP_METRIC: str = "correlation"
+TSNE_PERPLEXITY: int = 30
+TSNE_N_ITER: int = 1000
+
+# Temporal analysis settings
+TEMPORAL_ACF_LAGS: int = 40
+TEMPORAL_ROLLING_WINDOWS: tuple[int, ...] = (50, 100, 250, 500)
+TEMPORAL_N_PERIODS: int = 10
+
+# Target analysis settings
+TARGET_COLUMN_DEFAULT: str = "log_return"
+TARGET_TOP_N_FEATURES: int = 30
+TARGET_SCATTER_SAMPLE_SIZE: int = 10000
+
+# VIF thresholds
+VIF_HIGH_THRESHOLD: float = 10.0
+VIF_CRITICAL_THRESHOLD: float = 100.0
+CONDITION_NUMBER_MODERATE: float = 30.0
+CONDITION_NUMBER_HIGH: float = 100.0
+
+# Feature selection
+ANALYSE_FEATURES_SAVE_BATCH_SIZE: int = 500_000
+
+# Visualization settings
+ANALYSE_FEATURES_FIGSIZE_HEATMAP: tuple[int, int] = (16, 14)
+ANALYSE_FEATURES_FIGSIZE_BAR: tuple[int, int] = (12, 8)
+ANALYSE_FEATURES_FIGSIZE_SCATTER: tuple[int, int] = (10, 8)
+ANALYSE_FEATURES_FIGSIZE_DENDROGRAM: tuple[int, int] = (16, 10)
+ANALYSE_FEATURES_FIGSIZE_ACF: tuple[int, int] = (14, 6)
+ANALYSE_FEATURES_PNG_DPI: int = 150
+COLORSCALE_CORRELATION: str = "RdBu_r"
+COLORSCALE_SEQUENTIAL: str = "Viridis"
+
+# ============================================================================
+# LABELLING DEFAULTS & SEARCH SPACES
+# ============================================================================
+
+LABELING_DAILY_VOL_SPAN_DEFAULT: int = 100
+LABELING_DAILY_VOL_MIN_PERIODS: int = 10
+LABELING_RISK_REWARD_RATIO: float = 1.5
+LABELING_MIN_MINORITY_PREDICTION_RATIO: float = 0.1
+LABELING_MIN_PER_CLASS_F1_REQUIRED: float = 0.0
+
+TRIPLE_BARRIER_SEARCH_SPACE_PRIMARY: Dict[str, Tuple[str, List[float | int]]] = {
+    "pt_mult": ("float", [0.5, 3.0]),
+    "sl_mult": ("float", [0.5, 3.0]),
+    "min_return": ("float", [0.0, 0.01]),
+    "max_holding": ("int", [5, 100]),
+}
+
+TRIPLE_BARRIER_SEARCH_SPACE_META: Dict[str, Tuple[str, List[float | int]]] = {
+    "pt_mult": ("categorical", [0.8, 1.0, 1.5, 2.0]),
+    "sl_mult": ("categorical", [0.8, 1.0, 1.5, 2.0]),
+    "max_holding": ("categorical", [10, 20, 30, 50]),
+}
+
+FOCAL_LOSS_SUPPORTED_MODELS_PRIMARY: List[str] = ["lightgbm", "xgboost", "catboost"]
+CLASS_WEIGHT_SUPPORTED_MODELS_PRIMARY: List[str] = [
+    "lightgbm",
+    "catboost",
+    "xgboost",
+    "logistic",
+]
+FOCAL_LOSS_SEARCH_SPACE_PRIMARY: Dict[str, Tuple[str, List[Any]]] = {
+    "use_focal_loss": ("categorical", [True, False]),
+    "focal_gamma": ("categorical", [0.0, 1.0, 2.0, 3.0]),
+    "minority_weight_boost": ("categorical", [1.0, 1.25, 1.5, 2.0]),
+}
+
+COMPOSITE_SCORE_WEIGHTS_PRIMARY: Dict[str, float] = {
+    "alpha": 0.45,
+    "beta": 0.20,
+    "delta": 0.25,
+    "gamma": 0.20,
+}
+
+# ============================================================================
+# CLEAR FEATURES CONSTANTS (clear_features module)
+# ============================================================================
+
+# Metadata columns to exclude from transformations
+CLEAR_FEATURES_META_COLUMNS: tuple[str, ...] = (
+    "bar_id",
+    "datetime_close",
+    "split",
+    "bar_id_lag1",
+    "bar_id_lag5",
+    "bar_id_lag10",
+    "bar_id_lag15",
+    "bar_id_lag25",
+    "bar_id_lag50",
+)
+
+# Target column (exclude from transformations)
+CLEAR_FEATURES_TARGET_COLUMN: str = "log_return"
+
+# Non-linear correlation configuration
+CLEAR_FEATURES_CORRELATION_METHOD: str = "spearman"
+CLEAR_FEATURES_CORRELATION_THRESHOLD: float = 0.8
+CLEAR_FEATURES_CORRELATION_MIN_CLUSTER_SIZE: int = 2
+CLEAR_FEATURES_CORRELATION_SAMPLE_SIZE: int = 50000
+CLEAR_FEATURES_CORRELATION_DEFAULT_THRESHOLD: float = 0.7
+
+# PCA configuration
+CLEAR_FEATURES_PCA_VARIANCE_THRESHOLD: float = 0.90
+
+# Log transform configuration
+CLEAR_FEATURES_LOG_NON_STATIONARY_CONCLUSIONS: tuple[str, ...] = (
+    "trend_stationary",
+    "non_stationary",
+)
+CLEAR_FEATURES_LOG_MIN_VALUE_THRESHOLD: float = 1e-10
+CLEAR_FEATURES_LOG_USE_LOG1P: bool = True
+
+# Batch processing
+CLEAR_FEATURES_SAVE_BATCH_SIZE: int = 500_000

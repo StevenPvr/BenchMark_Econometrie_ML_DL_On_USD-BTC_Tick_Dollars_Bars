@@ -28,7 +28,8 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numba import njit  # type: ignore[import-untyped]
 
-from src.config_logging import get_logger
+from src.constants import ZSCORE_MIN_STD
+from src.utils import get_logger
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -45,6 +46,8 @@ __all__ = [
 # =============================================================================
 # NUMBA-OPTIMIZED ROLLING Z-SCORE
 # =============================================================================
+# NOTE: Numba functions use literal values equivalent to ZSCORE_MIN_STD (1e-10)
+# because Numba cannot import Python constants at compile time.
 
 
 @njit(cache=True)

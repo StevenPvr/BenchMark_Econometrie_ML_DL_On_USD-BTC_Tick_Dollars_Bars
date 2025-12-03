@@ -30,30 +30,13 @@ References:
 
 from __future__ import annotations
 
+import warnings
+from datetime import datetime
+from typing import Any, cast
 
-from pathlib import Path
-import sys
-
-# Add project root to Python path for direct execution.
-# This must be done before importing src modules.
-_script_dir = Path(__file__).parent
-_project_root = _script_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-import warnings  # noqa: E402
-from datetime import datetime  # noqa: E402
-from typing import Any, cast  # noqa: E402
-
-import numpy as np  # noqa: E402
-import pandas as pd  # type: ignore[import-untyped]  # noqa: E402
-from statsmodels.stats.outliers_influence import variance_inflation_factor  # type: ignore[import-untyped]  # noqa: E402
-
-# Suppress warnings for singular matrices and numerical issues
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="numpy")
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="statsmodels")
-warnings.filterwarnings("ignore", message=".*invalid value encountered.*")
-warnings.filterwarnings("ignore", message=".*divide by zero.*")
+import numpy as np
+import pandas as pd  # type: ignore[import-untyped]
+from statsmodels.stats.outliers_influence import variance_inflation_factor  # type: ignore[import-untyped]
 
 from src.analyse_features.config import (
     CONDITION_NUMBER_HIGH,
@@ -65,9 +48,15 @@ from src.analyse_features.config import (
     ensure_directories,
 )
 from src.analyse_features.utils.json_utils import save_json
-from src.analyse_features.utils.parallel import parallel_map, get_n_jobs
+from src.analyse_features.utils.parallel import get_n_jobs, parallel_map
 from src.analyse_features.utils.plotting import plot_vif_scores
 from src.config_logging import get_logger
+
+# Suppress warnings for singular matrices and numerical issues
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="numpy")
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="statsmodels")
+warnings.filterwarnings("ignore", message=".*invalid value encountered.*")
+warnings.filterwarnings("ignore", message=".*divide by zero.*")
 
 logger = get_logger(__name__)
 
@@ -92,16 +81,18 @@ def compute_vif_correlation_method(
     """
     logger.info("Computing VIF via correlation matrix inverse...")
 
-    # Extract feature matrix
     X = df[feature_columns].values
 
     # Remove rows with NaN
     mask = ~np.any(np.isnan(X), axis=1)
     X_clean = X[mask]
 
-    logger.info("Using %d samples (dropped %d with NaN)", X_clean.shape[0], X.shape[0] - X_clean.shape[0])
+    logger.info(
+        "Using %d samples (dropped %d with NaN)",
+        X_clean.shape[0],
+        X.shape[0] - X_clean.shape[0],
+    )
 
-    # Compute correlation matrix
     corr_matrix = np.corrcoef(X_clean, rowvar=False)
 
     # Add small regularization for numerical stability
@@ -110,10 +101,7 @@ def compute_vif_correlation_method(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            # Invert correlation matrix
             corr_inv = np.linalg.inv(corr_matrix)
-
-            # VIF = diagonal of inverse
             vif_values = np.diag(corr_inv)
 
     except np.linalg.LinAlgError:
@@ -123,16 +111,12 @@ def compute_vif_correlation_method(
             corr_inv = np.linalg.pinv(corr_matrix)
             vif_values = np.diag(corr_inv)
 
-    # Create result DataFrame
     result = pd.DataFrame({
         "feature": feature_columns,
         "vif": vif_values,
     })
 
-    # Add interpretation
     result["interpretation"] = result["vif"].apply(_interpret_vif)
-
-    # Sort by VIF descending
     result = result.sort_values("vif", ascending=False).reset_index(drop=True)
 
     return result
@@ -163,7 +147,6 @@ def compute_vif_regression_method(
     n_jobs = get_n_jobs(n_jobs)
     n_features = len(feature_columns)
 
-    # Prepare data matrix
     X = df[feature_columns].values
 
     # Remove NaN rows
@@ -176,7 +159,6 @@ def compute_vif_regression_method(
         n_jobs,
     )
 
-    # Compute VIF for each feature in parallel
     def compute_single_vif(idx: int) -> tuple[str, float]:
         try:
             with warnings.catch_warnings():
@@ -192,7 +174,6 @@ def compute_vif_regression_method(
         n_jobs=n_jobs,
     )
 
-    # Create DataFrame
     result = pd.DataFrame(results)
     result.columns = ["feature", "vif"]
     result["interpretation"] = result["vif"].apply(_interpret_vif)
@@ -240,7 +221,6 @@ def compute_condition_number(
     """
     logger.info("Computing condition number...")
 
-    # Extract and standardize feature matrix
     X = df[feature_columns].values
 
     # Remove NaN rows
@@ -250,10 +230,8 @@ def compute_condition_number(
     # Standardize (important for condition number)
     X_std = (X_clean - X_clean.mean(axis=0)) / (X_clean.std(axis=0) + 1e-10)
 
-    # Compute singular values
     _, singular_values, _ = np.linalg.svd(X_std, full_matrices=False)
 
-    # Condition number
     sigma_max = singular_values[0]
     sigma_min = singular_values[-1]
 
@@ -262,7 +240,6 @@ def compute_condition_number(
     else:
         condition_number = np.inf
 
-    # Interpretation
     if condition_number < CONDITION_NUMBER_MODERATE:
         interpretation = "low_multicollinearity"
     elif condition_number < CONDITION_NUMBER_HIGH:
@@ -307,29 +284,24 @@ def compute_eigenvalue_analysis(
     """
     logger.info("Computing eigenvalue analysis...")
 
-    # Extract feature matrix
     X = df[feature_columns].values
 
     # Remove NaN rows
     mask = ~np.any(np.isnan(X), axis=1)
     X_clean = X[mask]
 
-    # Compute correlation matrix
     corr_matrix = np.corrcoef(X_clean, rowvar=False)
 
-    # Eigenvalue decomposition
     eigenvalues, eigenvectors = np.linalg.eigh(corr_matrix)
 
     # Sort by eigenvalue (descending)
     idx = np.argsort(eigenvalues)[::-1]
     eigenvalues = eigenvalues[idx]
-    eigenvectors = eigenvectors[:, idx]
 
     # Compute condition indices
     max_eigenvalue = eigenvalues[0]
     condition_indices = np.sqrt(max_eigenvalue / (eigenvalues + 1e-12))
 
-    # Create result DataFrame
     result = pd.DataFrame({
         "component": [f"PC{i+1}" for i in range(len(eigenvalues))],
         "eigenvalue": eigenvalues,
@@ -338,7 +310,6 @@ def compute_eigenvalue_analysis(
         "condition_index": condition_indices,
     })
 
-    # Identify problematic components (condition index > 30)
     n_problematic = (result["condition_index"] > 30).sum()
     logger.info(
         "Eigenvalue analysis complete. Problematic components (CI > 30): %d",
@@ -365,17 +336,14 @@ def identify_collinear_pairs(
     """
     logger.info("Identifying collinear pairs (threshold=%.2f)...", threshold)
 
-    # Extract feature matrix
     X = df[feature_columns].values
 
     # Remove NaN rows
     mask = ~np.any(np.isnan(X), axis=1)
     X_clean = X[mask]
 
-    # Compute correlation matrix
     corr_matrix = np.corrcoef(X_clean, rowvar=False)
 
-    # Find pairs above threshold
     pairs = []
     n = len(feature_columns)
 
@@ -421,10 +389,8 @@ def suggest_features_to_drop(
     """
     to_drop = set()
 
-    # Create VIF lookup
     vif_lookup = dict(zip(vif_df["feature"], vif_df["vif"]))
 
-    # For each correlated pair, suggest dropping higher VIF feature
     for _, row in corr_pairs_df.iterrows():
         f1, f2 = row["feature_1"], row["feature_2"]
         vif1 = vif_lookup.get(f1, 0)
@@ -435,7 +401,6 @@ def suggest_features_to_drop(
         else:
             to_drop.add(f2)
 
-    # Add features with VIF > threshold
     high_vif = vif_df[vif_df["vif"] > vif_threshold]["feature"].tolist()
     to_drop.update(high_vif)
 
@@ -471,7 +436,7 @@ def run_multicollinearity_analysis(
     logger.info("=" * 60)
     logger.info("Analyzing %d features", len(feature_columns))
 
-    results = {}
+    results: dict[str, Any] = {}
 
     # 1. VIF Analysis
     logger.info("-" * 40)
@@ -485,7 +450,6 @@ def run_multicollinearity_analysis(
 
     results["vif"] = vif_df
 
-    # Log VIF summary
     vif_summary = vif_df["interpretation"].value_counts()
     logger.info("VIF summary:\n%s", vif_summary.to_string())
 
@@ -525,10 +489,9 @@ def run_multicollinearity_analysis(
         logger.warning(
             "Suggested features to drop (%d): %s",
             len(suggestions),
-            suggestions[:10],  # First 10
+            suggestions[:10],
         )
 
-    # Save results
     if save_results:
         json_data: dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
@@ -543,7 +506,6 @@ def run_multicollinearity_analysis(
                 "all_scores": vif_df.to_dict(orient="records"),
             }
 
-            # Generate plot
             plot_vif_scores(vif_df)
 
         if "condition_number" in results:
@@ -575,7 +537,6 @@ if __name__ == "__main__":
     logger.info("Loading features from %s", DATASET_FEATURES_PARQUET)
     df = pd.read_parquet(DATASET_FEATURES_PARQUET)
 
-    # Filter to train split only
     if "split" in df.columns:
         df = df[df["split"] == "train"].copy()
         df = df.drop(columns=["split"])

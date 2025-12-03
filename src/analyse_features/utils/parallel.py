@@ -89,7 +89,6 @@ def parallel_map(
     items_list = list(items)
 
     if n_jobs == 1 or len(items_list) == 1:
-        # Sequential execution for single core or single item
         return [func(item) for item in items_list]
 
     results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
@@ -177,25 +176,21 @@ def chunked_parallel(
     backend = backend or JOBLIB_BACKEND
     verbose = verbose if verbose is not None else JOBLIB_VERBOSITY
 
-    # Split items into chunks
     chunks = [
         items[i : i + chunk_size]
         for i in range(0, len(items), chunk_size)
     ]
 
     if n_jobs == 1 or len(chunks) == 1:
-        # Sequential execution
-        all_results = []
+        all_results: list[R] = []
         for chunk in chunks:
             all_results.extend(func(chunk))
         return all_results
 
-    # Parallel execution on chunks
     chunk_results = Parallel(n_jobs=n_jobs, backend=backend, verbose=verbose)(
         delayed(func)(chunk) for chunk in chunks
     )
 
-    # Flatten results
     all_results = []
     for result in chunk_results:
         all_results.extend(result)
@@ -204,7 +199,7 @@ def chunked_parallel(
 
 
 def parallel_dataframe_apply(
-    df_func: Callable,
+    df_func: Callable[..., Any],
     df_columns: list[str],
     n_jobs: int | None = None,
     **kwargs: Any,
@@ -258,7 +253,7 @@ class ParallelContext:
         self.verbose = verbose if verbose is not None else JOBLIB_VERBOSITY
         self._parallel: Parallel | None = None
 
-    def __enter__(self) -> "ParallelContext":
+    def __enter__(self) -> ParallelContext:
         """Enter the context."""
         self._parallel = Parallel(
             n_jobs=self.n_jobs,
@@ -267,7 +262,12 @@ class ParallelContext:
         )
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         """Exit the context."""
         self._parallel = None
 

@@ -1,4 +1,4 @@
-"""Tests for src.labelling.label_meta.train."""
+"""Tests for src.labelling.label_meta.train.logic."""
 
 import json
 import numpy as np
@@ -7,7 +7,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src.labelling.label_meta.train import (
+from src.labelling.label_meta.train.logic import (
     WalkForwardKFold,
     MetaEvaluationMetrics,
     MetaTrainingResult,
@@ -343,7 +343,7 @@ class TestOptimizationAvailability:
     def test_get_available_meta_optimizations_empty(self, tmp_path, mocker):
         """Test when no optimizations exist."""
         mocker.patch(
-            "src.labelling.label_meta.train.LABEL_META_OPTI_DIR",
+            "src.labelling.label_meta.train.logic.LABEL_META_OPTI_DIR",
             tmp_path / "nonexistent"
         )
 
@@ -353,7 +353,7 @@ class TestOptimizationAvailability:
     def test_get_available_meta_optimizations(self, tmp_path, mocker):
         """Test listing available optimizations."""
         mocker.patch(
-            "src.labelling.label_meta.train.LABEL_META_OPTI_DIR",
+            "src.labelling.label_meta.train.logic.LABEL_META_OPTI_DIR",
             tmp_path
         )
 

@@ -1,11 +1,11 @@
 """
-Relabel datasets with triple-barrier labels using GridSearch optimization.
+Relabel datasets with triple-barrier labels using Optuna optimization.
 
 Behaviour:
-- Uses sklearn's ParameterGrid for systematic grid search over barrier parameters.
+- Uses Optuna TPE sampler for efficient hyperparameter search.
 - tp = RISK_REWARD_RATIO * sl (configurable ratio).
 - Checks class proportion constraints for each configuration.
-- Runs walk-forward CV (logistic regression, balanced, F1-macro) to score valid configs.
+- Maximizes Sharpe ratio as objective.
 - Applies the best labels to all datasets (tree/linear/lstm).
 """
 
@@ -25,9 +25,8 @@ import logging
 from typing import Any, Dict, List, Tuple, cast
 
 import numpy as np
+import optuna
 import pandas as pd
-from sklearn.model_selection import ParameterGrid
-from tqdm import tqdm
 
 from src.labelling.triple_barriere.fast_barriers import get_events_primary_fast
 from src.labelling.label_primaire.utils import (
@@ -41,11 +40,14 @@ from src.path import (
     DATASET_FEATURES_LSTM_FINAL_PARQUET,
 )
 
-logger = logging.getLogger("relabel_gridsearch")
+logger = logging.getLogger("relabel_optuna")
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
+# Silence Optuna's verbose logging
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # ============================================================================
 # Configuration
@@ -59,31 +61,26 @@ DATASET_PATHS: Dict[str, Path] = {
 
 SOURCE_DATASET = "linear"
 
-# GridSearch parameter space (expanded thanks to Numba 130x speedup)
-PARAM_GRID: dict[str, list[Any]] = {
-    # Stop-loss multiplier (× volatility) - wider range with finer steps
-    "sl_mult": [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0],
-    # Minimum return threshold for neutral label
-    "min_return": [0.00015, 0.0002, 0.00025, 0.0003, 0.0004, 0.0005],
-    # Maximum holding period in bars
-    "max_holding": [15, 20, 25, 30, 40, 50],
+# Optuna search space (continuous ranges)
+SEARCH_SPACE = {
+    "sl_mult": (0.3, 2.5),  # Stop-loss multiplier (× volatility)
+    "min_return": (0.0001, 0.001),  # Minimum return threshold
+    "max_holding": (10, 60),  # Maximum holding period in bars
 }
-# Total: 12 × 8 × 8 = 768 combinations (~6s with Numba vs ~13min without)
+
+# Optuna settings
+N_TRIALS = 100  # Number of optimization trials
+STUDY_NAME = "triple_barrier_optimization"
 
 # Volatility estimation
 VOL_SPAN = 100
 
 # Class proportion constraints
-MIN_CLASS_RATIO = 0.25
-MAX_CLASS_RATIO = 0.45
+MIN_CLASS_RATIO = 0.20
+MAX_CLASS_RATIO = 0.50
 
-# Dataset sampling (with Numba, we can use more data)
-DATASET_FRACTION = 0.5  # Use full dataset (Numba makes this fast)
-
-# Economic metrics weights for scoring (sum to 1.0)
-METRIC_WEIGHTS = {
-    "sharpe": 1.0,
-}
+# Dataset sampling
+DATASET_FRACTION = 1.0  # Use full train dataset
 
 
 # ============================================================================
@@ -124,14 +121,22 @@ def get_feature_columns(df: pd.DataFrame) -> List[str]:
 def prepare_data(
     vol_span: int = VOL_SPAN,
     fraction: float = DATASET_FRACTION,
+    use_train_only: bool = True,
 ) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
     """Load and prepare source dataset with close prices and volatility.
 
     Args:
         vol_span: Span for volatility estimation.
         fraction: Fraction of dataset to use (0.0 to 1.0). Takes the last N% of data.
+        use_train_only: If True, filter to train split only (avoids data leakage).
     """
     features_df = load_features(DATASET_PATHS[SOURCE_DATASET])
+
+    # Filter to train split only to avoid data leakage during grid search
+    if use_train_only and "split" in features_df.columns:
+        n_before = len(features_df)
+        features_df = features_df[features_df["split"] == "train"].copy()
+        logger.info("Filtered to train split: %d -> %d samples", n_before, len(features_df))
 
     # Sample dataset (take last fraction to preserve time series continuity)
     if 0.0 < fraction < 1.0:
@@ -152,7 +157,7 @@ def prepare_data(
 
     volatility = get_daily_volatility(close, span=vol_span)
 
-    return features_df, close, volatility
+    return cast(pd.DataFrame, features_df), close, volatility
 
 
 # ============================================================================
@@ -299,51 +304,52 @@ def compute_economic_metrics(
 
 
 # ============================================================================
-# GridSearch
+# Optuna Optimization
 # ============================================================================
 
 
-class TripleBarrierGridSearch:
-    """GridSearch for triple-barrier labelling parameters using economic metrics."""
+class TripleBarrierOptimizer:
+    """Optuna-based optimizer for triple-barrier labelling parameters."""
 
     def __init__(
         self,
-        param_grid: Dict[str, List[Any]],
+        search_space: Dict[str, Tuple[float, float]] = SEARCH_SPACE,
+        n_trials: int = N_TRIALS,
         vol_span: int = VOL_SPAN,
     ):
-        self.param_grid = param_grid
+        self.search_space = search_space
+        self.n_trials = n_trials
         self.vol_span = vol_span
 
         self.best_params_: Dict[str, Any] | None = None
         self.best_score_: float = float("-inf")
         self.best_metrics_: Dict[str, float] | None = None
-        self.best_df_: pd.DataFrame | None = None
-        self.results_: List[Dict[str, Any]] = []
+        self.study_: optuna.Study | None = None
 
-    def fit(
+    def _create_objective(
         self,
         features_df: pd.DataFrame,
         close: pd.Series,
         volatility: pd.Series,
-    ) -> "TripleBarrierGridSearch":
-        """Run grid search over all parameter combinations."""
-        grid = list(ParameterGrid(self.param_grid))
-        n_combinations = len(grid)
+    ) -> Any:
+        """Create the Optuna objective function."""
 
-        logger.info("Starting GridSearch with %d parameter combinations", n_combinations)
-
-        pbar = tqdm(grid, desc="GridSearch", unit="combo", position=0)
-        for params in pbar:
-            sl_mult = params["sl_mult"]
-            min_return = params["min_return"]
-            max_holding = params["max_holding"]
-
-            # Update progress bar
-            pbar.set_postfix(
-                sl=f"{sl_mult:.2f}",
-                min_ret=f"{min_return:.5f}",
-                hold=max_holding,
-                best=f"{self.best_score_:.3f}" if self.best_score_ > float("-inf") else "N/A",
+        def objective(trial: optuna.Trial) -> float:
+            # Sample parameters
+            sl_mult = trial.suggest_float(
+                "sl_mult",
+                self.search_space["sl_mult"][0],
+                self.search_space["sl_mult"][1],
+            )
+            min_return = trial.suggest_float(
+                "min_return",
+                self.search_space["min_return"][0],
+                self.search_space["min_return"][1],
+            )
+            max_holding = trial.suggest_int(
+                "max_holding",
+                int(self.search_space["max_holding"][0]),
+                int(self.search_space["max_holding"][1]),
             )
 
             # Compute labels and events
@@ -357,89 +363,117 @@ class TripleBarrierGridSearch:
                     max_holding=max_holding,
                 )
             except Exception as e:
-                tqdm.write(f"  [FAIL] sl={sl_mult:.2f} min_ret={min_return:.5f} hold={max_holding}: {e}")
-                self._record_result(params, float("-inf"), {}, {}, valid=False)
-                continue
+                logger.debug("Trial failed: %s", e)
+                return float("-inf")
 
             # Check class proportions
-            label_stats = compute_label_stats(cast(pd.Series, labeled_df["label"]))
             if not check_class_proportions(labeled_df):
-                tqdm.write(
-                    f"  [SKIP] sl={sl_mult:.2f} min_ret={min_return:.5f} hold={max_holding} | "
-                    f"props: -1={label_stats['pct_-1']:.1f}% 0={label_stats['pct_0']:.1f}% +1={label_stats['pct_1']:.1f}%"
-                )
-                self._record_result(params, float("-inf"), label_stats, {}, valid=False)
-                continue
+                label_stats = compute_label_stats(cast(pd.Series, labeled_df["label"]))
+                trial.set_user_attr("skip_reason", "class_proportions")
+                trial.set_user_attr("label_stats", label_stats)
+                return float("-inf")
 
             # Compute economic metrics
             econ_metrics = compute_economic_metrics(events, close)
             score = float(econ_metrics["sharpe"])
 
-            if score == float("-inf"):
-                tqdm.write(
-                    f"  [SKIP] sl={sl_mult:.2f} min_ret={min_return:.5f} hold={max_holding} | "
-                    f"insufficient trades ({econ_metrics['n_trades']})"
-                )
-                self._record_result(params, score, label_stats, econ_metrics, valid=False)
-                continue
+            # Store metrics in trial
+            trial.set_user_attr("sharpe", econ_metrics["sharpe"])
+            trial.set_user_attr("n_trades", econ_metrics["n_trades"])
+            label_stats = compute_label_stats(cast(pd.Series, labeled_df["label"]))
+            trial.set_user_attr("label_stats", label_stats)
 
-            # Log valid result
-            is_new_best = score > self.best_score_
-            marker = " *** BEST ***" if is_new_best else ""
-            tqdm.write(
-                f"  [OK] sl={sl_mult:.2f} min_ret={min_return:.5f} hold={max_holding} | "
-                f"score={score:.3f} sharpe={econ_metrics['sharpe']:.2f} "
-                f"n={econ_metrics['n_trades']}{marker}"
-            )
+            return score
 
-            self._record_result(params, score, label_stats, econ_metrics, valid=True)
+        return objective
 
-            # Update best
-            if is_new_best:
-                self.best_score_ = score
-                self.best_params_ = params.copy()
-                self.best_metrics_ = econ_metrics.copy()
-                self.best_df_ = labeled_df
+    def fit(
+        self,
+        features_df: pd.DataFrame,
+        close: pd.Series,
+        volatility: pd.Series,
+    ) -> "TripleBarrierOptimizer":
+        """Run Optuna optimization."""
+        logger.info("=" * 70)
+        logger.info("Starting Optuna optimization with %d trials", self.n_trials)
+        logger.info("Search space:")
+        for param, (low, high) in self.search_space.items():
+            logger.info("  %s: [%.6f, %.6f]", param, low, high)
+        logger.info("=" * 70)
 
-        pbar.close()
+        # Create study with TPE sampler
+        self.study_ = optuna.create_study(
+            direction="maximize",
+            study_name=STUDY_NAME,
+            sampler=optuna.samplers.TPESampler(seed=42),
+        )
+
+        # Create objective
+        objective = self._create_objective(features_df, close, volatility)
+
+        # Run optimization with progress callback
+        self.study_.optimize(
+            objective,
+            n_trials=self.n_trials,
+            show_progress_bar=True,
+            callbacks=[self._log_trial_callback],
+        )
+
+        # Extract best results
+        if self.study_.best_trial is not None:
+            self.best_params_ = self.study_.best_params.copy()
+            self.best_score_ = self.study_.best_value
+            self.best_metrics_ = {
+                "sharpe": self.study_.best_trial.user_attrs.get("sharpe", 0.0),
+                "n_trades": self.study_.best_trial.user_attrs.get("n_trades", 0),
+            }
+
         self._log_summary()
         return self
 
-    def _record_result(
+    def _log_trial_callback(
         self,
-        params: Dict[str, Any],
-        score: float,
-        label_stats: Dict[str, float],
-        econ_metrics: Dict[str, float],
-        valid: bool,
+        study: optuna.Study,
+        trial: optuna.trial.FrozenTrial,
     ) -> None:
-        """Record result for this parameter combination."""
-        self.results_.append(
-            {
-                "params": params.copy(),
-                "score": score,
-                "label_stats": label_stats.copy(),
-                "econ_metrics": econ_metrics.copy(),
-                "valid": valid,
-            }
-        )
+        """Callback to log trial results."""
+        if trial.value is not None and trial.value > float("-inf"):
+            is_best = trial.number == study.best_trial.number
+            marker = " *** BEST ***" if is_best else ""
+            sharpe = trial.user_attrs.get("sharpe", 0.0)
+            n_trades = trial.user_attrs.get("n_trades", 0)
+            logger.info(
+                "Trial %3d: sl=%.3f min_ret=%.5f hold=%2d | sharpe=%.2f n=%d%s",
+                trial.number,
+                trial.params["sl_mult"],
+                trial.params["min_return"],
+                trial.params["max_holding"],
+                sharpe,
+                n_trades,
+                marker,
+            )
 
     def _log_summary(self) -> None:
-        """Log summary of grid search results."""
-        valid_count = sum(1 for r in self.results_ if r["valid"])
+        """Log summary of optimization results."""
+        if self.study_ is None:
+            return
+
+        n_complete = len([t for t in self.study_.trials if t.state == optuna.trial.TrialState.COMPLETE])
+        n_valid = len([t for t in self.study_.trials if t.value is not None and t.value > float("-inf")])
+
         logger.info("=" * 70)
-        logger.info("GridSearch Complete")
-        logger.info("  Total combinations: %d", len(self.results_))
-        logger.info("  Valid combinations: %d", valid_count)
+        logger.info("Optuna Optimization Complete")
+        logger.info("  Total trials: %d", len(self.study_.trials))
+        logger.info("  Completed trials: %d", n_complete)
+        logger.info("  Valid trials (sharpe > -inf): %d", n_valid)
 
         if self.best_params_ is not None and self.best_metrics_ is not None:
             logger.info("  Best parameters:")
-            logger.info("    sl_mult: %.2f", self.best_params_["sl_mult"])
-            logger.info("    min_return: %.5f", self.best_params_["min_return"])
+            logger.info("    sl_mult: %.4f", self.best_params_["sl_mult"])
+            logger.info("    min_return: %.6f", self.best_params_["min_return"])
             logger.info("    max_holding: %d", self.best_params_["max_holding"])
             logger.info("  Best economic metrics:")
-            logger.info("    Composite score: %.4f", self.best_score_)
-            logger.info("    Sharpe ratio: %.2f", self.best_metrics_["sharpe"])
+            logger.info("    Sharpe ratio: %.4f", self.best_score_)
             logger.info("    N trades: %d", self.best_metrics_["n_trades"])
         else:
             logger.warning("  No valid parameter combination found!")
@@ -447,19 +481,31 @@ class TripleBarrierGridSearch:
 
     def get_results_dataframe(self) -> pd.DataFrame:
         """Return results as a DataFrame for analysis."""
+        if self.study_ is None:
+            return pd.DataFrame()
+
         rows = []
-        for r in self.results_:
+        for trial in self.study_.trials:
+            if trial.state != optuna.trial.TrialState.COMPLETE:
+                continue
             row = {
-                "sl_mult": r["params"]["sl_mult"],
-                "min_return": r["params"]["min_return"],
-                "max_holding": r["params"]["max_holding"],
-                "score": r["score"],
-                "valid": r["valid"],
+                "trial": trial.number,
+                "sl_mult": trial.params.get("sl_mult"),
+                "min_return": trial.params.get("min_return"),
+                "max_holding": trial.params.get("max_holding"),
+                "score": trial.value,
+                "sharpe": trial.user_attrs.get("sharpe"),
+                "n_trades": trial.user_attrs.get("n_trades"),
+                "valid": trial.value is not None and trial.value > float("-inf"),
             }
-            row.update({f"label_{k}": v for k, v in r["label_stats"].items()})
-            row.update({f"econ_{k}": v for k, v in r["econ_metrics"].items()})
+            label_stats = trial.user_attrs.get("label_stats", {})
+            row.update({f"label_{k}": v for k, v in label_stats.items()})
             rows.append(row)
         return pd.DataFrame(rows)
+
+
+# Backward compatibility alias
+TripleBarrierGridSearch = TripleBarrierOptimizer
 
 
 # ============================================================================
@@ -483,10 +529,11 @@ def apply_labels_to_datasets(
     logger.info("  max_holding: %d", best_params["max_holding"])
     logger.info("=" * 70)
 
-    # Load full data (100%)
+    # Load full data (100%) - use_train_only=False to apply labels to all splits
     features_df, close, volatility = prepare_data(
         vol_span=VOL_SPAN,
         fraction=1.0,  # Use 100% of data
+        use_train_only=False,  # Apply labels to train + val + test
     )
 
     # Compute labels for full dataset
@@ -514,9 +561,11 @@ def apply_labels_to_datasets(
 
     # Also add t1 column for purging in opti.py
     if "t1" in events.columns:
-        labeled_df["t1"] = np.nan
+        # Convert to timezone-naive datetime to avoid dtype incompatibility warnings
+        t1_values = events["t1"].dt.tz_localize(None) if events["t1"].dt.tz is not None else events["t1"]
+        labeled_df["t1"] = pd.Series(pd.NaT, index=labeled_df.index, dtype="datetime64[ns]")
         common_idx = events.index.intersection(labeled_df.index)
-        labeled_df.loc[common_idx, "t1"] = events.loc[common_idx, "t1"]
+        labeled_df.loc[common_idx, "t1"] = t1_values.loc[common_idx]
 
     # Apply to all datasets
     for ds_name, path in DATASET_PATHS.items():
@@ -530,7 +579,7 @@ def apply_labels_to_datasets(
 
         # Add t1 column for purging
         if "t1" in labeled_df.columns:
-            df_with_labels["t1"] = np.nan
+            df_with_labels["t1"] = pd.Series(pd.NaT, index=df_with_labels.index, dtype="datetime64[ns]")
             df_with_labels.loc[common_idx, "t1"] = labeled_df.loc[common_idx, "t1"]
 
         # Save
@@ -552,50 +601,3 @@ def apply_labels_to_datasets(
             path.name,
         )
 
-
-# ============================================================================
-# Main
-# ============================================================================
-
-
-def main() -> None:
-    """Run triple-barrier GridSearch and apply best labels."""
-    logger.info("Loading source dataset: %s", SOURCE_DATASET)
-    features_df, close, volatility = prepare_data(
-        vol_span=VOL_SPAN,
-        fraction=DATASET_FRACTION,
-    )
-
-    logger.info(
-        "Dataset loaded: %d samples, %d features",
-        len(features_df),
-        len(get_feature_columns(features_df)),
-    )
-
-    # Run GridSearch
-    gridsearch = TripleBarrierGridSearch(
-        param_grid=PARAM_GRID,
-        vol_span=VOL_SPAN,
-    )
-    gridsearch.fit(features_df, close, volatility)
-
-    # Check results
-    if gridsearch.best_params_ is None or gridsearch.best_metrics_ is None:
-        logger.warning("No valid configuration found. Datasets not modified.")
-        return
-
-    # Apply best params to ALL data (recomputes labels for full dataset)
-    apply_labels_to_datasets(
-        best_params=gridsearch.best_params_,
-        best_metrics=gridsearch.best_metrics_,
-    )
-
-    # Save results summary
-    results_df = gridsearch.get_results_dataframe()
-    results_path = Path(__file__).parent / "gridsearch_results.csv"
-    results_df.to_csv(results_path, index=False)
-    logger.info("Results saved to: %s", results_path)
-
-
-if __name__ == "__main__":
-    main()

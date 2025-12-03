@@ -30,24 +30,13 @@ Use cases:
 
 from __future__ import annotations
 
+import warnings
+from datetime import datetime
+from typing import Any, cast
 
-from pathlib import Path
-import sys
-
-# Add project root to Python path for direct execution.
-# This must be done before importing src modules.
-_script_dir = Path(__file__).parent
-_project_root = _script_dir.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-
-import warnings  # noqa: E402
-from datetime import datetime  # noqa: E402
-from typing import Any, cast  # noqa: E402
-
-import numpy as np  # noqa: E402
-import pandas as pd  # type: ignore[import-untyped]  # noqa: E402
-from statsmodels.tsa.stattools import acf, pacf, grangercausalitytests  # type: ignore[import-untyped]  # noqa: E402
+import numpy as np
+import pandas as pd  # type: ignore[import-untyped]
+from statsmodels.tsa.stattools import acf, pacf, grangercausalitytests  # type: ignore[import-untyped]
 
 # Suppress statsmodels warnings for singular matrices and division by zero
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="statsmodels")

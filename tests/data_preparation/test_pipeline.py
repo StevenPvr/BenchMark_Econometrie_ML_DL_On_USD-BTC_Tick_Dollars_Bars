@@ -17,12 +17,12 @@ from src.data_preparation.preparation import (
 
 @pytest.fixture
 def mock_logger():
-    with patch("src.data_preparation.preparation.logger") as mock:
+    with patch("src.data_preparation.pipeline.logger") as mock:
         yield mock
 
 @pytest.fixture
 def mock_prepare_dollar_bars():
-    with patch("src.data_preparation.preparation.prepare_dollar_bars") as mock:
+    with patch("src.data_preparation.pipeline.prepare_dollar_bars") as mock:
         yield mock
 
 @pytest.fixture
@@ -84,7 +84,7 @@ class TestRunDollarBarsPipeline:
         mock_output = mock_output_dir / "bars.parquet"
 
         with patch("src.path.DATASET_CLEAN_PARQUET", mock_input), \
-             patch("src.data_preparation.preparation.DOLLAR_IMBALANCE_BARS_PARQUET", mock_output):
+             patch("src.data_preparation.pipeline.DOLLAR_IMBALANCE_BARS_PARQUET", mock_output):
 
              run_dollar_bars_pipeline(target_num_bars=100)
 

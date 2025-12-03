@@ -39,7 +39,8 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numba import njit  # type: ignore[import-untyped]
 
-from src.config_logging import get_logger
+from src.constants import EPS, JUMP_MIN_VARIANCE
+from src.utils import get_logger
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -51,6 +52,9 @@ __all__ = [
     "compute_jump_component",
     "compute_all_jump_features",
 ]
+
+# NOTE: Numba functions use literal values equivalent to EPS (1e-10) and
+# JUMP_MIN_VARIANCE (1e-15) because Numba cannot import Python constants.
 
 
 @njit(cache=True)

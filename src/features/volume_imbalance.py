@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd  # type: ignore[import-untyped]
 from numba import njit  # type: ignore[import-untyped]
 
-from src.config_logging import get_logger
+from src.utils import get_logger
 from src.features.trade_classification import (
     classify_trades_direct,
     classify_trades_tick_rule,

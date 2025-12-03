@@ -1,12 +1,14 @@
-"""Remove highly correlated features from final datasets.
+"""Remove highly correlated features from clear datasets and save as final.
 
 This script:
-1. Loads dataset_features_final (tree_based as reference)
+1. Loads dataset_features_clear (tree_based as reference)
 2. Computes Spearman correlation on train data
 3. Removes features with |correlation| > threshold
 4. Plots correlation matrix AFTER cleaning
 5. Applies to all datasets (tree_based, linear, lstm)
-6. Overwrites the original files
+6. Saves to *_final.parquet files (ready for analyse_features/)
+
+Pipeline: clear_features/ -> remove_correlated_features.py -> analyse_features/
 
 Usage:
     python remove_correlated_features.py
@@ -14,6 +16,16 @@ Usage:
 """
 
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Add project root to Python path for direct execution.
+_script_dir = Path(__file__).parent
+_project_root = _script_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 from typing import cast
 
 import argparse
@@ -26,6 +38,9 @@ import seaborn as sns
 
 from src.config_logging import get_logger, setup_logging
 from src.path import (
+    DATASET_FEATURES_CLEAR_PARQUET,
+    DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
+    DATASET_FEATURES_LSTM_CLEAR_PARQUET,
     DATASET_FEATURES_FINAL_PARQUET,
     DATASET_FEATURES_LINEAR_FINAL_PARQUET,
     DATASET_FEATURES_LSTM_FINAL_PARQUET,
@@ -34,8 +49,15 @@ from src.path import (
 
 logger = get_logger(__name__)
 
-# Datasets to process
-DATASETS = {
+# Input datasets (from clear_features/)
+INPUT_DATASETS = {
+    "tree_based": DATASET_FEATURES_CLEAR_PARQUET,
+    "linear": DATASET_FEATURES_LINEAR_CLEAR_PARQUET,
+    "lstm": DATASET_FEATURES_LSTM_CLEAR_PARQUET,
+}
+
+# Output datasets (final, ready for analyse_features/)
+OUTPUT_DATASETS = {
     "tree_based": DATASET_FEATURES_FINAL_PARQUET,
     "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
     "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
@@ -227,8 +249,8 @@ def main(threshold: float = DEFAULT_THRESHOLD) -> None:
     logger.info("=" * 70)
     logger.info("Threshold: corr > %.2f OR corr < -%.2f", threshold, threshold)
 
-    # Load reference dataset
-    ref_path = DATASETS["tree_based"]
+    # Load reference dataset (from clear features)
+    ref_path = INPUT_DATASETS["tree_based"]
     logger.info("\nLoading: %s", ref_path)
 
     df = pd.read_parquet(ref_path)
@@ -298,22 +320,26 @@ def main(threshold: float = DEFAULT_THRESHOLD) -> None:
     meta_cols_present = [c for c in META_COLUMNS if c in all_cols]
     cols_to_keep = meta_cols_present + [TARGET_COLUMN] + features_to_keep
 
-    for name, path in DATASETS.items():
-        logger.info("\n%s: %s", name, path)
+    for name in INPUT_DATASETS:
+        input_path = INPUT_DATASETS[name]
+        output_path = OUTPUT_DATASETS[name]
+        logger.info("\n%s:", name)
+        logger.info("  Input:  %s", input_path)
+        logger.info("  Output: %s", output_path)
 
-        if not path.exists():
-            logger.warning("  Not found, skipping")
+        if not input_path.exists():
+            logger.warning("  Input not found, skipping")
             continue
 
-        df_dataset = pd.read_parquet(path)
+        df_dataset = pd.read_parquet(input_path)
         original_cols = len(df_dataset.columns)
 
         cols_in_dataset = [c for c in cols_to_keep if c in df_dataset.columns]
         df_dataset = df_dataset[cols_in_dataset]
 
-        df_dataset.to_parquet(path, index=False)
+        df_dataset.to_parquet(output_path, index=False)
 
-        logger.info("  %d -> %d columns (saved)", original_cols, len(df_dataset.columns))
+        logger.info("  %d -> %d columns (saved to *_final)", original_cols, len(df_dataset.columns))
 
     logger.info("\n" + "=" * 70)
     logger.info("DONE")
