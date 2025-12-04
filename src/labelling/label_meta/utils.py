@@ -29,11 +29,42 @@ from src.path import (
 logger = get_logger(__name__)
 
 MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "lightgbm": {"class": "src.model.lightgbm_model.LightGBMModel", "dataset": "tree", "search_space": {}},
-    "xgboost": {"class": "src.model.xgboost_model.XGBoostModel", "dataset": "tree", "search_space": {}},
-    "randomforest": {"class": "src.model.random_forest_model.RandomForestModel", "dataset": "tree", "search_space": {}},
-    "ridge": {"class": "src.model.ridge_classifier.RidgeClassifierModel", "dataset": "linear", "search_space": {}},
-    "logistic": {"class": "src.model.logistic_classifier.LogisticClassifierModel", "dataset": "linear", "search_space": {}},
+    "lightgbm": {
+        "class": "src.model.lightgbm_model.LightGBMModel",
+        "dataset": "tree",
+        "search_space": {
+            "n_estimators": ("int", [50, 500]),
+            "max_depth": ("int", [2, 8]),
+            "learning_rate": ("float", [0.01, 0.3, "log"]),
+            "subsample": ("float", [0.6, 0.95]),
+            "colsample_bytree": ("float", [0.5, 0.95]),
+            "reg_alpha": ("float", [1e-8, 10.0, "log"]),
+            "reg_lambda": ("float", [1e-8, 10.0, "log"]),
+        },
+    },
+    "xgboost": {
+        "class": "src.model.xgboost_model.XGBoostModel",
+        "dataset": "tree",
+        "search_space": {
+            "n_estimators": ("int", [50, 800]),
+            "max_depth": ("int", [2, 10]),
+            "learning_rate": ("float", [0.001, 0.3, "log"]),
+            "subsample": ("float", [0.6, 0.95]),
+            "colsample_bytree": ("float", [0.5, 0.95]),
+            "reg_alpha": ("float", [1e-8, 10.0, "log"]),
+            "reg_lambda": ("float", [1e-8, 10.0, "log"]),
+            "min_child_weight": ("int", [1, 50]),
+            "gamma": ("float", [0.0, 5.0]),
+        },
+   
+    },
+    "ridge": {
+        "class": "src.model.ridge_classifier.RidgeClassifierModel",
+        "dataset": "linear",
+        "search_space": {
+            "alpha": ("float", [1e-6, 1000.0, "log"]),
+        },
+    },
 }
 
 TRIPLE_BARRIER_SEARCH_SPACE: Dict[str, Tuple[str, List[Any]]] = TRIPLE_BARRIER_SEARCH_SPACE_META
@@ -121,7 +152,16 @@ def get_dataset_for_model(model_name: str) -> pd.DataFrame:
 
 
 def _primary_labeled_path(primary_model_name: str) -> Path:
-    base = DATASET_FEATURES_FINAL_PARQUET
+    """Get path to labeled dataset for a primary model."""
+    if primary_model_name not in MODEL_REGISTRY:
+        raise ValueError(f"Unknown primary model: {primary_model_name}")
+    dataset_type = MODEL_REGISTRY[primary_model_name]["dataset"]
+    mapping = {
+        "tree": DATASET_FEATURES_FINAL_PARQUET,
+        "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+        "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
+    }
+    base = mapping[dataset_type]
     return base.parent / f"{base.stem}_{primary_model_name}.parquet"
 
 
@@ -147,7 +187,7 @@ def load_dollar_bars() -> pd.DataFrame:
     if "datetime_close" not in bars.columns:
         raise ValueError("Dollar bars must include 'datetime_close'.")
     bars = bars.set_index("datetime_close").sort_index()
-    bars["log_return"] = np.log(bars["close"]).diff()
+    bars["log_return"] = pd.Series(np.log(bars["close"]), index=bars.index).diff()
     return bars
 
 
@@ -189,10 +229,10 @@ def set_vertical_barriers_meta(
     t1_series = pd.Series(index=events.index, dtype=close_idx.dtype if hasattr(close_idx, "dtype") else "datetime64[ns]")
     for loc in events.index:
         try:
-            t0_pos = close_idx.get_loc(loc)
+            t0_pos = close_idx.get_loc(loc)  # type: ignore
         except KeyError:
             continue
-        end_pos = min(t0_pos + max_holding, len(close_idx) - 1)
+        end_pos = min(t0_pos + max_holding, len(close_idx) - 1)  # type: ignore
         t1_series.loc[loc] = close_idx[end_pos]
     events["t1"] = t1_series
     return events

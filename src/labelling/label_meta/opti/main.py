@@ -1,11 +1,20 @@
 """CLI entry point for meta-labeling optimization."""
 
+
+from pathlib import Path
+import sys
+
+# Add project root to Python path for direct execution.
+# This must be done before importing src modules.
+_script_dir = Path(__file__).parent
+_project_root = _script_dir.parent.parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 from src.config_logging import get_logger
 from src.labelling.label_meta.opti.logic import (
     MODEL_REGISTRY,
     WalkForwardCV,
-    get_bins,
-    get_events_meta,
     optimize_model,
 )
 from src.labelling.label_meta.utils import (
@@ -20,8 +29,6 @@ __all__ = [
     "MetaOptimizationConfig",
     "MetaOptimizationResult",
     "WalkForwardCV",
-    "get_bins",
-    "get_events_meta",
     "main",
     "optimize_model",
     "select_meta_model_interactive",
@@ -93,12 +100,11 @@ def main() -> None:
 
     result = optimize_model(config)
     logger.info(
-        "Optimization complete: best_score=%.4f after %s trials",
+        "Optimization complete: best MCC=%.4f after %s trials",
         result.best_score,
         result.n_trials,
     )
     logger.info("Best params: %s", result.best_params)
-    logger.info("Best triple barrier params: %s", result.best_triple_barrier_params)
 
 
 if __name__ == "__main__":  # pragma: no cover

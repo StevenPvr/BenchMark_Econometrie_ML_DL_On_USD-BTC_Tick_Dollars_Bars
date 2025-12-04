@@ -1,5 +1,4 @@
-"""
-Label Primaire - Primary Model Pipeline (De Prado Chapter 3).
+"""Label Primaire - Primary Model Pipeline (De Prado Chapter 3).
 
 This module implements the PRIMARY model that predicts trade DIRECTION.
 

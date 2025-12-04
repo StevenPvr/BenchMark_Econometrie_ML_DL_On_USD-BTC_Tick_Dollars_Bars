@@ -18,7 +18,13 @@ from src.labelling.label_primaire.utils import (
     get_dataset_for_model,
     load_model_class,
 )
-from src.path import LABEL_PRIMAIRE_OPTI_DIR, LABEL_PRIMAIRE_TRAIN_DIR
+from src.path import (
+    DATASET_FEATURES_FINAL_PARQUET,
+    DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+    DATASET_FEATURES_LSTM_FINAL_PARQUET,
+    LABEL_PRIMAIRE_OPTI_DIR,
+    LABEL_PRIMAIRE_TRAIN_DIR,
+)
 
 logger = get_logger(__name__)
 
@@ -66,6 +72,11 @@ class WalkForwardKFold:
             return train_idx
         val_start = X.index[val_idx[0]]
         t1_series = t1.iloc[train_idx]
+        # Ensure timezone compatibility: convert both to naive if needed
+        if isinstance(val_start, pd.Timestamp) and hasattr(val_start, 'tz') and val_start.tz is not None:
+            val_start = val_start.tz_localize(None)
+        if hasattr(t1_series, 'dt') and hasattr(t1_series.dtype, 'tz') and t1_series.dt.tz is not None:
+            t1_series = t1_series.dt.tz_localize(None)
         mask = ~(t1_series.notna() & (t1_series >= val_start))
         purged = train_idx[mask.to_numpy()]
         return purged if len(purged) > 0 else train_idx
@@ -218,6 +229,18 @@ def get_available_optimized_models() -> List[str]:
     return [p.stem.replace("_optimization", "") for p in LABEL_PRIMAIRE_OPTI_DIR.glob("*_optimization.json")]
 
 
+def _get_labeled_output_path(model_name: str) -> Path:
+    """Get output path for labeled dataset with OOF predictions."""
+    dataset_type = MODEL_REGISTRY[model_name]["dataset"]
+    mapping = {
+        "tree": DATASET_FEATURES_FINAL_PARQUET,
+        "linear": DATASET_FEATURES_LINEAR_FINAL_PARQUET,
+        "lstm": DATASET_FEATURES_LSTM_FINAL_PARQUET,
+    }
+    base = mapping[dataset_type]
+    return base.parent / f"{base.stem}_{model_name}.parquet"
+
+
 def generate_oof_predictions(
     features: pd.DataFrame,
     labels: pd.Series,
@@ -285,15 +308,21 @@ def train_model(
     config: TrainingConfig | None = None,
     opti_dir: Path | None = None,
     output_dir: Path | None = None,
-    n_splits: int = 5,
+    n_splits: int = 10,
 ) -> TrainingResult:
     """Train a primary model using optimized hyperparameters and generate OOF predictions."""
     cfg = config or TrainingConfig(model_name=model_name)
     optimized = load_optimized_params(model_name, opti_dir)
     model_params = optimized.get("model_params", {})
+    tb_params = optimized.get("triple_barrier_params", {})
 
     dataset = _ensure_labels(_prepare_dataset(model_name))
     train_df = _get_train_dataframe(dataset)
+
+    # Filter rows with missing labels before processing
+    valid_label_mask = train_df["label"].notna()
+    train_df = train_df.loc[valid_label_mask]
+    logger.info("Dropped %d rows with missing labels", (~valid_label_mask).sum())
 
     features = _remove_non_feature_cols(train_df)
     features = _handle_missing_values(features)
@@ -330,17 +359,31 @@ def train_model(
     model_path = model_dir / f"{model_name}_model.joblib"
     model.save(model_path)
 
-    # Save OOF predictions for meta-labelling
+    # Save FULL dataset with OOF predictions for meta-labelling
+    # Train set has OOF predictions, test set has NaN (will be predicted at eval time)
     n_classes = len(labels.unique())
-    oof_df = pd.DataFrame({
-        "prediction": oof_preds,
-        **{f"proba_{i}": oof_proba[:, i] if oof_proba is not None and oof_proba.ndim == 2 else np.nan
-           for i in range(n_classes)},
-        "label": labels.values,
-        "coverage": coverage,
-    }, index=features.index)
-    oof_path = model_dir / "oof_predictions.parquet"
-    oof_df.to_parquet(oof_path)
+
+    # Start with full dataset
+    full_labeled_df = dataset.copy()
+
+    # Initialize columns with NaN
+    full_labeled_df["prediction"] = np.nan
+    for i in range(n_classes):
+        full_labeled_df[f"proba_{i}"] = np.nan
+    full_labeled_df["coverage"] = 0
+
+    # Fill in OOF values for train set
+    train_idx = train_df.index
+    full_labeled_df.loc[train_idx, "prediction"] = oof_preds
+    for i in range(n_classes):
+        if oof_proba is not None and oof_proba.ndim == 2:
+            full_labeled_df.loc[train_idx, f"proba_{i}"] = oof_proba[:, i]
+    full_labeled_df.loc[train_idx, "coverage"] = coverage
+
+    labeled_output_path = _get_labeled_output_path(model_name)
+    full_labeled_df.to_parquet(labeled_output_path)
+    logger.info("Full labeled dataset saved to %s (train: %d, test: %d)",
+                labeled_output_path, len(train_df), len(dataset) - len(train_df))
 
     label_dist_train = labels.value_counts().to_dict()
 
@@ -356,7 +399,7 @@ def train_model(
         label_distribution_test={},
         n_folds=n_splits,
         model_path=str(model_path),
-        oof_predictions_path=str(oof_path),
+        oof_predictions_path=str(labeled_output_path),
         test_predictions_path="",
     )
 

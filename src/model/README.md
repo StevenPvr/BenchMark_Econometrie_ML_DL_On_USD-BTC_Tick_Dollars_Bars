@@ -13,13 +13,9 @@ model/
 │   ├── random_baseline.py
 │   └── main.py
 ├── ridge_classifier.py        # Ridge Regression
-├── lasso_classifier.py        # Lasso Regression
-├── elasticnet_classifier.py   # ElasticNet
-├── logistic_classifier.py     # Logistic Regression
 ├── random_forest_model.py     # Random Forest
 ├── xgboost_model.py           # XGBoost
 ├── lightgbm_model.py          # LightGBM
-├── catboost_model.py          # CatBoost
 └── lstm_model.py              # LSTM (PyTorch)
 ```
 
@@ -58,9 +54,6 @@ class BaseModel(ABC):
 ### Modeles Econometriques (Lineaires)
 
 - **Ridge** : Regression avec regularisation L2
-- **Lasso** : Regression avec regularisation L1
-- **ElasticNet** : Combinaison L1 + L2
-- **Logistic** : Classification logistique
 
 ### Machine Learning (Tree-based)
 

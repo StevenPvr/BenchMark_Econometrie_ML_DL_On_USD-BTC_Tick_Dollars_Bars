@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -208,8 +208,8 @@ def compute_metrics(
         f1_macro=float(f1_score(y_true, y_pred, average="macro", zero_division=0.0)),  # type: ignore
         f1_weighted=float(f1_score(y_true, y_pred, average="weighted", zero_division=0.0)),  # type: ignore
         f1_per_class=f1_per_class,
-        precision_macro=float(precision_score(y_true, y_pred, average="macro", zero_division=0.0)),  # type: ignore
-        precision_weighted=float(precision_score(y_true, y_pred, average="weighted", zero_division=0.0)),  # type: ignore
+        precision_macro=float(precision_score(y_true, y_pred, average="macro", zero_division=0)),  # type: ignore
+        precision_weighted=float(precision_score(y_true, y_pred, average="weighted", zero_division=0)),  # type: ignore
         recall_macro=float(recall_score(y_true, y_pred, average="macro", zero_division=0.0)),  # type: ignore
         recall_weighted=float(recall_score(y_true, y_pred, average="weighted", zero_division=0.0)),  # type: ignore
         mcc=float(matthews_corrcoef(y_true, y_pred)),
@@ -236,36 +236,60 @@ def _split_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:  # ty
 
 
 def _prepare_features_and_labels(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:  # type: ignore
-    features = df.drop(columns=["label", "t1"], errors="ignore")
+    non_feature_cols = {
+        "label", "t1", "split", "prediction", "coverage",
+        "bar_id", "datetime_close", "datetime_open",
+        "timestamp_open", "timestamp_close", "log_return", "threshold_used",
+    }
+    # Also remove proba_* columns
+    cols_to_drop = [c for c in df.columns if c in non_feature_cols or c.startswith("proba_")]
+    features = df.drop(columns=cols_to_drop, errors="ignore")
     labels = df["label"]
     return features, labels  # type: ignore
 
 
 def evaluate_model(model_name: str) -> EvaluationResult:
-    """Evaluate a trained model on train and test splits."""
+    """Evaluate a trained model on train and test splits.
+
+    Uses OOF predictions for train set to avoid data leakage.
+    """
     model = load_model(model_name)
     data = load_data(model_name)
     train_df, test_df = _split_dataset(data)
 
-    X_train, y_train = _prepare_features_and_labels(train_df)
     X_test, y_test = _prepare_features_and_labels(test_df if not test_df.empty else train_df)
 
-    y_pred_train = model.predict(X_train)
+    # Use OOF predictions from labeled dataset (avoids data leakage)
+    if "prediction" in train_df.columns and "coverage" in train_df.columns:
+        valid_train = train_df[train_df["coverage"] == 1]
+        y_pred_train = cast(pd.Series, valid_train["prediction"]).to_numpy()
+        y_train_oof = cast(pd.Series, valid_train["label"]).to_numpy()
+        proba_cols = [c for c in valid_train.columns if c.startswith("proba_")]
+        y_proba_train = cast(pd.DataFrame, valid_train[proba_cols]).to_numpy() if proba_cols else None
+        logger.info("Using OOF predictions for train eval (%d/%d samples)", len(valid_train), len(train_df))
+    else:
+        # Fallback to direct prediction (with leakage warning)
+        logger.warning("No OOF predictions found, using direct prediction (data leakage!)")
+        X_train, y_train_oof = _prepare_features_and_labels(train_df)
+        y_pred_train = model.predict(X_train)
+        y_proba_train = model.predict_proba(X_train) if hasattr(model, "predict_proba") else None  # type: ignore
+
+    # Test set: always use direct prediction (model never saw test data)
     y_pred_test = model.predict(X_test)
-    y_proba_train = model.predict_proba(X_train) if hasattr(model, "predict_proba") else None  # type: ignore
     y_proba_test = model.predict_proba(X_test) if hasattr(model, "predict_proba") else None  # type: ignore
 
-    train_metrics = compute_metrics(y_train, y_pred_train, y_proba_train).to_dict()  # type: ignore
+    train_metrics = compute_metrics(y_train_oof, y_pred_train, y_proba_train).to_dict()  # type: ignore
     test_metrics = compute_metrics(y_test, y_pred_test, y_proba_test).to_dict()  # type: ignore
 
-    label_distribution_train = {"counts": y_train.value_counts().to_dict(), "percentages": (y_train.value_counts(normalize=True) * 100).to_dict()}
+    y_train_series = pd.Series(y_train_oof)
+    label_distribution_train = {"counts": y_train_series.value_counts().to_dict(), "percentages": (y_train_series.value_counts(normalize=True) * 100).to_dict()}
     label_distribution_test = {"counts": y_test.value_counts().to_dict(), "percentages": (y_test.value_counts(normalize=True) * 100).to_dict()}
 
     return EvaluationResult(
         model_name=model_name,
         train_metrics=train_metrics,
         test_metrics=test_metrics,
-        train_samples=len(y_train),
+        train_samples=len(y_train_oof),
         test_samples=len(y_test),
         label_distribution_train=label_distribution_train,
         label_distribution_test=label_distribution_test,

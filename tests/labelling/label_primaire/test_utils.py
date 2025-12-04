@@ -41,10 +41,7 @@ def test_registry_contains_expected_models():
     expected = [
         "lightgbm",
         "xgboost",
-        "catboost",
-        "random_forest",
         "ridge",
-        "logistic",
         "lstm",
     ]
     for model in expected:
@@ -311,7 +308,7 @@ def test_focal_loss_supported_models():
 
 def test_class_weight_supported_models():
     """Test class weight supported models list."""
-    expected_supported = ["lightgbm", "catboost", "random_forest", "logistic"]
+    expected_supported = ["lightgbm", "xgboost"]
     for model in expected_supported:
         assert model in CLASS_WEIGHT_SUPPORTED_MODELS
 

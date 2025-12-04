@@ -643,7 +643,6 @@ CLASS_WEIGHT_SUPPORTED_MODELS_PRIMARY: List[str] = [
     "lightgbm",
     "catboost",
     "xgboost",
-    "logistic",
 ]
 FOCAL_LOSS_SEARCH_SPACE_PRIMARY: Dict[str, Tuple[str, List[Any]]] = {
     "use_focal_loss": ("categorical", [True, False]),
@@ -698,3 +697,48 @@ CLEAR_FEATURES_LOG_USE_LOG1P: bool = True
 
 # Batch processing
 CLEAR_FEATURES_SAVE_BATCH_SIZE: int = 500_000
+
+# ============================================================================
+# TRIPLE BARRIER RELABELING CONSTANTS (triple_barriere module)
+# ============================================================================
+
+# Optuna optimization settings
+TRIPLE_BARRIER_RELABEL_N_TRIALS: int = 200
+
+# Volatility estimation span
+TRIPLE_BARRIER_RELABEL_VOL_SPAN: int = 100
+
+# Class proportion constraints for balanced labels
+TRIPLE_BARRIER_RELABEL_MIN_CLASS_RATIO: float = 0.20
+TRIPLE_BARRIER_RELABEL_MAX_CLASS_RATIO: float = 0.50
+
+# Dataset sampling fraction
+TRIPLE_BARRIER_RELABEL_DATASET_FRACTION: float = 1.0
+
+# Search space ranges for Optuna
+TRIPLE_BARRIER_RELABEL_SL_MULT_RANGE: Tuple[float, float] = (0.3, 2.5)
+TRIPLE_BARRIER_RELABEL_MIN_RETURN_RANGE: Tuple[float, float] = (0.0001, 0.001)
+TRIPLE_BARRIER_RELABEL_MAX_HOLDING_RANGE: Tuple[int, int] = (10, 60)
+
+# Trading costs configuration for crypto (BTC/USDT)
+# Total cost includes: exchange fees, slippage, bid-ask spread
+TRIPLE_BARRIER_RELABEL_INITIAL_CAPITAL: float = 10_000.0
+TRIPLE_BARRIER_RELABEL_TOTAL_COST_PCT: float = 0.01  # 1% per round-trip
+
+# ============================================================================
+# META-LABELING EVALUATION CONSTANTS
+# ============================================================================
+
+# Initial portfolio value for P&L calculation in euros
+META_EVAL_INITIAL_CAPITAL: float = 10_000.0
+
+# Trading costs per round-trip (entry + exit)
+# Exchange fees: 0.1% maker/taker × 2 sides = 0.2-0.4%
+# Slippage: 0.1-0.5% depending on liquidity
+# Bid/ask spread: 0.05-0.2%
+# Conservative total: ~1% per round-trip
+META_EVAL_TOTAL_COST_PCT: float = 0.01
+
+# Annualization factor for Sharpe ratio
+# Dollar bars are irregular, assume ~250 trading days, ~50 bars/day avg
+META_EVAL_BARS_PER_YEAR: int = 12500

@@ -1,0 +1,27 @@
+{
+  "model_name": "lightgbm",
+  "best_params": {
+    "n_estimators": 605,
+    "max_depth": 2,
+    "num_leaves": 28,
+    "learning_rate": 0.005735,
+    "subsample": 0.6297,
+    "colsample_bytree": 0.8555,
+    "reg_alpha": 4.604,
+    "reg_lambda": 0.1701,
+    "min_child_samples": 89,
+    "use_focal_loss": true,
+    "focal_gamma": 0,
+    "minority_weight_boost": 1.25
+  },
+  "best_triple_barrier_params": {},
+  "best_focal_loss_params": {
+    "use_focal_loss": true,
+    "focal_gamma": 0
+  },
+  "best_score": 0.3214,
+  "metric": "composite_score",
+  "n_trials": 73,
+  "cv_scores": [],
+  "timestamp": "2024-12-04T07:04:44Z"
+}

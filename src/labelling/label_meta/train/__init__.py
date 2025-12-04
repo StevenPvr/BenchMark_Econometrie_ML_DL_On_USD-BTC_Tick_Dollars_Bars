@@ -1,5 +1,7 @@
 """Training package for meta-label models."""
 
+from __future__ import annotations
+
 from src.labelling.label_meta.train.logic import (
     MetaEvaluationMetrics,
     MetaTrainingConfig,

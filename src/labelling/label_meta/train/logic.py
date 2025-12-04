@@ -1,6 +1,8 @@
 """Training pipeline for meta-labeling models."""
 
+
 from __future__ import annotations
+
 
 import json
 from dataclasses import dataclass, field
@@ -18,7 +20,7 @@ from src.labelling.label_meta.utils import (
     get_available_primary_models,
     load_model_class,
 )
-from src.path import LABEL_META_OPTI_DIR, LABEL_META_TRAIN_DIR, LABEL_PRIMAIRE_TRAIN_DIR
+from src.path import LABEL_META_OPTI_DIR, LABEL_META_TRAIN_DIR
 
 logger = get_logger(__name__)
 
@@ -115,7 +117,8 @@ def _compute_class_weights(y: pd.Series) -> Dict[int, float]:
 def _remove_non_feature_cols(df: pd.DataFrame) -> pd.DataFrame:
     non_feature_cols = {
         "bar_id", "split", "datetime_close", "label", "prediction", "t1",
-        "timestamp_open", "timestamp_close", "datetime_open", "threshold_used", "log_return",
+        "timestamp_open", "timestamp_close", "datetime_open", "threshold_used",
+        "log_return", "coverage",
     }
     feature_cols = [c for c in df.columns if c not in non_feature_cols]
     return cast(pd.DataFrame, df[feature_cols])
@@ -130,59 +133,43 @@ def _handle_missing_values(features_df: pd.DataFrame) -> pd.DataFrame:
     return filled
 
 
-def _load_primary_oof_predictions(primary_model_name: str) -> pd.DataFrame:
-    """Load OOF predictions from the trained primary model."""
-    oof_path = LABEL_PRIMAIRE_TRAIN_DIR / primary_model_name / "oof_predictions.parquet"
-    if not oof_path.exists():
-        raise FileNotFoundError(
-            f"OOF predictions not found for primary model '{primary_model_name}'. "
-            f"Train the primary model first. Expected path: {oof_path}"
-        )
-    return pd.read_parquet(oof_path)
-
-
 def build_meta_features(
     primary_model_name: str,
     filter_neutral_labels: bool = True,
 ) -> tuple[pd.DataFrame, pd.Series]:
-    """Build meta-label features using OOF predictions from primary model."""
-    # Load primary model's OOF predictions
-    oof_df = _load_primary_oof_predictions(primary_model_name)
+    """Build meta-label features using OOF predictions from primary model.
 
-    # Load the full dataset with features
+    The labeled dataset contains prediction, coverage, and label columns from
+    the primary model training.
+    """
+    # Load labeled dataset (contains features + OOF predictions + labels)
     dataset = get_labeled_dataset_for_primary_model(primary_model_name)
-    if "datetime_close" in dataset.columns:
-        dataset = dataset.set_index("datetime_close")
-    dataset = dataset.sort_index()
 
-    # Align OOF predictions with dataset
-    common_idx = dataset.index.intersection(oof_df.index)
-    dataset = dataset.loc[common_idx]
-    oof_df = oof_df.loc[common_idx]
+    # Filter: valid OOF predictions only
+    if "coverage" not in dataset.columns or "prediction" not in dataset.columns:
+        raise ValueError(
+            f"Dataset for '{primary_model_name}' missing 'coverage' or 'prediction'. "
+            "Re-train the primary model to generate OOF predictions."
+        )
 
-    # Only use samples with valid OOF predictions
-    valid_mask = oof_df["coverage"] == 1
-    dataset = dataset.loc[valid_mask]
-    oof_df = oof_df.loc[valid_mask]
+    valid_mask = dataset["coverage"] == 1
+    dataset = dataset.loc[valid_mask].copy()
+    logger.info("Using %d samples with valid OOF predictions", len(dataset))
 
-    # Get labels and OOF predictions
-    labels = dataset["label"].copy()
-    oof_predictions = oof_df["prediction"].copy()
-
-    # Create meta-labels: 1 if primary model prediction matches label sign, 0 otherwise
-    meta_labels = np.where(labels * oof_predictions > 0, 1, 0)
-
-    # Filter neutral labels if requested
+    # Filter neutral predictions if requested (keep only directional trades)
     if filter_neutral_labels:
-        non_neutral_mask = labels != 0
-        dataset = dataset.loc[non_neutral_mask].copy()
-        meta_labels = meta_labels[non_neutral_mask]
-        oof_predictions = oof_predictions.loc[non_neutral_mask]
+        directional_mask = dataset["prediction"] != 0
+        dataset = dataset.loc[directional_mask].copy()
+        logger.info("After filtering neutral predictions: %d samples", len(dataset))
 
-    # Add side feature (the primary model's prediction)
-    features = dataset.copy()
-    features["side"] = oof_predictions.loc[features.index]
-    features = _remove_non_feature_cols(features)
+    # Create meta-label: 1 if primary prediction was correct, 0 otherwise
+    meta_labels = (dataset["prediction"] == dataset["label"]).astype(int)
+    logger.info("Meta label distribution: correct=%d (%.1f%%), incorrect=%d (%.1f%%)",
+                meta_labels.sum(), 100 * meta_labels.mean(),
+                len(meta_labels) - meta_labels.sum(), 100 * (1 - meta_labels.mean()))
+
+    # Prepare features
+    features = _remove_non_feature_cols(dataset)
     features = _handle_missing_values(features)
 
     return features, pd.Series(meta_labels, index=features.index)
@@ -265,7 +252,7 @@ def train_meta_model(
     # Save model
     model_dir = (output_dir or LABEL_META_TRAIN_DIR) / f"{primary_model_name}_{meta_model_name}"
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "meta_model.joblib"
+    model_path = model_dir / f"{meta_model_name}_model.joblib"
     model.save(model_path)
 
     label_dist = meta_labels.value_counts().to_dict()

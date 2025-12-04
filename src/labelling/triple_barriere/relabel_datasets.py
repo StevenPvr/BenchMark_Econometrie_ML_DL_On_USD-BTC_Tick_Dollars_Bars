@@ -21,16 +21,29 @@ _project_root = _script_dir.parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-import logging
 from typing import Any, Dict, List, Tuple, cast
 
 import numpy as np
 import optuna
 import pandas as pd
 
+from src.config_logging import get_logger
+from src.constants import (
+    DEFAULT_RANDOM_STATE,
+    LABELING_RISK_REWARD_RATIO,
+    TRIPLE_BARRIER_RELABEL_MIN_CLASS_RATIO,
+    TRIPLE_BARRIER_RELABEL_MAX_CLASS_RATIO,
+    TRIPLE_BARRIER_RELABEL_INITIAL_CAPITAL,
+    TRIPLE_BARRIER_RELABEL_TOTAL_COST_PCT,
+    TRIPLE_BARRIER_RELABEL_N_TRIALS,
+    TRIPLE_BARRIER_RELABEL_VOL_SPAN,
+    TRIPLE_BARRIER_RELABEL_DATASET_FRACTION,
+    TRIPLE_BARRIER_RELABEL_SL_MULT_RANGE,
+    TRIPLE_BARRIER_RELABEL_MIN_RETURN_RANGE,
+    TRIPLE_BARRIER_RELABEL_MAX_HOLDING_RANGE,
+)
 from src.labelling.triple_barriere.fast_barriers import get_events_primary_fast
 from src.labelling.label_primaire.utils import (
-    RISK_REWARD_RATIO,
     get_daily_volatility,
     load_dollar_bars,
 )
@@ -40,17 +53,13 @@ from src.path import (
     DATASET_FEATURES_LSTM_FINAL_PARQUET,
 )
 
-logger = logging.getLogger("relabel_optuna")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+logger = get_logger(__name__)
 
 # Silence Optuna's verbose logging
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # ============================================================================
-# Configuration
+# Configuration (from constants.py)
 # ============================================================================
 
 DATASET_PATHS: Dict[str, Path] = {
@@ -61,26 +70,26 @@ DATASET_PATHS: Dict[str, Path] = {
 
 SOURCE_DATASET = "linear"
 
-# Optuna search space (continuous ranges)
+# Optuna search space (from constants.py)
 SEARCH_SPACE = {
-    "sl_mult": (0.3, 2.5),  # Stop-loss multiplier (× volatility)
-    "min_return": (0.0001, 0.001),  # Minimum return threshold
-    "max_holding": (10, 60),  # Maximum holding period in bars
+    "sl_mult": TRIPLE_BARRIER_RELABEL_SL_MULT_RANGE,
+    "min_return": TRIPLE_BARRIER_RELABEL_MIN_RETURN_RANGE,
+    "max_holding": TRIPLE_BARRIER_RELABEL_MAX_HOLDING_RANGE,
 }
 
 # Optuna settings
-N_TRIALS = 100  # Number of optimization trials
+N_TRIALS = TRIPLE_BARRIER_RELABEL_N_TRIALS
 STUDY_NAME = "triple_barrier_optimization"
 
 # Volatility estimation
-VOL_SPAN = 100
+VOL_SPAN = TRIPLE_BARRIER_RELABEL_VOL_SPAN
 
 # Class proportion constraints
-MIN_CLASS_RATIO = 0.20
-MAX_CLASS_RATIO = 0.50
+MIN_CLASS_RATIO = TRIPLE_BARRIER_RELABEL_MIN_CLASS_RATIO
+MAX_CLASS_RATIO = TRIPLE_BARRIER_RELABEL_MAX_CLASS_RATIO
 
 # Dataset sampling
-DATASET_FRACTION = 1.0  # Use full train dataset
+DATASET_FRACTION = TRIPLE_BARRIER_RELABEL_DATASET_FRACTION
 
 
 # ============================================================================
@@ -187,7 +196,7 @@ def compute_labels(
         Tuple of (labeled_df, events_df).
     """
     t_events = pd.DatetimeIndex(features_df.index)
-    pt_mult = RISK_REWARD_RATIO * sl_mult
+    pt_mult = LABELING_RISK_REWARD_RATIO * sl_mult
 
     # Use Numba-optimized function (parallelization is handled internally)
     events = get_events_primary_fast(
@@ -261,6 +270,14 @@ def compute_label_stats(labels: pd.Series) -> Dict[str, float]:
 
 
 # ============================================================================
+# Trading Costs Configuration (from constants.py)
+# ============================================================================
+
+INITIAL_CAPITAL: float = TRIPLE_BARRIER_RELABEL_INITIAL_CAPITAL
+TOTAL_COST_PCT: float = TRIPLE_BARRIER_RELABEL_TOTAL_COST_PCT
+
+
+# ============================================================================
 # Economic Metrics Scoring
 # ============================================================================
 
@@ -268,38 +285,70 @@ def compute_label_stats(labels: pd.Series) -> Dict[str, float]:
 def compute_economic_metrics(
     events: pd.DataFrame,
     close: pd.Series,
+    initial_capital: float = INITIAL_CAPITAL,
+    cost_pct: float = TOTAL_COST_PCT,
 ) -> Dict[str, float]:
-    """Compute economic metrics from triple-barrier events.
+    """Compute economic metrics from triple-barrier events with realistic costs.
+
+    Uses simple returns. Cost is applied as a percentage of each trade's value.
 
     Args:
         events: DataFrame with 't1' (exit time), 'label', and 'ret' columns.
         close: Close price series.
+        initial_capital: Starting portfolio value (default 10,000€).
+        cost_pct: Cost as percentage of trade value (default 1%).
 
     Returns:
-        Dict with sharpe, n_trades.
+        Dict with sharpe_per_trade, total_return_pct, net_pnl, n_trades, win_rate.
     """
     # Filter valid trades (label != 0, has return)
     trades = events[events["label"] != 0].copy()
     if len(trades) < 10:
         return {
-            "sharpe": float("-inf"),
+            "sharpe_per_trade": 0.0,
+            "total_return_pct": 0.0,
+            "net_pnl": 0.0,
             "n_trades": 0,
+            "win_rate": 0.0,
         }
 
-    # Compute returns: label * actual return
-    # ret column contains the return achieved
-    returns = trades["label"] * trades["ret"]
+    # Compute gross returns: label * actual return
+    gross_returns = np.asarray(trades["label"] * trades["ret"])
 
-    # Sharpe Ratio (annualized, assuming ~252 trading days)
-    mean_ret = returns.mean()
-    std_ret = returns.std()
-    if std_ret > 0:
-        sharpe = (mean_ret / std_ret) * np.sqrt(252)
+    # Net returns: subtract cost from absolute return
+    # If gross return is +1%, cost is 0.01 * 1% = 0.01%, net = +0.99%
+    # If gross return is -1%, cost is 0.01 * 1% = 0.01%, net = -1.01%
+    net_returns = gross_returns - cost_pct * np.abs(gross_returns)
+
+    n_trades = len(net_returns)
+
+    # Sharpe ratio per trade: mean / std * sqrt(n_trades)
+    mean_return = float(np.mean(net_returns))
+    std_return = float(np.std(net_returns, ddof=1))
+    if std_return > 0:
+        sharpe_per_trade = (mean_return / std_return) * np.sqrt(n_trades)
     else:
-        sharpe = 0.0
+        sharpe_per_trade = 0.0
 
+    # Win rate (net profitable trades)
+    n_profitable = int(np.sum(net_returns > 0))
+    win_rate = n_profitable / n_trades if n_trades > 0 else 0.0
 
-    return {"sharpe": float(sharpe), "n_trades": len(trades)}
+    # Total return: sum of returns
+    total_return = float(np.sum(net_returns))
+    # Convert to percentage
+    total_return_pct = total_return * 100
+
+    # Net P&L in euros (approximate for display)
+    net_pnl = initial_capital * total_return
+
+    return {
+        "sharpe_per_trade": float(sharpe_per_trade),
+        "total_return_pct": float(total_return_pct),
+        "net_pnl": float(net_pnl),
+        "n_trades": n_trades,
+        "win_rate": float(win_rate),
+    }
 
 
 
@@ -373,13 +422,17 @@ class TripleBarrierOptimizer:
                 trial.set_user_attr("label_stats", label_stats)
                 return float("-inf")
 
-            # Compute economic metrics
+            # Compute economic metrics (with costs)
             econ_metrics = compute_economic_metrics(events, close)
-            score = float(econ_metrics["sharpe"])
+            # Maximize Sharpe ratio per trade
+            score = float(econ_metrics["sharpe_per_trade"])
 
             # Store metrics in trial
-            trial.set_user_attr("sharpe", econ_metrics["sharpe"])
+            trial.set_user_attr("sharpe_per_trade", econ_metrics["sharpe_per_trade"])
+            trial.set_user_attr("total_return_pct", econ_metrics["total_return_pct"])
+            trial.set_user_attr("net_pnl", econ_metrics["net_pnl"])
             trial.set_user_attr("n_trades", econ_metrics["n_trades"])
+            trial.set_user_attr("win_rate", econ_metrics["win_rate"])
             label_stats = compute_label_stats(cast(pd.Series, labeled_df["label"]))
             trial.set_user_attr("label_stats", label_stats)
 
@@ -405,7 +458,7 @@ class TripleBarrierOptimizer:
         self.study_ = optuna.create_study(
             direction="maximize",
             study_name=STUDY_NAME,
-            sampler=optuna.samplers.TPESampler(seed=42),
+            sampler=optuna.samplers.TPESampler(seed=DEFAULT_RANDOM_STATE),
         )
 
         # Create objective
@@ -424,8 +477,11 @@ class TripleBarrierOptimizer:
             self.best_params_ = self.study_.best_params.copy()
             self.best_score_ = self.study_.best_value
             self.best_metrics_ = {
-                "sharpe": self.study_.best_trial.user_attrs.get("sharpe", 0.0),
+                "sharpe_per_trade": self.study_.best_trial.user_attrs.get("sharpe_per_trade", 0.0),
+                "total_return_pct": self.study_.best_trial.user_attrs.get("total_return_pct", 0.0),
+                "net_pnl": self.study_.best_trial.user_attrs.get("net_pnl", 0.0),
                 "n_trades": self.study_.best_trial.user_attrs.get("n_trades", 0),
+                "win_rate": self.study_.best_trial.user_attrs.get("win_rate", 0.0),
             }
 
         self._log_summary()
@@ -440,17 +496,15 @@ class TripleBarrierOptimizer:
         if trial.value is not None and trial.value > float("-inf"):
             is_best = trial.number == study.best_trial.number
             marker = " *** BEST ***" if is_best else ""
-            sharpe = trial.user_attrs.get("sharpe", 0.0)
+            sharpe = trial.user_attrs.get("sharpe_per_trade", 0.0)
+            total_return_pct = trial.user_attrs.get("total_return_pct", 0.0)
             n_trades = trial.user_attrs.get("n_trades", 0)
+            win_rate = trial.user_attrs.get("win_rate", 0.0)
+            # Use f-string for formatting
             logger.info(
-                "Trial %3d: sl=%.3f min_ret=%.5f hold=%2d | sharpe=%.2f n=%d%s",
-                trial.number,
-                trial.params["sl_mult"],
-                trial.params["min_return"],
-                trial.params["max_holding"],
-                sharpe,
-                n_trades,
-                marker,
+                f"Trial {trial.number:3d}: sl={trial.params['sl_mult']:.3f} "
+                f"min_ret={trial.params['min_return']:.5f} hold={trial.params['max_holding']:2d} | "
+                f"sharpe={sharpe:.2f} ret={total_return_pct:+.1f}% wr={win_rate * 100:.1f}% n={n_trades:,d}{marker}"
             )
 
     def _log_summary(self) -> None:
@@ -465,15 +519,17 @@ class TripleBarrierOptimizer:
         logger.info("Optuna Optimization Complete")
         logger.info("  Total trials: %d", len(self.study_.trials))
         logger.info("  Completed trials: %d", n_complete)
-        logger.info("  Valid trials (sharpe > -inf): %d", n_valid)
+        logger.info("  Valid trials: %d", n_valid)
 
         if self.best_params_ is not None and self.best_metrics_ is not None:
             logger.info("  Best parameters:")
             logger.info("    sl_mult: %.4f", self.best_params_["sl_mult"])
             logger.info("    min_return: %.6f", self.best_params_["min_return"])
             logger.info("    max_holding: %d", self.best_params_["max_holding"])
-            logger.info("  Best economic metrics:")
-            logger.info("    Sharpe ratio: %.4f", self.best_score_)
+            logger.info("  Best metrics (with 1%% transaction costs):")
+            logger.info("    Sharpe per trade: %.2f", self.best_metrics_["sharpe_per_trade"])
+            logger.info("    Total return: %+.1f%%", self.best_metrics_["total_return_pct"])
+            logger.info("    Win rate: %.1f%%", self.best_metrics_["win_rate"] * 100)
             logger.info("    N trades: %d", self.best_metrics_["n_trades"])
         else:
             logger.warning("  No valid parameter combination found!")
@@ -493,8 +549,9 @@ class TripleBarrierOptimizer:
                 "sl_mult": trial.params.get("sl_mult"),
                 "min_return": trial.params.get("min_return"),
                 "max_holding": trial.params.get("max_holding"),
-                "score": trial.value,
-                "sharpe": trial.user_attrs.get("sharpe"),
+                "sharpe_per_trade": trial.user_attrs.get("sharpe_per_trade"),
+                "total_return_pct": trial.user_attrs.get("total_return_pct"),
+                "win_rate": trial.user_attrs.get("win_rate"),
                 "n_trades": trial.user_attrs.get("n_trades"),
                 "valid": trial.value is not None and trial.value > float("-inf"),
             }
@@ -551,8 +608,8 @@ def apply_labels_to_datasets(
     full_metrics = compute_economic_metrics(events, close)
     full_stats = compute_label_stats(cast(pd.Series, labeled_df["label"]))
     logger.info(
-        "Full dataset: sharpe=%.2f, n_trades=%d | -1=%.1f%%, 0=%.1f%%, +1=%.1f%%",
-        full_metrics["sharpe"],
+        "Full dataset: return=%+.1f%%, n_trades=%d | -1=%.1f%%, 0=%.1f%%, +1=%.1f%%",
+        full_metrics["total_return_pct"],
         full_metrics["n_trades"],
         full_stats["pct_-1"],
         full_stats["pct_0"],

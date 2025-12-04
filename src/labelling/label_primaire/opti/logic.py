@@ -30,8 +30,8 @@ def _optuna_logging_callback(study: optuna.Study, trial: optuna.trial.FrozenTria
     if trial.state == optuna.trial.TrialState.COMPLETE:
         # Extract detailed metrics from user_attrs
         attrs = trial.user_attrs
-        f1_per_class = attrs.get("f1_per_class", {})
-        f1_macro = attrs.get("mean_f1_macro", 0)
+        recall_per_class = attrs.get("recall_per_class", {})
+        recall_macro = attrs.get("mean_recall_macro", 0)
         sign_err = attrs.get("mean_sign_error_rate", 0)
         mcc = attrs.get("mean_mcc", 0)
         folds = f"{attrs.get('n_valid_folds', '?')}/{attrs.get('n_total_folds', '?')}"
@@ -41,11 +41,11 @@ def _optuna_logging_callback(study: optuna.Study, trial: optuna.trial.FrozenTria
         is_best = study.best_trial and study.best_trial.number == trial.number
         best_composite = study.best_value if study.best_trial else composite
 
-        # Build per-class F1 string
-        f1_class_str = " | ".join(
-            f"F1[{k.split('_')[-1]}]={v:.3f}"
-            for k, v in sorted(f1_per_class.items())
-        ) or "no F1 data"
+        # Build per-class recall string
+        recall_class_str = " | ".join(
+            f"R[{k.split('_')[-1]}]={v:.3f}"
+            for k, v in sorted(recall_per_class.items())
+        ) or "no recall data"
 
         # Compute sign penalty contribution
         sign_penalty_contrib = SIGN_ERROR_PENALTY * sign_err
@@ -57,11 +57,11 @@ def _optuna_logging_callback(study: optuna.Study, trial: optuna.trial.FrozenTria
 
         # Composite score breakdown
         print(f"  {BOLD}Composite Score:{RESET} {GREEN}{composite:.4f}{RESET}")
-        print(f"    ├─ F1 macro:       {f1_macro:.4f}")
+        print(f"    ├─ Recall macro:   {recall_macro:.4f}")
         print(f"    └─ Sign penalty:  -{sign_penalty_contrib:.4f} (err={sign_err*100:.1f}% × {SIGN_ERROR_PENALTY})")
 
-        # Per-class F1
-        print(f"  {BOLD}F1 per class:{RESET} {f1_class_str}")
+        # Per-class recall
+        print(f"  {BOLD}Recall per class:{RESET} {recall_class_str}")
 
         # Additional metrics
         print(f"  {BOLD}Other metrics:{RESET} MCC={mcc:.4f} | folds={folds}")
@@ -141,6 +141,11 @@ class WalkForwardCV:
             return train_idx
         val_start = X.index[val_idx[0]]
         t1 = events.reindex(X.index).iloc[train_idx]["t1"]
+        # Ensure timezone compatibility: convert both to naive if needed
+        if hasattr(val_start, 'tz') and val_start.tz is not None:  # type: ignore
+            val_start = val_start.tz_localize(None)  # type: ignore
+        if hasattr(t1.dtype, 'tz') and t1.dt.tz is not None:  # type: ignore
+            t1 = t1.dt.tz_localize(None)  # type: ignore
         mask = ~(t1.notna() & (t1 >= val_start))
         return train_idx[mask.to_numpy()]
 
@@ -172,41 +177,41 @@ def _compute_composite_score(
     y_pred: np.ndarray,
     sign_penalty: float = SIGN_ERROR_PENALTY,
 ) -> Tuple[float, Dict[str, float]]:
-    """Compute composite score: weighted F1 per class with sign error penalty.
+    """Compute composite score: recall macro with sign error penalty.
+
+    For meta-labeling (De Prado), the primary model should maximize recall
+    to capture all opportunities. The meta model will filter bad trades.
 
     Returns:
-        composite_score: The final score to optimize
-        details: Dictionary with per-class F1, sign_error_rate, etc.
+        composite_score: The final score to optimize (recall - sign penalty)
+        details: Dictionary with per-class metrics and sign_error_rate
     """
-    # F1 per class
+    # Recall per class
     classes = np.unique(np.concatenate([y_true, y_pred]))
-    f1_per_class = {}
+    recall_per_class = {}
     for cls in sorted(classes):
         cls_mask_true = y_true == cls
         cls_mask_pred = y_pred == cls
         if cls_mask_true.sum() > 0:
-            # Binary F1 for this class
             tp = (cls_mask_true & cls_mask_pred).sum()
-            fp = (~cls_mask_true & cls_mask_pred).sum()
             fn = (cls_mask_true & ~cls_mask_pred).sum()
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            f1_per_class[int(cls)] = float(f1)
+            recall_per_class[int(cls)] = float(recall)
 
-    # Weighted F1 (macro average)
-    f1_macro = float(np.mean(list(f1_per_class.values()))) if f1_per_class else 0.0
+    # Recall macro (average across classes)
+    recall_macro = float(np.mean(list(recall_per_class.values()))) if recall_per_class else 0.0
 
     # Sign error rate
     sign_error_rate = _compute_sign_error_rate(y_true, y_pred)
 
-    # Composite score: F1 macro - penalty * sign_error_rate
-    composite = f1_macro - sign_penalty * sign_error_rate
+    # Composite score: Recall macro - penalty * sign_error_rate
+    # Maximize recall to capture all opportunities (meta will filter)
+    composite = recall_macro - sign_penalty * sign_error_rate
 
     details = {
-        "f1_macro": f1_macro,
+        "recall_macro": recall_macro,
         "sign_error_rate": sign_error_rate,
-        **{f"f1_class_{k}": v for k, v in f1_per_class.items()},
+        **{f"recall_class_{k}": v for k, v in recall_per_class.items()},
     }
 
     return composite, details
@@ -252,8 +257,8 @@ def _evaluate_fold(
     """Train and evaluate a single CV fold.
 
     Returns:
-        composite_score: The composite F1 score with sign penalty
-        details: Per-class F1 scores and sign error rate
+        composite_score: The composite recall score with sign penalty
+        details: Per-class recall scores and sign error rate
         status: "OK", "SKIP", or "FAILED"
     """
     X_train = features.iloc[train_idx]
@@ -324,10 +329,10 @@ def _run_cv_scoring(
             composite_scores.append(composite)
             all_details.append(details)
             logger.debug(
-                "  Fold %d: composite=%.4f, F1_macro=%.4f, sign_err=%.2f%%, MCC=%.4f",
+                "  Fold %d: composite=%.4f, Recall_macro=%.4f, sign_err=%.2f%%, MCC=%.4f",
                 fold_idx,
                 composite,
-                details.get("f1_macro", 0),
+                details.get("recall_macro", 0),
                 details.get("sign_error_rate", 0) * 100,
                 details.get("mcc", 0),
             )
@@ -413,9 +418,10 @@ def create_objective(
     """Create an Optuna objective function using pre-computed labels.
 
     The objective maximizes a composite score:
-        composite = F1_macro - SIGN_ERROR_PENALTY * sign_error_rate
+        composite = Recall_macro - SIGN_ERROR_PENALTY * sign_error_rate
 
     This penalizes models that predict the wrong direction (e.g., +1 when true is -1).
+    De Prado approach: primary model maximizes recall, meta model filters bad trades.
     """
     cv = WalkForwardCV(config.n_splits, config.min_train_size)
 
@@ -446,32 +452,32 @@ def create_objective(
 
         # Aggregate per-fold details
         if all_details:
-            mean_f1_macro = float(np.mean([d.get("f1_macro", 0) for d in all_details]))
+            mean_recall_macro = float(np.mean([d.get("recall_macro", 0) for d in all_details]))
             mean_sign_err = float(np.mean([d.get("sign_error_rate", 0) for d in all_details]))
             mean_mcc = float(np.mean([d.get("mcc", 0) for d in all_details]))
 
-            # Per-class F1 averages
-            f1_by_class: Dict[str, List[float]] = {}
+            # Per-class recall averages
+            recall_by_class: Dict[str, List[float]] = {}
             for d in all_details:
                 for k, v in d.items():
-                    if k.startswith("f1_class_"):
-                        f1_by_class.setdefault(k, []).append(v)
-            mean_f1_per_class = {k: float(np.mean(v)) for k, v in f1_by_class.items()}
+                    if k.startswith("recall_class_"):
+                        recall_by_class.setdefault(k, []).append(v)
+            mean_recall_per_class = {k: float(np.mean(v)) for k, v in recall_by_class.items()}
         else:
-            mean_f1_macro = 0.0
+            mean_recall_macro = 0.0
             mean_sign_err = 0.0
             mean_mcc = 0.0
-            mean_f1_per_class = {}
+            mean_recall_per_class = {}
 
         # Store in trial attributes
         trial.set_user_attr("n_valid_folds", valid_folds)
         trial.set_user_attr("n_total_folds", total_folds)
         trial.set_user_attr("cv_reason", cv_reason)
-        trial.set_user_attr("mean_f1_macro", mean_f1_macro)
+        trial.set_user_attr("mean_recall_macro", mean_recall_macro)
         trial.set_user_attr("mean_sign_error_rate", mean_sign_err)
         trial.set_user_attr("mean_mcc", mean_mcc)
         trial.set_user_attr("composite_per_fold", composite_scores)
-        trial.set_user_attr("f1_per_class", mean_f1_per_class)
+        trial.set_user_attr("recall_per_class", mean_recall_per_class)
 
         return mean_composite
 
@@ -484,7 +490,7 @@ def create_objective(
 
 
 def _create_study(model_name: str) -> optuna.Study:
-    """Create an Optuna study aimed at maximizing composite F1 with sign penalty."""
+    """Create an Optuna study aimed at maximizing composite recall with sign penalty."""
     storage = LABEL_PRIMAIRE_OPTI_DIR / f"{model_name}_study.db"
     LABEL_PRIMAIRE_OPTI_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("Optuna study storage: %s", storage)
@@ -564,7 +570,7 @@ def _build_result(
     model_name: str,
     study: optuna.Study,
     best_focal_params: Dict[str, Any],
-    metric: str = "composite_f1",
+    metric: str = "composite_recall",
 ) -> OptimizationResult:
     """Convert study results into OptimizationResult."""
     best_score = float(study.best_value) if study.best_trials else 0.0
@@ -593,7 +599,7 @@ def _log_result(result: OptimizationResult, study: optuna.Study) -> None:
     logger.info("OPTIMIZATION COMPLETE: %s", result.model_name)
     logger.info("=" * 70)
     logger.info("Best composite score: %.4f after %d trials", result.best_score, result.n_trials)
-    logger.info("Composite = F1_macro - %.1f%% * sign_error_rate", SIGN_ERROR_PENALTY * 100)
+    logger.info("Composite = Recall_macro - %.1f%% * sign_error_rate", SIGN_ERROR_PENALTY * 100)
 
     if study.best_trial:
         logger.info("-" * 70)
@@ -603,22 +609,22 @@ def _log_result(result: OptimizationResult, study: optuna.Study) -> None:
 
         # Detailed metrics from best trial
         attrs = study.best_trial.user_attrs
-        mean_f1_macro = attrs.get("mean_f1_macro", 0)
+        mean_recall_macro = attrs.get("mean_recall_macro", 0)
         mean_sign_err = attrs.get("mean_sign_error_rate", 0)
         mean_mcc = attrs.get("mean_mcc", 0)
 
-        logger.info("F1 macro:        %.4f", mean_f1_macro)
+        logger.info("Recall macro:    %.4f", mean_recall_macro)
         logger.info("Sign error rate: %.1f%%", mean_sign_err * 100)
         logger.info("MCC:             %.4f", mean_mcc)
 
-        # Per-class F1
-        f1_per_class = attrs.get("f1_per_class", {})
-        if f1_per_class:
+        # Per-class Recall
+        recall_per_class = attrs.get("recall_per_class", {})
+        if recall_per_class:
             logger.info("-" * 70)
-            logger.info("F1 per class:")
-            for cls_key, f1_val in sorted(f1_per_class.items()):
+            logger.info("Recall per class:")
+            for cls_key, recall_val in sorted(recall_per_class.items()):
                 cls_label = cls_key.split("_")[-1]
-                logger.info("  Class %s: %.4f", cls_label, f1_val)
+                logger.info("  Class %s: %.4f", cls_label, recall_val)
 
         # Per-fold composite
         composite_per_fold = attrs.get("composite_per_fold", [])
@@ -636,7 +642,8 @@ def _log_result(result: OptimizationResult, study: optuna.Study) -> None:
 def optimize_model(model_name: str, config: OptimizationConfig | None = None) -> OptimizationResult:
     """Run Optuna optimization for a given model.
 
-    Uses composite score: F1_macro - SIGN_ERROR_PENALTY * sign_error_rate
+    Uses composite score: Recall_macro - SIGN_ERROR_PENALTY * sign_error_rate
+    (De Prado approach: primary model maximizes recall, meta model filters)
     """
     config = config or OptimizationConfig(model_name=model_name)
 
@@ -672,11 +679,11 @@ def optimize_model(model_name: str, config: OptimizationConfig | None = None) ->
         attrs = study.best_trial.user_attrs
         best_focal = {
             "use_class_weights": attrs.get("use_class_weights", True),
-            # Detailed metrics for reference
-            "mean_f1_macro": attrs.get("mean_f1_macro", 0),
+            # Detailed metrics (recall is primary metric per De Prado)
+            "mean_recall_macro": attrs.get("mean_recall_macro", 0),
             "mean_sign_error_rate": attrs.get("mean_sign_error_rate", 0),
             "mean_mcc": attrs.get("mean_mcc", 0),
-            "f1_per_class": attrs.get("f1_per_class", {}),
+            "recall_per_class": attrs.get("recall_per_class", {}),
             "sign_penalty_used": SIGN_ERROR_PENALTY,
         }
 

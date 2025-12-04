@@ -76,13 +76,6 @@ MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
             "alpha": ("float", [1e-6, 1000.0, "log"]),
         },
     },
-    "logistic": {
-        "class": "src.model.logistic_classifier.LogisticClassifierModel",
-        "dataset": "linear",
-        "search_space": {
-            "C": ("float", [1e-6, 1000.0, "log"]),
-        },
-    },
     "lstm": {
         "class": "src.model.lstm_model.LSTMModel",
         "dataset": "lstm",
